@@ -23,6 +23,14 @@ mkdir -p "$CARGO_TARGET_DIR"
 # Many agents share one target dir; keep each build small so the box stays usable.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 
+# Disk guard: stop new agent work before the filesystem gets critically full.
+# A past swarm hit 2 GB free and needed an emergency `cargo clean`.
+FREE_KB="$(df -P / | awk 'NR==2 {print $4}')"
+if [ "${FREE_KB:-0}" -lt 3145728 ]; then
+    echo "ERROR: less than 3 GB free ($FREE_KB KB). Stop builds and clean the target dir." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 # Per-agent scratch. std::env::temp_dir() honours TMPDIR, so Rust FATE tests
 # with fixed filenames (asynth-44100-2.wav etc.) stay isolated.
 export TMPDIR="/tmp/ai-agent/wedeo-agent-$WEDEO_AGENT_ID-tmp"
