@@ -15,9 +15,11 @@ use wedeo_codec_h264 as _;
 use wedeo_format_h264 as _;
 
 use wedeo_codec::registry;
+use wedeo_codec_h264::nal::{NalUnitType, split_annex_b};
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::Error;
 use wedeo_core::frame::FrameData;
+use wedeo_core::packet::Packet;
 use wedeo_core::pixel_format::PixelFormat;
 use wedeo_format::context::InputContext;
 
@@ -139,6 +141,41 @@ fn decode_all_frames(path: &Path) -> Vec<(u32, u32, PixelFormat, usize)> {
     frames
 }
 
+/// Demux a file into packets without decoding it.
+fn read_packets(path: &Path) -> Vec<Packet> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let mut input = InputContext::open(path.to_str().unwrap())
+        .unwrap_or_else(|e| panic!("Failed to open {}: {:?}", path.display(), e));
+    let mut packets = Vec::new();
+    loop {
+        match input.read_packet() {
+            Ok(pkt) => packets.push(pkt),
+            Err(Error::Eof) => break,
+            Err(e) => panic!("read_packet error: {:?}", e),
+        }
+    }
+    packets
+}
+
+/// Number of VCL (slice) NAL units in a packet.
+fn slice_count(pkt: &Packet) -> usize {
+    split_annex_b(pkt.data.data())
+        .iter()
+        .filter(|n| matches!(n.nal_type, NalUnitType::Slice | NalUnitType::Idr))
+        .count()
+}
+
+/// Data lines of framecrc output (comments carry headers).
+fn framecrc_data(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.trim_end().to_string())
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Registration tests
 // ---------------------------------------------------------------------------
@@ -249,24 +286,126 @@ fn fate_h264_demuxer_au_grouping() {
         return;
     }
 
-    let mut input = InputContext::open(path.to_str().unwrap()).unwrap();
-
-    let mut packet_count = 0;
-    loop {
-        match input.read_packet() {
-            Ok(_pkt) => {
-                packet_count += 1;
-            }
-            Err(Error::Eof) => break,
-            Err(e) => panic!("read_packet error: {:?}", e),
-        }
-    }
-
+    let packets = read_packets(&path);
+    let packet_count = packets.len();
     eprintln!("BA1_Sony_D.jsv: {} packets from demuxer", packet_count);
     // Should have 17 packets (one per frame, not one giant packet)
     assert_eq!(
         packet_count, 17,
         "Demuxer should produce 17 packets for BA1_Sony_D.jsv"
+    );
+
+    // One access unit per packet: exactly one slice, monotonic PTS/DTS.
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(slice_count(pkt), 1, "Packet {} slice count", i);
+        assert_eq!(pkt.pts, i as i64, "Packet {} PTS", i);
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+    }
+    assert!(
+        packets[0]
+            .flags
+            .contains(wedeo_core::packet::PacketFlags::KEY)
+    );
+}
+
+/// SVA_Base_B.264 has three slices per frame: they must stay in one AU.
+#[test]
+fn fate_h264_demuxer_multi_slice_per_au() {
+    let path = conformance_file("SVA_Base_B.264");
+    if !path.exists() {
+        return;
+    }
+    let packets = read_packets(&path);
+    assert_eq!(packets.len(), 17, "SVA_Base_B.264 packet count");
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(slice_count(pkt), 3, "Packet {} should hold 3 slices", i);
+        assert_eq!(pkt.pts, i as i64, "Packet {} PTS", i);
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+    }
+}
+
+/// AUD_MW_E.264 carries an access unit delimiter before every picture.
+#[test]
+fn fate_h264_demuxer_aud_delimiter() {
+    let path = conformance_file("AUD_MW_E.264");
+    if !path.exists() {
+        return;
+    }
+    let packets = read_packets(&path);
+    assert_eq!(packets.len(), 100, "AUD_MW_E.264 packet count");
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(slice_count(pkt), 1, "Packet {} slice count", i);
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+        assert!(
+            split_annex_b(pkt.data.data())
+                .iter()
+                .any(|n| n.nal_type == NalUnitType::Aud),
+            "Packet {} should carry its AUD NAL",
+            i
+        );
+    }
+    let mut pts_sorted: Vec<i64> = packets.iter().map(|p| p.pts).collect();
+    pts_sorted.sort_unstable();
+    assert_eq!(pts_sorted, (0..100).collect::<Vec<_>>(), "AUD stream PTS");
+}
+
+/// src19td.IBP.264 has B-frames: packet PTS follows display order (POC),
+/// DTS follows decode order, and framecrc output matches FFmpeg including
+/// the timestamps.
+#[test]
+fn fate_h264_demuxer_b_frame_pts() {
+    let path = conformance_file("src19td.IBP.264");
+    if !path.exists() {
+        return;
+    }
+    let packets = read_packets(&path);
+    assert_eq!(packets.len(), 257, "src19td.IBP.264 packet count");
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+    }
+    assert_eq!(
+        packets[..8].iter().map(|p| p.pts).collect::<Vec<_>>(),
+        vec![0, 2, 1, 4, 3, 6, 5, 8],
+        "B-frame packet PTS should be in POC order"
+    );
+    let mut pts_sorted: Vec<i64> = packets.iter().map(|p| p.pts).collect();
+    pts_sorted.sort_unstable();
+    assert_eq!(
+        pts_sorted,
+        (0..257).collect::<Vec<_>>(),
+        "PTS values should form a dense display-order sequence"
+    );
+
+    let wedeo = wedeo_fate::run_wedeo_framecrc(&path).expect("wedeo-framecrc failed");
+    let Some(ffmpeg) = wedeo_fate::run_ffmpeg_framecrc_video(&path) else {
+        eprintln!("SKIP: ffmpeg not available for cross-validation");
+        return;
+    };
+    assert_eq!(
+        framecrc_data(&wedeo),
+        framecrc_data(&ffmpeg),
+        "B-frame framecrc (including PTS) must match FFmpeg"
+    );
+}
+
+/// Field pictures are separate access units; complementary fields share a
+/// presentation timestamp because the decoder outputs them as one frame.
+#[test]
+fn fate_h264_demuxer_field_picture_au() {
+    let path = conformance_file("Sharp_MP_Field_1_B.jvt");
+    if !path.exists() {
+        return;
+    }
+    let packets = read_packets(&path);
+    assert_eq!(packets.len(), 30, "Sharp_MP_Field_1_B.jvt packet count");
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+        assert_eq!(slice_count(pkt), 1, "Packet {} slice count", i);
+    }
+    assert_eq!(
+        packets[..8].iter().map(|p| p.pts).collect::<Vec<_>>(),
+        vec![0, 0, 1, 1, 2, 2, 3, 3],
+        "Complementary fields should share a PTS"
     );
 }
 
