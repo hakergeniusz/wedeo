@@ -3,8 +3,12 @@
 // Ensure the inventory registration is linked into this test binary.
 use wedeo_bsf_hevc_mp4toannexb as _;
 
-use wedeo_codec::bitstream_filter::{BitstreamFilter, bitstream_filters, find_bitstream_filter};
+use wedeo_codec::bitstream_filter::{
+    BitstreamFilter, bitstream_filters, create_initialized_bitstream_filter, find_bitstream_filter,
+};
+use wedeo_codec::decoder::CodecParameters;
 use wedeo_core::codec_id::CodecId;
+use wedeo_core::media_type::MediaType;
 use wedeo_core::packet::{Packet, PacketSideData, PacketSideDataType};
 
 use wedeo_bsf_hevc_mp4toannexb::HevcMp4ToAnnexb;
@@ -133,6 +137,19 @@ const REAL_EXPECTED: &[u8] = &[
 #[test]
 fn real_hvcc_matches_ffmpeg_bsf_byte_for_byte() {
     let mut bsf = HevcMp4ToAnnexb::with_extradata(REAL_HVCC).unwrap();
+    let out = bsf.filter(&Packet::from_slice(REAL_PACKET)).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].data.data(), REAL_EXPECTED);
+}
+
+/// The same real FFmpeg vector, but instantiated through the generic registry
+/// path with the hvcC record supplied as `CodecParameters.extradata`.
+#[test]
+fn initialized_filter_matches_ffmpeg_fixture_byte_for_byte() {
+    let mut params = CodecParameters::new(CodecId::Hevc, MediaType::Video);
+    params.extradata = REAL_HVCC.to_vec();
+    let mut bsf = create_initialized_bitstream_filter("hevc_mp4toannexb", &params).unwrap();
+
     let out = bsf.filter(&Packet::from_slice(REAL_PACKET)).unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].data.data(), REAL_EXPECTED);

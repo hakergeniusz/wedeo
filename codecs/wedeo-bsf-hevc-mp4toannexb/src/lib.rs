@@ -11,6 +11,7 @@
 use wedeo_codec::bitstream_filter::{
     BitstreamFilter, BitstreamFilterDescriptor, BitstreamFilterFactory,
 };
+use wedeo_codec::decoder::CodecParameters;
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::{Error, Result};
 use wedeo_core::packet::{Packet, PacketSideDataType};
@@ -505,6 +506,12 @@ impl HevcMp4ToAnnexb {
 }
 
 impl BitstreamFilter for HevcMp4ToAnnexb {
+    fn set_parameters(&mut self, params: &CodecParameters) -> Result<()> {
+        // Mirrors FFmpeg's hevc_mp4toannexb_init(): consume par_in->extradata.
+        // init_extradata() keeps pass-through mode for short / Annex B data.
+        self.init_extradata(&params.extradata)
+    }
+
     fn filter(&mut self, packet: &Packet) -> Result<Vec<Packet>> {
         let data = packet.data.data();
 
@@ -563,9 +570,10 @@ impl BitstreamFilterFactory for HevcMp4ToAnnexbFactory {
     }
 
     fn create(&self) -> Result<Box<dyn BitstreamFilter>> {
-        // The framework's factory has no init parameters; hvcC extradata is
-        // supplied by NEW_EXTRADATA packet side data or by constructing
-        // `HevcMp4ToAnnexb::with_extradata()` directly.
+        // The factory's default init() forwards CodecParameters (including
+        // hvcC extradata) to `BitstreamFilter::set_parameters`. Extradata can
+        // also arrive later via NEW_EXTRADATA packet side data. Callers that
+        // construct the filter directly may still use `with_extradata()`.
         Ok(Box::new(HevcMp4ToAnnexb::new()))
     }
 }
@@ -627,6 +635,39 @@ mod tests {
 
     fn sc(nal: &[u8]) -> Vec<u8> {
         [&NALU_HEADER[..], nal].concat()
+    }
+
+    #[test]
+    fn set_parameters_consumes_hvcc_extradata() {
+        let vps = nal(HEVC_NAL_VPS, &[1]);
+        let sps = nal(HEVC_NAL_SPS, &[2]);
+        let pps = nal(HEVC_NAL_PPS, &[3]);
+        let ed = hvcc(
+            4,
+            &[
+                (HEVC_NAL_VPS, std::slice::from_ref(&vps)),
+                (HEVC_NAL_SPS, std::slice::from_ref(&sps)),
+                (HEVC_NAL_PPS, std::slice::from_ref(&pps)),
+            ],
+        );
+        let mut params = wedeo_codec::decoder::CodecParameters::new(
+            CodecId::Hevc,
+            wedeo_core::media_type::MediaType::Video,
+        );
+        params.extradata = ed;
+
+        let mut bsf = HevcMp4ToAnnexb::new();
+        bsf.set_parameters(&params).unwrap();
+        assert!(bsf.extradata_parsed);
+        assert_eq!(bsf.length_size, 4);
+
+        let idr = nal(19, &[0x99]);
+        let out = out_data(
+            bsf.filter(&packet(length_prefixed(4, std::slice::from_ref(&idr))))
+                .unwrap(),
+        );
+        let expected = [sc(&vps), sc(&sps), sc(&pps), sc(&idr)].concat();
+        assert_eq!(out, expected);
     }
 
     #[test]
