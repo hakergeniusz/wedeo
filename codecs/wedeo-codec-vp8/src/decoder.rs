@@ -191,9 +191,19 @@ impl Vp8Decoder {
                         mb_x,
                     );
                 } else {
-                    // Reset all left/top NNZ predictors for skipped MBs.
-                    left_nnz = [0u8; 9];
-                    top_nnz[mb_x] = [0u8; 9];
+                    // FFmpeg's skip path (vp8.c decode_mb_row_no_filter):
+                    // AV_ZERO64(left_nnz) / AV_WN64(top_nnz[mb_x], 0) clear
+                    // only indices 0..8. Index 8 (the separate luma DC block
+                    // predictor) is reset only if this MB would have had a DC
+                    // block, i.e. not I4x4 and not SPLIT. Clearing it
+                    // unconditionally shifts the DC token context of the next
+                    // MB and desynchronises the coefficient bitstream.
+                    left_nnz[0..8].fill(0);
+                    top_nnz[mb_x][0..8].fill(0);
+                    if mb.mode != MODE_I4x4 && mb.mode != MVMODE_SPLIT {
+                        left_nnz[8] = 0;
+                        top_nnz[mb_x][8] = 0;
+                    }
                 }
 
                 let by = cur.base_y();
