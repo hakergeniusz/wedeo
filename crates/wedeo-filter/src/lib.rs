@@ -1,11 +1,17 @@
+pub mod formats;
 pub mod graph;
 pub mod registry;
+
+#[cfg(test)]
+mod tests;
 
 use bitflags::bitflags;
 
 use wedeo_core::error::Result;
 use wedeo_core::frame::Frame;
 use wedeo_core::media_type::MediaType;
+
+pub use formats::{FilterFormat, FilterFormats, FormatsConfig, PadFormats};
 
 bitflags! {
     /// Filter flags.
@@ -55,4 +61,39 @@ pub trait Filter: Send {
     /// Filters that drop frames return an empty vec; filters that duplicate
     /// frames (e.g. fps) return more than one. Metadata is carried on `Frame`.
     fn filter_frame(&mut self, frame: Frame) -> Result<Vec<Frame>>;
+
+    /// Query formats supported by the filter on its inputs and outputs.
+    ///
+    /// FFmpeg's `query_formats()` callback (libavfilter/filters.h) is called
+    /// after the filter is initialized (so the inputs and outputs are fixed),
+    /// shortly before the format negotiation. This callback may be called
+    /// more than once.
+    ///
+    /// This callback must set the format list on every input pad and on every
+    /// output pad to a list of pixel/sample formats that the filter supports
+    /// on that pad. FFmpeg's `query_func2()` writes the results into provided
+    /// arrays (`cfg_in` and `cfg_out`); here the equivalent arrays are
+    /// [`FormatsConfig::inputs`] and [`FormatsConfig::outputs`], parallel to
+    /// the filter's pad descriptors.
+    ///
+    /// The default implementation leaves every pad unrestricted, matching
+    /// FFmpeg's default `FF_FILTER_FORMATS_PASSTHROUGH` state. Filters that
+    /// constrain formats (e.g. `format`, `fps`) override this method.
+    fn query_formats(&self, _cfg: &mut FormatsConfig) -> Result<()> {
+        Ok(())
+    }
+
+    /// Drain frames buffered inside the filter at end of stream.
+    ///
+    /// FFmpeg's `activate()` drives the graph and may push tail frames via
+    /// `ff_filter_frame()` when a source signals EOF; our `activate()` cannot
+    /// return frames, so filters that delay frames (e.g. `fps`) emit their
+    /// tail here. A filter may be flushed more than once; after the tail has
+    /// been produced it should return an empty vec on subsequent calls.
+    ///
+    /// The default implementation emits no frames, so existing filters need
+    /// no change.
+    fn flush(&mut self) -> Result<Vec<Frame>> {
+        Ok(Vec::new())
+    }
 }
