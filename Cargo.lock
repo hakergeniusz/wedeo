@@ -3874,7 +3874,12 @@ name = "wedeo-codec-hevc"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
  "wedeo-codec",
+ "wedeo-codec-hevc-cabac",
+ "wedeo-codec-hevc-dsp",
+ "wedeo-codec-hevc-ps",
+ "wedeo-codec-hevc-refs",
  "wedeo-core",
 ]
 
