@@ -16,10 +16,39 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 // Ensure inventory registrations are linked in.
+use wedeo_bsf_aac_adtstoasc as _;
+use wedeo_bsf_h264_mp4toannexb as _;
+use wedeo_bsf_hevc_mp4toannexb as _;
+use wedeo_codec_flac_native as _;
 use wedeo_codec_h264 as _;
+use wedeo_codec_hevc as _;
+use wedeo_codec_hevc_cabac as _;
+use wedeo_codec_hevc_dsp as _;
+use wedeo_codec_hevc_ps as _;
+use wedeo_codec_hevc_refs as _;
+use wedeo_codec_mpeg12 as _;
+use wedeo_codec_mpegvideo as _;
 use wedeo_codec_pcm as _;
+use wedeo_codec_vp8 as _;
+use wedeo_filter_copy as _;
+use wedeo_filter_crop as _;
+use wedeo_filter_format as _;
+use wedeo_filter_fps as _;
+use wedeo_filter_graph as _;
+use wedeo_filter_hflip as _;
+use wedeo_filter_pad as _;
+use wedeo_filter_transpose as _;
+use wedeo_filter_vflip as _;
+use wedeo_format_avi_demux as _;
+use wedeo_format_flv_demux as _;
+use wedeo_format_flv_mux as _;
 use wedeo_format_h264 as _;
+use wedeo_format_ivf_mux as _;
+use wedeo_format_matroska_mux as _;
 use wedeo_format_mp4 as _;
+use wedeo_format_mpegts_demux as _;
+use wedeo_format_mpegts_mux as _;
+use wedeo_format_ogg as _;
 use wedeo_format_wav as _;
 use wedeo_rav1d as _;
 use wedeo_symphonia as _;
@@ -470,8 +499,7 @@ fn run(path: &str, initial_scale: Option<usize>) -> wedeo_core::Result<()> {
     let audio_samples_read = Arc::new(AtomicU64::new(0));
 
     // Build cpal output stream with volume support.
-    let audio_stream: Option<cpal::Stream>;
-    if has_audio {
+    let audio_stream = if has_audio {
         let stream_config = cpal::StreamConfig {
             channels: device_channels as u16,
             sample_rate: device_sample_rate,
@@ -524,17 +552,17 @@ fn run(path: &str, initial_scale: Option<usize>) -> wedeo_core::Result<()> {
             )
             .map_err(|e| Error::Other(format!("audio stream: {e}")))?;
 
-        audio_stream = Some(stream);
+        Some(stream)
     } else {
         drop(rb_cons);
-        audio_stream = None;
-    }
+        None
+    };
 
     // Window size — auto-scale so small videos aren't tiny, HD stays 1:1.
     let scale = initial_scale.unwrap_or_else(|| {
-        let target = 1280;
+        let target: usize = 1280;
         let dim = vid_width.max(vid_height);
-        if dim == 0 { 1 } else { (target / dim).max(1) }
+        target.checked_div(dim).unwrap_or(1).max(1)
     });
     let init_win_w = (vid_width * scale) as u32;
     let init_win_h = (vid_height * scale) as u32;

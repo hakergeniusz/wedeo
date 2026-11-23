@@ -1,0 +1,17 @@
+[package]
+name = "wedeo-format-flv-demux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Work unit for libavformat/flvdec.c (scaffolding, not yet implemented)"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-format = { workspace = true }
+inventory = { workspace = true }
+
+[lints]
+workspace = true

@@ -587,7 +587,6 @@ pub fn reconstruct_intra_block(
                                 eob,
                             );
                         }
-
                     }
                 }
 

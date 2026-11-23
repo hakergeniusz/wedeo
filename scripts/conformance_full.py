@@ -25,12 +25,13 @@ Requires:
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from wedeo_utils import find_wedeo_binary
+from wedeo_utils import atomic_write_text, find_wedeo_binary
 from framecrc_compare import compare_one
 
 
@@ -90,8 +91,9 @@ PROGRESSIVE_CABAC_FILES = [
     "CAPM3_Sony_D.jsv",
 ]
 
-SNAPSHOT_PATH = Path(__file__).resolve().parent / ".conformance_snapshot.json"
-CABAC_SNAPSHOT_PATH = Path(__file__).resolve().parent / ".conformance_cabac_snapshot.json"
+_SNAPSHOT_DIR = Path(os.environ.get("WEDEO_SNAPSHOT_DIR", Path(__file__).resolve().parent))
+SNAPSHOT_PATH = _SNAPSHOT_DIR / ".conformance_snapshot.json"
+CABAC_SNAPSHOT_PATH = _SNAPSHOT_DIR / ".conformance_cabac_snapshot.json"
 
 
 def load_snapshot(cabac: bool = False) -> set[str]:
@@ -107,7 +109,7 @@ def save_snapshot(passing: list[str], cabac: bool = False) -> None:
     """Save the current passing files as a snapshot."""
     path = CABAC_SNAPSHOT_PATH if cabac else SNAPSHOT_PATH
     file_list = PROGRESSIVE_CABAC_FILES if cabac else PROGRESSIVE_CAVLC_FILES
-    path.write_text(json.dumps({
+    atomic_write_text(path, json.dumps({
         "passing": sorted(passing),
         "count": len(passing),
         "total": len(file_list),
@@ -178,7 +180,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Full H.264 progressive CAVLC conformance test",
     )
-    parser.add_argument("--fate-dir", default="fate-suite/h264-conformance",
+    _fate_default = str(Path(os.environ.get("FATE_SUITE", "fate-suite")) / "h264-conformance")
+    parser.add_argument("--fate-dir", default=_fate_default,
                         help="Path to conformance files")
     parser.add_argument("--quick", action="store_true",
                         help="Stop on first regression from snapshot")

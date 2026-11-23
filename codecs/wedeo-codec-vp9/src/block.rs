@@ -980,8 +980,6 @@ fn decode_inter_mode(
         filter_id = 0;
     }
 
-
-
     // --- MV search context ---
     // MV clamping bounds: cols_4x4/rows_4x4 and col/row are in 4×4 units,
     // so bw4/bh4 must also be in 4×4 units (BWH_TAB[0], not BWH_TAB[1]).

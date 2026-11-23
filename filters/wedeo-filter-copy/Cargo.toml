@@ -1,0 +1,17 @@
+[package]
+name = "wedeo-filter-copy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Work unit for libavfilter/vf_copy.c (scaffolding, not yet implemented)"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-filter = { workspace = true }
+inventory = { workspace = true }
+
+[lints]
+workspace = true

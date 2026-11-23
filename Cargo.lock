@@ -3716,14 +3716,43 @@ dependencies = [
 name = "wedeo"
 version = "0.2.0"
 dependencies = [
+ "wedeo-bsf-aac-adtstoasc",
+ "wedeo-bsf-h264-mp4toannexb",
+ "wedeo-bsf-hevc-mp4toannexb",
  "wedeo-codec",
+ "wedeo-codec-flac-native",
  "wedeo-codec-h264",
+ "wedeo-codec-hevc",
+ "wedeo-codec-hevc-cabac",
+ "wedeo-codec-hevc-dsp",
+ "wedeo-codec-hevc-ps",
+ "wedeo-codec-hevc-refs",
+ "wedeo-codec-mpeg12",
+ "wedeo-codec-mpegvideo",
  "wedeo-codec-pcm",
+ "wedeo-codec-vp8",
  "wedeo-core",
  "wedeo-filter",
+ "wedeo-filter-copy",
+ "wedeo-filter-crop",
+ "wedeo-filter-format",
+ "wedeo-filter-fps",
+ "wedeo-filter-graph",
+ "wedeo-filter-hflip",
+ "wedeo-filter-pad",
+ "wedeo-filter-transpose",
+ "wedeo-filter-vflip",
  "wedeo-format",
+ "wedeo-format-avi-demux",
+ "wedeo-format-flv-demux",
+ "wedeo-format-flv-mux",
  "wedeo-format-h264",
+ "wedeo-format-ivf-mux",
+ "wedeo-format-matroska-mux",
  "wedeo-format-mp4",
+ "wedeo-format-mpegts-demux",
+ "wedeo-format-mpegts-mux",
+ "wedeo-format-ogg",
  "wedeo-format-wav",
  "wedeo-rav1e",
  "wedeo-resample",
@@ -3732,19 +3761,75 @@ dependencies = [
 ]
 
 [[package]]
+name = "wedeo-bsf-aac-adtstoasc"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-bsf-h264-mp4toannexb"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-bsf-hevc-mp4toannexb"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
 name = "wedeo-cli"
 version = "0.2.0"
 dependencies = [
  "tracing-subscriber",
+ "wedeo-bsf-aac-adtstoasc",
+ "wedeo-bsf-h264-mp4toannexb",
+ "wedeo-bsf-hevc-mp4toannexb",
  "wedeo-codec",
+ "wedeo-codec-flac-native",
  "wedeo-codec-h264",
+ "wedeo-codec-hevc",
+ "wedeo-codec-hevc-cabac",
+ "wedeo-codec-hevc-dsp",
+ "wedeo-codec-hevc-ps",
+ "wedeo-codec-hevc-refs",
+ "wedeo-codec-mpeg12",
+ "wedeo-codec-mpegvideo",
  "wedeo-codec-pcm",
+ "wedeo-codec-vp8",
  "wedeo-codec-vp9",
  "wedeo-core",
+ "wedeo-filter-copy",
+ "wedeo-filter-crop",
+ "wedeo-filter-format",
+ "wedeo-filter-fps",
+ "wedeo-filter-graph",
+ "wedeo-filter-hflip",
+ "wedeo-filter-pad",
+ "wedeo-filter-transpose",
+ "wedeo-filter-vflip",
  "wedeo-format",
+ "wedeo-format-avi-demux",
+ "wedeo-format-flv-demux",
+ "wedeo-format-flv-mux",
  "wedeo-format-h264",
  "wedeo-format-ivf",
+ "wedeo-format-ivf-mux",
+ "wedeo-format-matroska-mux",
  "wedeo-format-mp4",
+ "wedeo-format-mpegts-demux",
+ "wedeo-format-mpegts-mux",
+ "wedeo-format-ogg",
  "wedeo-format-wav",
  "wedeo-format-webm",
  "wedeo-rav1d",
@@ -3763,6 +3848,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wedeo-codec-flac-native"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
 name = "wedeo-codec-h264"
 version = "0.2.0"
 dependencies = [
@@ -3775,7 +3869,79 @@ dependencies = [
 ]
 
 [[package]]
+name = "wedeo-codec-hevc"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-codec-hevc-cabac"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-codec-hevc-dsp"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-codec-hevc-ps"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-codec-hevc-refs"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-codec-mpeg12"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-codec-mpegvideo"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
 name = "wedeo-codec-pcm"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-codec-vp8"
 version = "0.2.0"
 dependencies = [
  "inventory",
@@ -3809,15 +3975,44 @@ dependencies = [
  "adler2",
  "md-5",
  "tracing-subscriber",
+ "wedeo-bsf-aac-adtstoasc",
+ "wedeo-bsf-h264-mp4toannexb",
+ "wedeo-bsf-hevc-mp4toannexb",
  "wedeo-codec",
+ "wedeo-codec-flac-native",
  "wedeo-codec-h264",
+ "wedeo-codec-hevc",
+ "wedeo-codec-hevc-cabac",
+ "wedeo-codec-hevc-dsp",
+ "wedeo-codec-hevc-ps",
+ "wedeo-codec-hevc-refs",
+ "wedeo-codec-mpeg12",
+ "wedeo-codec-mpegvideo",
  "wedeo-codec-pcm",
+ "wedeo-codec-vp8",
  "wedeo-codec-vp9",
  "wedeo-core",
+ "wedeo-filter-copy",
+ "wedeo-filter-crop",
+ "wedeo-filter-format",
+ "wedeo-filter-fps",
+ "wedeo-filter-graph",
+ "wedeo-filter-hflip",
+ "wedeo-filter-pad",
+ "wedeo-filter-transpose",
+ "wedeo-filter-vflip",
  "wedeo-format",
+ "wedeo-format-avi-demux",
+ "wedeo-format-flv-demux",
+ "wedeo-format-flv-mux",
  "wedeo-format-h264",
  "wedeo-format-ivf",
+ "wedeo-format-ivf-mux",
+ "wedeo-format-matroska-mux",
  "wedeo-format-mp4",
+ "wedeo-format-mpegts-demux",
+ "wedeo-format-mpegts-mux",
+ "wedeo-format-ogg",
  "wedeo-format-wav",
  "wedeo-format-webm",
  "wedeo-rav1d",
@@ -3835,6 +4030,87 @@ dependencies = [
 ]
 
 [[package]]
+name = "wedeo-filter-copy"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-filter",
+]
+
+[[package]]
+name = "wedeo-filter-crop"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-filter",
+]
+
+[[package]]
+name = "wedeo-filter-format"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-filter",
+]
+
+[[package]]
+name = "wedeo-filter-fps"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-filter",
+]
+
+[[package]]
+name = "wedeo-filter-graph"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-filter",
+]
+
+[[package]]
+name = "wedeo-filter-hflip"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-filter",
+]
+
+[[package]]
+name = "wedeo-filter-pad"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-filter",
+]
+
+[[package]]
+name = "wedeo-filter-transpose"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-filter",
+]
+
+[[package]]
+name = "wedeo-filter-vflip"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-filter",
+]
+
+[[package]]
 name = "wedeo-format"
 version = "0.2.0"
 dependencies = [
@@ -3843,6 +4119,33 @@ dependencies = [
  "tracing",
  "wedeo-codec",
  "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-format-avi-demux"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-format",
+]
+
+[[package]]
+name = "wedeo-format-flv-demux"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-format",
+]
+
+[[package]]
+name = "wedeo-format-flv-mux"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-format",
 ]
 
 [[package]]
@@ -3869,11 +4172,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "wedeo-format-ivf-mux"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-format",
+]
+
+[[package]]
+name = "wedeo-format-matroska-mux"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-format",
+]
+
+[[package]]
 name = "wedeo-format-mp4"
 version = "0.2.0"
 dependencies = [
  "inventory",
  "wedeo-codec",
+ "wedeo-core",
+ "wedeo-format",
+]
+
+[[package]]
+name = "wedeo-format-mpegts-demux"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-format",
+]
+
+[[package]]
+name = "wedeo-format-mpegts-mux"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-format",
+]
+
+[[package]]
+name = "wedeo-format-ogg"
+version = "0.2.0"
+dependencies = [
+ "inventory",
  "wedeo-core",
  "wedeo-format",
 ]
@@ -3905,13 +4253,42 @@ dependencies = [
  "cpal",
  "pollster",
  "ringbuf",
+ "wedeo-bsf-aac-adtstoasc",
+ "wedeo-bsf-h264-mp4toannexb",
+ "wedeo-bsf-hevc-mp4toannexb",
  "wedeo-codec",
+ "wedeo-codec-flac-native",
  "wedeo-codec-h264",
+ "wedeo-codec-hevc",
+ "wedeo-codec-hevc-cabac",
+ "wedeo-codec-hevc-dsp",
+ "wedeo-codec-hevc-ps",
+ "wedeo-codec-hevc-refs",
+ "wedeo-codec-mpeg12",
+ "wedeo-codec-mpegvideo",
  "wedeo-codec-pcm",
+ "wedeo-codec-vp8",
  "wedeo-core",
+ "wedeo-filter-copy",
+ "wedeo-filter-crop",
+ "wedeo-filter-format",
+ "wedeo-filter-fps",
+ "wedeo-filter-graph",
+ "wedeo-filter-hflip",
+ "wedeo-filter-pad",
+ "wedeo-filter-transpose",
+ "wedeo-filter-vflip",
  "wedeo-format",
+ "wedeo-format-avi-demux",
+ "wedeo-format-flv-demux",
+ "wedeo-format-flv-mux",
  "wedeo-format-h264",
+ "wedeo-format-ivf-mux",
+ "wedeo-format-matroska-mux",
  "wedeo-format-mp4",
+ "wedeo-format-mpegts-demux",
+ "wedeo-format-mpegts-mux",
+ "wedeo-format-ogg",
  "wedeo-format-wav",
  "wedeo-rav1d",
  "wedeo-resample",

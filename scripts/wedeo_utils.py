@@ -20,19 +20,34 @@ from pathlib import Path
 
 # ── Binary Discovery ─────────────────────────────────────────────────────────
 
-# Directories whose .rs files determine source freshness
-_RUST_SRC_DIRS = [
-    Path("codecs/wedeo-codec-h264/src"),
-    Path("crates/wedeo-core/src"),
-    Path("crates/wedeo-codec/src"),
-    Path("formats/wedeo-format-h264/src"),
-    Path("tests/fate/src"),
-]
+def _source_dirs() -> list[Path]:
+    """All Rust source dirs in the workspace, discovered at call time.
+
+    The old hardcoded list only covered H.264, so agents editing VP9, filters,
+    formats or adapters silently tested a stale wedeo-framecrc binary.
+    """
+    dirs = [Path("tests/fate/src")]
+    for parent in ("crates", "codecs", "formats", "adapters", "bins", "filters"):
+        dirs.extend(sorted(Path(parent).glob("*/src")))
+    return dirs
+
+
+def target_root() -> Path:
+    """Cargo target dir, honouring the shared CARGO_TARGET_DIR from agent_env.sh."""
+    return Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write a snapshot without a torn file if two processes save at once."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(content)
+    os.replace(tmp, path)
 
 
 def newest_source_mtime(extra_dirs: list[Path] | None = None) -> float:
     """Get the newest mtime across all relevant Rust source directories."""
-    dirs = list(_RUST_SRC_DIRS)
+    dirs = _source_dirs()
     if extra_dirs:
         dirs.extend(extra_dirs)
     mtimes = []
@@ -93,7 +108,7 @@ def find_wedeo_binary(
     profiles = ["debug", "release"] if prefer_debug else ["release", "debug"]
 
     for profile in profiles:
-        candidate = Path("target") / profile / "wedeo-framecrc"
+        candidate = target_root() / profile / "wedeo-framecrc"
         if candidate.exists():
             if auto_rebuild and newest_source_mtime() > candidate.stat().st_mtime:
                 print(f"Rebuilding {profile} (source newer)...", file=sys.stderr)
@@ -127,7 +142,7 @@ def find_wedeo_binary(
             file=sys.stderr,
         )
         sys.exit(1)
-    candidate = Path("target") / profile / "wedeo-framecrc"
+    candidate = target_root() / profile / "wedeo-framecrc"
     return candidate.resolve()
 
 

@@ -1,0 +1,17 @@
+[package]
+name = "wedeo-bsf-hevc-mp4toannexb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Work unit for libavcodec/bsf/hevc_mp4toannexb.c (scaffolding, not yet implemented)"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+
+[lints]
+workspace = true

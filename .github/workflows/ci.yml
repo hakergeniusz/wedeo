@@ -7,6 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# PR runs supersede each other; pushes to main stay serialized.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -48,6 +53,60 @@ jobs:
           name: test-results
           path: target/nextest/ci/junit.xml
 
+  discover:
+    name: Discover work-unit crates
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: List work-unit crates
+        id: list
+        run: |
+          set -euo pipefail
+          python3 scripts/list_crates.py --kind work-unit --format json > /tmp/work-unit-crates.json
+          COUNT="$(python3 -c 'import json; print(len(json.load(open("/tmp/work-unit-crates.json"))))')"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No work-unit crates discovered; refusing to run an empty shard matrix." >&2
+            exit 1
+          fi
+          {
+            echo 'matrix<<JSON_EOF'
+            cat /tmp/work-unit-crates.json
+            echo 'JSON_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Discovered $COUNT work-unit crates for sharded checks." >> "$GITHUB_STEP_SUMMARY"
+
+  crate-check:
+    name: Check ${{ matrix.name }} (${{ matrix.path }})
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      # Install unconditionally: the rav1d adapter needs nasm. A shard builds
+      # one crate at a time, but workspace deps can still pull it in.
+      - name: Install native dependencies
+        run: sudo apt-get install -y nasm libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: crate-${{ matrix.name }}
+      - name: Clippy
+        run: cargo clippy -p "${{ matrix.name }}" --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test -p "${{ matrix.name }}"
+
   fate-regression:
     name: FATE Regression
     runs-on: ubuntu-latest
@@ -58,6 +117,8 @@ jobs:
       - run: sudo apt-get install -y nasm libasound2-dev ffmpeg
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: fate-regression
 
       - name: Cache FATE H.264 samples
         uses: actions/cache@v4
@@ -118,6 +179,8 @@ jobs:
       - run: sudo apt-get install -y nasm libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: jvt-regression
 
       - name: Cache JVT vectors
         uses: actions/cache@v4

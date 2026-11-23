@@ -104,7 +104,6 @@ impl Vp9Decoder {
             "VP9 frame header decoded"
         );
 
-
         // show_existing_frame: output a previously decoded reference frame.
         if header.show_existing_frame {
             let ref_idx = header.show_existing_frame_ref as usize;

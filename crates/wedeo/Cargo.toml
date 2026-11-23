@@ -20,6 +20,8 @@ mp4 = ["dep:wedeo-format-mp4"]
 symphonia = ["dep:wedeo-symphonia"]
 rav1e = ["dep:wedeo-rav1e"]
 
+full = ["dep:wedeo-filter-graph", "dep:wedeo-filter-copy", "dep:wedeo-filter-format", "dep:wedeo-filter-crop", "dep:wedeo-filter-hflip", "dep:wedeo-filter-vflip", "dep:wedeo-filter-pad", "dep:wedeo-filter-transpose", "dep:wedeo-filter-fps", "dep:wedeo-format-ivf-mux", "dep:wedeo-format-flv-demux", "dep:wedeo-format-flv-mux", "dep:wedeo-format-avi-demux", "dep:wedeo-format-mpegts-demux", "dep:wedeo-format-mpegts-mux", "dep:wedeo-format-matroska-mux", "dep:wedeo-format-ogg", "dep:wedeo-bsf-h264-mp4toannexb", "dep:wedeo-bsf-hevc-mp4toannexb", "dep:wedeo-bsf-aac-adtstoasc", "dep:wedeo-codec-flac-native", "dep:wedeo-codec-mpegvideo", "dep:wedeo-codec-mpeg12", "dep:wedeo-codec-vp8", "dep:wedeo-codec-hevc-ps", "dep:wedeo-codec-hevc-cabac", "dep:wedeo-codec-hevc-dsp", "dep:wedeo-codec-hevc-refs", "dep:wedeo-codec-hevc"]
+
 [dependencies]
 # Framework crates (always present)
 wedeo-core = { workspace = true }
@@ -41,6 +43,36 @@ wedeo-rav1e = { workspace = true, optional = true }
 # Note: wedeo-rav1d (AV1 via rav1d) is not included here because it depends
 # on a git-only crate and cannot be published to crates.io. To use AV1
 # decoding, depend on wedeo-rav1d directly from the git repository.
+
+wedeo-filter-graph = { workspace = true, optional = true }
+wedeo-filter-copy = { workspace = true, optional = true }
+wedeo-filter-format = { workspace = true, optional = true }
+wedeo-filter-crop = { workspace = true, optional = true }
+wedeo-filter-hflip = { workspace = true, optional = true }
+wedeo-filter-vflip = { workspace = true, optional = true }
+wedeo-filter-pad = { workspace = true, optional = true }
+wedeo-filter-transpose = { workspace = true, optional = true }
+wedeo-filter-fps = { workspace = true, optional = true }
+wedeo-format-ivf-mux = { workspace = true, optional = true }
+wedeo-format-flv-demux = { workspace = true, optional = true }
+wedeo-format-flv-mux = { workspace = true, optional = true }
+wedeo-format-avi-demux = { workspace = true, optional = true }
+wedeo-format-mpegts-demux = { workspace = true, optional = true }
+wedeo-format-mpegts-mux = { workspace = true, optional = true }
+wedeo-format-matroska-mux = { workspace = true, optional = true }
+wedeo-format-ogg = { workspace = true, optional = true }
+wedeo-bsf-h264-mp4toannexb = { workspace = true, optional = true }
+wedeo-bsf-hevc-mp4toannexb = { workspace = true, optional = true }
+wedeo-bsf-aac-adtstoasc = { workspace = true, optional = true }
+wedeo-codec-flac-native = { workspace = true, optional = true }
+wedeo-codec-mpegvideo = { workspace = true, optional = true }
+wedeo-codec-mpeg12 = { workspace = true, optional = true }
+wedeo-codec-vp8 = { workspace = true, optional = true }
+wedeo-codec-hevc-ps = { workspace = true, optional = true }
+wedeo-codec-hevc-cabac = { workspace = true, optional = true }
+wedeo-codec-hevc-dsp = { workspace = true, optional = true }
+wedeo-codec-hevc-refs = { workspace = true, optional = true }
+wedeo-codec-hevc = { workspace = true, optional = true }
 
 [lints]
 workspace = true

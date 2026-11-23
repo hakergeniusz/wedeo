@@ -21,6 +21,35 @@ members = [
     "bins/wedeo-cli",
     "bins/wedeo-play",
     "tests/fate",
+    "filters/wedeo-filter-graph",
+    "filters/wedeo-filter-copy",
+    "filters/wedeo-filter-format",
+    "filters/wedeo-filter-crop",
+    "filters/wedeo-filter-hflip",
+    "filters/wedeo-filter-vflip",
+    "filters/wedeo-filter-pad",
+    "filters/wedeo-filter-transpose",
+    "filters/wedeo-filter-fps",
+    "formats/wedeo-format-ivf-mux",
+    "formats/wedeo-format-flv-demux",
+    "formats/wedeo-format-flv-mux",
+    "formats/wedeo-format-avi-demux",
+    "formats/wedeo-format-mpegts-demux",
+    "formats/wedeo-format-mpegts-mux",
+    "formats/wedeo-format-matroska-mux",
+    "formats/wedeo-format-ogg",
+    "codecs/wedeo-bsf-h264-mp4toannexb",
+    "codecs/wedeo-bsf-hevc-mp4toannexb",
+    "codecs/wedeo-bsf-aac-adtstoasc",
+    "codecs/wedeo-codec-flac-native",
+    "codecs/wedeo-codec-mpegvideo",
+    "codecs/wedeo-codec-mpeg12",
+    "codecs/wedeo-codec-vp8",
+    "codecs/wedeo-codec-hevc-ps",
+    "codecs/wedeo-codec-hevc-cabac",
+    "codecs/wedeo-codec-hevc-dsp",
+    "codecs/wedeo-codec-hevc-refs",
+    "codecs/wedeo-codec-hevc",
 ]
 resolver = "3"
 
@@ -37,6 +66,12 @@ categories = ["multimedia::video", "multimedia::encoding"]
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+# Rust 1.100 promoted needless_range_loop into clippy::all. FFmpeg ports keep
+# explicit index arithmetic to match the C source verbatim; iterator rewrites
+# risk breaking bit-exact parity in bitstream/reconstruction hot paths.
+needless_range_loop = { level = "allow", priority = 0 }
+# PCM byte loops mirror FFmpeg's fixed-size sample reads; keep chunks_exact.
+chunks_exact_to_as_chunks = { level = "allow", priority = 0 }
 
 [workspace.dependencies]
 bitflags = "2"
@@ -69,3 +104,32 @@ wedeo-rav1e = { path = "adapters/wedeo-rav1e", version = "0.2.0" }
 wedeo-codec-vp9 = { path = "codecs/wedeo-codec-vp9", version = "0.2.0" }
 wedeo-format-ivf = { path = "formats/wedeo-format-ivf", version = "0.2.0" }
 wedeo-format-webm = { path = "formats/wedeo-format-webm", version = "0.2.0" }
+wedeo-filter-graph = { path = "filters/wedeo-filter-graph", version = "0.2.0" }
+wedeo-filter-copy = { path = "filters/wedeo-filter-copy", version = "0.2.0" }
+wedeo-filter-format = { path = "filters/wedeo-filter-format", version = "0.2.0" }
+wedeo-filter-crop = { path = "filters/wedeo-filter-crop", version = "0.2.0" }
+wedeo-filter-hflip = { path = "filters/wedeo-filter-hflip", version = "0.2.0" }
+wedeo-filter-vflip = { path = "filters/wedeo-filter-vflip", version = "0.2.0" }
+wedeo-filter-pad = { path = "filters/wedeo-filter-pad", version = "0.2.0" }
+wedeo-filter-transpose = { path = "filters/wedeo-filter-transpose", version = "0.2.0" }
+wedeo-filter-fps = { path = "filters/wedeo-filter-fps", version = "0.2.0" }
+wedeo-format-ivf-mux = { path = "formats/wedeo-format-ivf-mux", version = "0.2.0" }
+wedeo-format-flv-demux = { path = "formats/wedeo-format-flv-demux", version = "0.2.0" }
+wedeo-format-flv-mux = { path = "formats/wedeo-format-flv-mux", version = "0.2.0" }
+wedeo-format-avi-demux = { path = "formats/wedeo-format-avi-demux", version = "0.2.0" }
+wedeo-format-mpegts-demux = { path = "formats/wedeo-format-mpegts-demux", version = "0.2.0" }
+wedeo-format-mpegts-mux = { path = "formats/wedeo-format-mpegts-mux", version = "0.2.0" }
+wedeo-format-matroska-mux = { path = "formats/wedeo-format-matroska-mux", version = "0.2.0" }
+wedeo-format-ogg = { path = "formats/wedeo-format-ogg", version = "0.2.0" }
+wedeo-bsf-h264-mp4toannexb = { path = "codecs/wedeo-bsf-h264-mp4toannexb", version = "0.2.0" }
+wedeo-bsf-hevc-mp4toannexb = { path = "codecs/wedeo-bsf-hevc-mp4toannexb", version = "0.2.0" }
+wedeo-bsf-aac-adtstoasc = { path = "codecs/wedeo-bsf-aac-adtstoasc", version = "0.2.0" }
+wedeo-codec-flac-native = { path = "codecs/wedeo-codec-flac-native", version = "0.2.0" }
+wedeo-codec-mpegvideo = { path = "codecs/wedeo-codec-mpegvideo", version = "0.2.0" }
+wedeo-codec-mpeg12 = { path = "codecs/wedeo-codec-mpeg12", version = "0.2.0" }
+wedeo-codec-vp8 = { path = "codecs/wedeo-codec-vp8", version = "0.2.0" }
+wedeo-codec-hevc-ps = { path = "codecs/wedeo-codec-hevc-ps", version = "0.2.0" }
+wedeo-codec-hevc-cabac = { path = "codecs/wedeo-codec-hevc-cabac", version = "0.2.0" }
+wedeo-codec-hevc-dsp = { path = "codecs/wedeo-codec-hevc-dsp", version = "0.2.0" }
+wedeo-codec-hevc-refs = { path = "codecs/wedeo-codec-hevc-refs", version = "0.2.0" }
+wedeo-codec-hevc = { path = "codecs/wedeo-codec-hevc", version = "0.2.0" }

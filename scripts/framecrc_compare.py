@@ -21,6 +21,7 @@ Requires:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -88,8 +89,49 @@ def compare_one(input_path, wedeo_bin, no_deblock=False, pixel_detail=False):
     return total, matching, diffs, plane_info
 
 
+def probe_pix_fmt(input_path):
+    """Return the input pixel format from ffprobe, or None if unavailable."""
+    import shutil
+    import subprocess
+
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=pix_fmt",
+                "-of", "default=nw=1:nk=1", str(input_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return lines[0] if lines else None
+
+
 def pixel_plane_analysis(input_path, wedeo_bin, no_deblock, diff_frames):
-    """Decode raw YUV and compare Y/U/V planes for differing frames."""
+    """Decode raw YUV and compare Y/U/V planes for differing frames.
+
+    Only 8-bit 4:2:0 is analysed: decode_yuv() asks FFmpeg for yuv420p, so
+    any other source format would make the two raw dumps incomparable.
+    """
+    pix_fmt = probe_pix_fmt(input_path)
+    if pix_fmt is None:
+        print("  SKIP plane analysis: pixel format unknown (ffprobe unavailable); "
+              "cannot assume 8-bit 4:2:0 geometry")
+        return None
+    if pix_fmt != "yuv420p":
+        print(f"  SKIP plane analysis: pixel format '{pix_fmt}' is not yuv420p; "
+              "raw YUV plane geometry would be misleading")
+        return None
+
     import numpy as np
 
     info = get_video_info(input_path, wedeo_bin=wedeo_bin, no_deblock=no_deblock)
@@ -102,10 +144,16 @@ def pixel_plane_analysis(input_path, wedeo_bin, no_deblock, diff_frames):
     wd = decode_yuv(input_path, "wedeo", no_deblock=no_deblock, wedeo_bin=wedeo_bin)
     fd = decode_yuv(input_path, "ffmpeg", no_deblock=no_deblock)
 
+    min_len = min(len(wd), len(fd))
     results = []
+    analyzed = 0
     for frame_idx in diff_frames:
-        if (frame_idx + 1) * frame_size > min(len(wd), len(fd)):
+        if (frame_idx + 1) * frame_size > min_len:
+            if analyzed == 0:
+                print(f"  SKIP plane analysis: raw YUV too short "
+                      f"({min_len} bytes, need {(frame_idx + 1) * frame_size})")
             break
+        analyzed += 1
         base = frame_idx * frame_size
         wy = np.frombuffer(wd[base:base + y_size], dtype=np.uint8)
         fy = np.frombuffer(fd[base:base + y_size], dtype=np.uint8)
@@ -128,7 +176,8 @@ def main():
     parser.add_argument("--all", action="store_true", help="Compare all 17 Baseline files")
     parser.add_argument("--no-deblock", action="store_true", help="Disable deblocking filter")
     parser.add_argument("--pixel-detail", action="store_true", help="Show per-plane pixel diffs")
-    parser.add_argument("--fate-dir", default="fate-suite/h264-conformance",
+    _fate_default = str(Path(os.environ.get("FATE_SUITE", "fate-suite")) / "h264-conformance")
+    parser.add_argument("--fate-dir", default=_fate_default,
                         help="Path to conformance files (default: fate-suite/h264-conformance)")
     args = parser.parse_args()
 

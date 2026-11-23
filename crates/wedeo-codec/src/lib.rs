@@ -1,4 +1,5 @@
 pub mod bitstream;
+pub mod bitstream_filter;
 pub mod decoder;
 pub mod descriptor;
 pub mod encoder;

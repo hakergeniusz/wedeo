@@ -12,11 +12,15 @@ Usage:
     python3 scripts/fetch_jvt.py --suite JVT-AVC_V1     # one suite
     python3 scripts/fetch_jvt.py --dry-run               # show what would download
     python3 scripts/fetch_jvt.py --jobs 8                # parallel downloads
+    python3 scripts/fetch_jvt.py --dest /shared/jvt-vectors  # shared staging path
+Environment:
+    WEDEO_REF_DIR stages into "$WEDEO_REF_DIR/jvt-vectors" unless --dest is given.
 """
 
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -45,23 +49,42 @@ def discover_suites() -> dict[str, Path]:
     return suites
 
 
-def target_path(suite_name: str, input_file: str) -> Path:
+def resolve_vectors_dir(dest_arg: str | None) -> Path:
+    """Destination: --dest > WEDEO_REF_DIR/jvt-vectors > jvt-vectors/."""
+    if dest_arg:
+        return Path(dest_arg).expanduser().resolve()
+    ref_dir = os.environ.get("WEDEO_REF_DIR")
+    if ref_dir:
+        return Path(ref_dir).expanduser().resolve() / "jvt-vectors"
+    return VECTORS_DIR
+
+
+def display_path(path: Path) -> str:
+    """Show a path relative to the checkout when possible."""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def target_path(suite_name: str, input_file: str, dest_dir: Path) -> Path:
     """Compute the local path for a vector's input file."""
     # input_file may be nested (e.g. "subdir/file.264") — flatten to just filename
-    return VECTORS_DIR / suite_name / Path(input_file).name
+    return dest_dir / suite_name / Path(input_file).name
 
 
-def fetch_one(suite_name: str, vector: dict, dry_run: bool) -> str:
+def fetch_one(suite_name: str, vector: dict, dry_run: bool, dest_dir: Path,
+              force: bool = False) -> str:
     """Download and extract one vector. Returns a status string."""
     name = vector["name"]
     input_file = vector["input_file"]
-    dest = target_path(suite_name, input_file)
+    dest = target_path(suite_name, input_file, dest_dir)
 
-    if dest.exists():
+    if dest.exists() and not force:
         return f"  SKIP  {name} (exists)"
 
     if dry_run:
-        return f"  FETCH {name} -> {dest.relative_to(ROOT)}"
+        return f"  FETCH {name} -> {display_path(dest)}"
 
     source_url = vector["source"]
     expected_md5 = vector.get("source_checksum", "")
@@ -111,12 +134,13 @@ def fetch_one(suite_name: str, vector: dict, dry_run: bool) -> str:
         tmp_path.unlink(missing_ok=True)
 
 
-def fetch_suite(suite_name: str, manifest_path: Path, dry_run: bool, jobs: int) -> tuple[int, int, int]:
+def fetch_suite(suite_name: str, manifest_path: Path, dry_run: bool, jobs: int,
+                dest_dir: Path, force: bool = False) -> tuple[int, int, int]:
     """Fetch all vectors for a suite. Returns (ok, skip, fail) counts."""
     data = load_manifest(manifest_path)
     vectors = data["test_vectors"]
 
-    print(f"\nSuite: {suite_name} ({len(vectors)} vectors)")
+    print(f"\nSuite: {suite_name} ({len(vectors)} vectors) -> {dest_dir}")
     if dry_run:
         print("  (dry run — no downloads)")
 
@@ -125,7 +149,7 @@ def fetch_suite(suite_name: str, manifest_path: Path, dry_run: bool, jobs: int) 
     if jobs > 1 and not dry_run:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             futures = {
-                pool.submit(fetch_one, suite_name, v, dry_run): v
+                pool.submit(fetch_one, suite_name, v, dry_run, dest_dir, force): v
                 for v in vectors
             }
             for future in as_completed(futures):
@@ -139,7 +163,7 @@ def fetch_suite(suite_name: str, manifest_path: Path, dry_run: bool, jobs: int) 
                     fail += 1
     else:
         for v in vectors:
-            msg = fetch_one(suite_name, v, dry_run)
+            msg = fetch_one(suite_name, v, dry_run, dest_dir, force)
             print(msg)
             if msg.startswith("  OK") or msg.startswith("  FETCH"):
                 ok += 1
@@ -156,7 +180,11 @@ def main():
     parser.add_argument("--suite", help="Suite name (e.g. JVT-AVC_V1). Default: all suites.")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be downloaded")
     parser.add_argument("--jobs", type=int, default=4, help="Parallel downloads (default: 4)")
+    parser.add_argument("--dest", help="Destination directory (default: $WEDEO_REF_DIR/jvt-vectors or jvt-vectors/)")
+    parser.add_argument("--force", action="store_true", help="Re-download vectors that already exist")
     args = parser.parse_args()
+
+    dest_dir = resolve_vectors_dir(args.dest)
 
     suites = discover_suites()
     if not suites:
@@ -173,7 +201,9 @@ def main():
 
     total_ok = total_skip = total_fail = 0
     for name, path in selected.items():
-        ok, skip, fail = fetch_suite(name, path, args.dry_run, args.jobs)
+        ok, skip, fail = fetch_suite(
+            name, path, args.dry_run, args.jobs, dest_dir, args.force
+        )
         total_ok += ok
         total_skip += skip
         total_fail += fail

@@ -72,10 +72,7 @@ fn more_rbsp_data_in_pps(sps: &Sps) -> bool {
     let constraint_flags_low3 = u8::from(sps.constraint_set0_flag)
         | (u8::from(sps.constraint_set1_flag) << 1)
         | (u8::from(sps.constraint_set2_flag) << 2);
-    if (profile == 66 || profile == 77 || profile == 88) && constraint_flags_low3 != 0 {
-        return false;
-    }
-    true
+    !((profile == 66 || profile == 77 || profile == 88) && constraint_flags_low3 != 0)
 }
 
 /// Decode a single scaling list from the bitstream.
