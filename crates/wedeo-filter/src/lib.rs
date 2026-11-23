@@ -4,6 +4,7 @@ pub mod registry;
 use bitflags::bitflags;
 
 use wedeo_core::error::Result;
+use wedeo_core::frame::Frame;
 use wedeo_core::media_type::MediaType;
 
 bitflags! {
@@ -48,4 +49,10 @@ pub struct FilterDescriptor {
 pub trait Filter: Send {
     fn descriptor(&self) -> &FilterDescriptor;
     fn activate(&mut self) -> Result<()>;
+
+    /// Transform one input frame into zero or more output frames.
+    ///
+    /// Filters that drop frames return an empty vec; filters that duplicate
+    /// frames (e.g. fps) return more than one. Metadata is carried on `Frame`.
+    fn filter_frame(&mut self, frame: Frame) -> Result<Vec<Frame>>;
 }

@@ -20,6 +20,8 @@ export WEDEO_AGENT_BRANCH="agent/$WEDEO_AGENT_ID"
 # this is intentional, per-agent target dirs would exhaust the disk.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/var/cache/zstd5/wedeo-target}"
 mkdir -p "$CARGO_TARGET_DIR"
+# Many agents share one target dir; keep each build small so the box stays usable.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 
 # Per-agent scratch. std::env::temp_dir() honours TMPDIR, so Rust FATE tests
 # with fixed filenames (asynth-44100-2.wav etc.) stay isolated.
