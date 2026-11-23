@@ -340,8 +340,9 @@ fn drain_frames(
                     // differ from the actual width, so we copy row-by-row.
                     let width = video.width as usize;
                     let height = video.height as usize;
-                    let chroma_width = width >> geom.log2_chroma_w;
-                    let chroma_height = height >> geom.log2_chroma_h;
+                    // FFmpeg uses AV_CEIL_RSHIFT for chroma plane dimensions.
+                    let chroma_width = width.div_ceil(1usize << geom.log2_chroma_w);
+                    let chroma_height = height.div_ceil(1usize << geom.log2_chroma_h);
 
                     if video.planes.len() < 3 {
                         eprintln!(
