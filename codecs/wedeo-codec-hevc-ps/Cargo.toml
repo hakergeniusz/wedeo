@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Work unit for libavcodec/hevc/ps.c (scaffolding, not yet implemented)"
+description = "Pure-Rust HEVC VPS/SPS/PPS, slice header and NAL parsing"
 repository.workspace = true
 publish = false
 
