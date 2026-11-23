@@ -57,8 +57,11 @@ pub struct Vp9Decoder {
     frame_count: u64,
     /// Reference frame storage for inter prediction.
     ref_store: RefStore,
-    /// Previous frame's show_frame flag (FFmpeg: `last_invisible`).
-    last_show_frame: bool,
+    /// Previous frame's `invisible` flag (FFmpeg: `s->s.h.invisible`).
+    /// `invisible = !show_frame`, so `!last_invisible` means the previous
+    /// frame was shown. FFmpeg vp9.c:568-571 uses this (not the *current*
+    /// frame's show_frame) to derive `use_last_frame_mvs`.
+    last_invisible: bool,
     /// Previous frame's width (for use_last_frame_mvs dimension check).
     last_width: u32,
     /// Previous frame's height.
@@ -85,7 +88,11 @@ impl Vp9Decoder {
             last_keyframe: false,
             frame_count: 0,
             ref_store: RefStore::new(),
-            last_show_frame: false,
+            // FFmpeg's `s->s.h.invisible` starts at 0, but its
+            // `use_last_frame_mvs &= frames[CUR_FRAME].tf.f` check (vp9.c:641)
+            // makes temporal MV prediction unavailable until a previous frame
+            // exists. Starting at `true` (invisible) preserves that behaviour.
+            last_invisible: true,
             last_width: 0,
             last_height: 0,
         })
@@ -173,12 +180,16 @@ impl Vp9Decoder {
             }
         }
 
-        // FFmpeg: use_last_frame_mvs = !errorres && !last_invisible
-        //         use_last_frame_mvs &= (prev_frame exists && same dimensions)
-        header.use_last_frame_mvs = !header.error_resilient
-            && self.last_show_frame
-            && self.last_width == header.width
-            && self.last_height == header.height;
+        // FFmpeg vp9.c:568-571, 641-643:
+        //   last_invisible = s->s.h.invisible;                    (previous frame)
+        //   s->s.h.invisible = !get_bits1(&s->gb);                (this frame)
+        //   use_last_frame_mvs = !errorres && !last_invisible;
+        //   use_last_frame_mvs &= prev_frame_exists && same_dimensions;
+        header.use_last_frame_mvs = compute_use_last_frame_mvs(
+            header.error_resilient,
+            self.last_invisible,
+            self.last_width == header.width && self.last_height == header.height,
+        );
 
         // --- 2. Set up frame buffer and contexts ---
         let width = header.width;
@@ -394,8 +405,9 @@ impl Vp9Decoder {
         self.ref_store.refresh(header.refresh_ref_mask, ref_frame);
         self.ref_store.rotate_mvpair(cur_mv_grid, cols_4x4);
 
-        // Track frame state for use_last_frame_mvs in next frame.
-        self.last_show_frame = header.show_frame;
+        // Track this frame's `invisible` bit for the *next* frame's
+        // use_last_frame_mvs (FFmpeg vp9.c:569: invisible = !show_frame).
+        self.last_invisible = !header.show_frame;
         self.last_width = width;
         self.last_height = height;
 
@@ -442,6 +454,21 @@ impl Vp9Decoder {
 
         Ok(())
     }
+}
+
+/// Derive `use_last_frame_mvs` exactly as FFmpeg vp9.c:568-571, 641-643 does.
+///
+/// FFmpeg reads the previous frame's `invisible` flag from persistent decoder
+/// state (`last_invisible = s->s.h.invisible`); it does **not** use the current
+/// frame's `show_frame`. `invisible` is `!show_frame`, so temporal MV
+/// prediction is enabled only when the previous frame was shown, the current
+/// frame is not error-resilient, and both frames share dimensions.
+fn compute_use_last_frame_mvs(
+    error_resilient: bool,
+    last_invisible: bool,
+    same_dimensions: bool,
+) -> bool {
+    !error_resilient && !last_invisible && same_dimensions
 }
 
 // ---------------------------------------------------------------------------
@@ -700,7 +727,9 @@ impl Decoder for Vp9Decoder {
         self.output_queue.clear();
         self.draining = false;
         self.ref_store.clear();
-        self.last_show_frame = false;
+        // No previous frame after a flush: keep temporal MV prediction off
+        // until a frame has been decoded (matches FFmpeg's tf.f check).
+        self.last_invisible = true;
     }
 
     fn descriptor(&self) -> &CodecDescriptor {
@@ -823,5 +852,33 @@ mod tests {
         let frames = parse_superframe(&data);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].0, &data[..]);
+    }
+
+    #[test]
+    fn use_last_frame_mvs_uses_previous_invisible_not_current_show_frame() {
+        // FFmpeg vp9.c:568-571: `use_last_frame_mvs = !errorres &&
+        // !last_invisible`. A previous *invisible* frame (show_frame == 0)
+        // disables temporal MV prediction regardless of the current frame's
+        // show_frame bit.
+        assert!(compute_use_last_frame_mvs(false, false, true));
+        assert!(!compute_use_last_frame_mvs(false, true, true));
+        assert!(!compute_use_last_frame_mvs(true, false, true));
+        assert!(!compute_use_last_frame_mvs(false, false, false));
+    }
+
+    #[test]
+    fn invisible_state_tracks_previous_frame_across_superframe() {
+        // Simulate the decoder state update for a superframe whose second
+        // subframe is invisible: [visible, invisible, visible]. Only the
+        // frame after the visible one may use last-frame MVs.
+        let mut last_invisible = true;
+        let show_frames = [true, false, true];
+        let expected = [false, true, false];
+        for (show_frame, expected_use) in show_frames.into_iter().zip(expected) {
+            let use_last = compute_use_last_frame_mvs(false, last_invisible, true);
+            assert_eq!(use_last, expected_use);
+            // vp9.c:569: invisible = !show_frame.
+            last_invisible = !show_frame;
+        }
     }
 }

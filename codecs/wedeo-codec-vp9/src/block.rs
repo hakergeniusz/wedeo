@@ -1462,9 +1462,11 @@ fn update_mv_ctx(
                 td.above.mv[ac + 1] = mv3;
             }
         } else {
-            // >=8×8: broadcast mv[3] across w4*2 above and h4*2 left
+            // >=8×8: broadcast mv[3] across the block's full 4x4-column
+            // footprint. `w4` is in 8x8 units, so the block covers `2*w4`
+            // 4x4 columns; above.mv has two entries per 4x4 column.
             let mv3 = mv[3];
-            for n in 0..w4 * 2 {
+            for n in 0..w4 * 4 {
                 let idx = col * 2 + n;
                 if idx < td.above.mv.len() {
                     td.above.mv[idx] = mv3;
