@@ -226,6 +226,7 @@ pub fn parse_stsd(io: &mut BufferedIo, _payload_size: u64) -> Result<StsdEntry> 
 
     match &fourcc {
         b"avc1" | b"avc3" => parse_avc1_entry(io, fourcc, entry_payload),
+        b"hev1" | b"hvc1" => parse_hev1_entry(io, fourcc, entry_payload),
         b"av01" => parse_av01_entry(io, fourcc, entry_payload),
         b"mp4a" => parse_mp4a_entry(io, fourcc, entry_payload),
         _ => {
@@ -289,6 +290,61 @@ fn parse_avc1_entry(io: &mut BufferedIo, fourcc: [u8; 4], payload_size: u64) -> 
     }
 
     // Skip any remaining bytes
+    let actual_end = io.tell()?;
+    if actual_end < end_pos {
+        io.skip(end_pos - actual_end)?;
+    }
+
+    Ok(StsdEntry {
+        fourcc,
+        width,
+        height,
+        channel_count: 0,
+        sample_rate: 0,
+        extradata,
+    })
+}
+
+/// Parse an HEVC sample entry (hev1/hvc1) — VisualSampleEntry + hvcC sub-box.
+fn parse_hev1_entry(io: &mut BufferedIo, fourcc: [u8; 4], payload_size: u64) -> Result<StsdEntry> {
+    let start_pos = io.tell()?;
+
+    io.skip(6)?; // reserved
+    io.skip(2)?; // data_reference_index
+    io.skip(2)?; // pre_defined
+    io.skip(2)?; // reserved
+    io.skip(12)?; // pre_defined
+    let width = io.read_u16be()?;
+    let height = io.read_u16be()?;
+    io.skip(4)?; // horiz_resolution
+    io.skip(4)?; // vert_resolution
+    io.skip(4)?; // reserved
+    io.skip(2)?; // frame_count
+    io.skip(32)?; // compressorname
+    io.skip(2)?; // depth
+    io.skip(2)?; // pre_defined
+
+    let fixed_fields_size = 6 + 2 + 2 + 2 + 12 + 2 + 2 + 4 + 4 + 4 + 2 + 32 + 2 + 2;
+    let remaining = payload_size.saturating_sub(fixed_fields_size);
+    let end_pos = start_pos + payload_size;
+
+    let mut extradata = Vec::new();
+    let mut consumed = 0u64;
+    while consumed + 8 <= remaining {
+        let current = io.tell()?;
+        if current >= end_pos {
+            break;
+        }
+        let sub = read_box_header(io)?;
+        let sub_payload = sub.payload_size().unwrap_or(0);
+        if &sub.box_type == b"hvcC" {
+            extradata = io.read_bytes(sub_payload as usize)?;
+        } else if sub_payload > 0 {
+            io.skip(sub_payload)?;
+        }
+        consumed += sub.header_size as u64 + sub_payload;
+    }
+
     let actual_end = io.tell()?;
     if actual_end < end_pos {
         io.skip(end_pos - actual_end)?;

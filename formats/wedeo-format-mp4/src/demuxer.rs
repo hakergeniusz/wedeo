@@ -302,6 +302,7 @@ impl Demuxer for Mp4Demuxer {
             if tps.is_video() {
                 let codec_id = match &stsd.fourcc {
                     b"avc1" | b"avc3" => CodecId::H264,
+                    b"hev1" | b"hvc1" => CodecId::Hevc,
                     b"av01" => CodecId::Av1,
                     _ => continue,
                 };
