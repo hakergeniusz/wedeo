@@ -252,6 +252,23 @@ fn luma_intra_pred_mode(
     mode
 }
 
+/// FFmpeg's `MIN_TB_ADDR_ZS(x, y)` for *signed* TB coordinates.
+///
+/// The PS table has a -1 sentinel row and column, so an unavailable neighbour
+/// at x == -1 or y == -1 reads -1 instead of wrapping into the CTB.
+fn min_tb_addr_zs(geo: &RefGeometry, x: i32, y: i32) -> i32 {
+    let side = geo.tb_mask as usize + 2;
+    let (x, y) = (x + 1, y + 1);
+    if x < 0 || y < 0 {
+        -1
+    } else {
+        geo.min_tb_addr_zs_tab
+            .get(y as usize * side + x as usize)
+            .copied()
+            .unwrap_or(-1)
+    }
+}
+
 /// Predict one transform block using the reconstructed neighbours of `picture`.
 #[allow(clippy::too_many_arguments)] // mirrors FFmpeg's FUNC(intra_pred)
 pub fn intra_predict_tu(
@@ -276,48 +293,34 @@ pub fn intra_predict_tu(
 
     let x_tb = ((x0 as u32) >> sps.log2_min_tb_size) & sps.tb_mask;
     let y_tb = ((y0 as u32) >> sps.log2_min_tb_size) & sps.tb_mask;
-    let spin = c_idx != 0
-        && ((1usize << log2_size) >> sps.log2_min_tb_size) == 0
-        && ((2 * y0) & (1 << sps.log2_min_tb_size)) != 0;
-    // FFmpeg's MIN_TB_ADDR_ZS indexes pps->min_tb_addr_zs, which points into
-    // the flat table at `side + 1`. Wedeo's PS crate writes the same values
-    // starting at index 0 while RefGeometry adds the offset again, so read
-    // the flat table directly here for FFmpeg's z-scan values.
-    let zs = |x: usize, y: usize| -> i32 {
-        let side = sps.tb_mask as usize + 2;
-        geo.min_tb_addr_zs_tab
-            .get(y * side + x)
-            .copied()
-            .unwrap_or(-1)
-    };
-    let cur_tb_addr = zs(x_tb as usize, y_tb as usize);
     let size_in_tbs_h = (size << hshift as usize) >> sps.log2_min_tb_size;
     let size_in_tbs_v = (size << vshift as usize) >> sps.log2_min_tb_size;
+    // pred_template.c:131 - spin uses the *luma* TB height for chroma.
+    let spin = c_idx != 0 && size_in_tbs_v == 0 && ((2 * y0) & (1 << sps.log2_min_tb_size)) != 0;
+    // FFmpeg's MIN_TB_ADDR_ZS takes signed neighbours. A negative coordinate
+    // lands on the -1 sentinel row/column; wrapping it into tb_mask would make
+    // unavailable top-right / bottom-left samples look available.
+    let cur_tb_addr = min_tb_addr_zs(geo, x_tb as i32, y_tb as i32);
 
     let mut cand_up_left = na.cand_up_left;
     let mut cand_up = na.cand_up;
     let mut cand_left = na.cand_left;
-    // FFmpeg's MIN_TB_ADDR_ZS takes *signed* neighbours. Wrapping -1 into the
-    // tb_mask here (as unsigned indexing does) makes unavailable top-right /
-    // bottom-left samples look available, so infer them as 1 << (bitdepth-1)
-    // and poison the whole prediction. A negative neighbour coordinate is not
-    // in z-scan order, so the candidate stays unavailable.
-    let zs_up_y = y_tb as i32 - 1;
-    let zs_left_x = x_tb as i32 - 1;
+    // pred_template.c:154,158. The spin term in the bottom-left y coordinate
+    // is required for 4:2:0 chroma when the TB is smaller than a chroma sample.
     let mut cand_up_right = na.cand_up_right
         && !spin
-        && zs_up_y >= 0
         && cur_tb_addr
-            > zs(
-                ((x_tb as i32 + size_in_tbs_h as i32) & sps.tb_mask as i32) as usize,
-                zs_up_y as usize,
+            > min_tb_addr_zs(
+                geo,
+                (x_tb as i32 + size_in_tbs_h as i32) & sps.tb_mask as i32,
+                y_tb as i32 - 1,
             );
     let mut cand_bottom_left = na.cand_bottom_left
-        && zs_left_x >= 0
         && cur_tb_addr
-            > zs(
-                zs_left_x as usize,
-                ((y_tb as i32 + size_in_tbs_v as i32) & sps.tb_mask as i32) as usize,
+            > min_tb_addr_zs(
+                geo,
+                x_tb as i32 - 1,
+                (y_tb as i32 + size_in_tbs_v as i32 + spin as i32) & sps.tb_mask as i32,
             );
 
     let bottom_left_size = ((height.min(y0 + 2 * (size as i32) * (1 << vshift))
@@ -497,4 +500,56 @@ pub fn block_neighbours(
 /// z-scan availability helper exposed for the deblocking code.
 pub fn z_available(geo: &RefGeometry, x0: i32, y0: i32, xn: i32, yn: i32) -> bool {
     z_scan_block_avail(geo, x0, y0, xn, yn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn geometry() -> RefGeometry {
+        let tb_mask = 15u32; // 64x64 CTB with 4x4 minimum TBs
+        let side = tb_mask as usize + 2;
+        let mut tab = vec![0i32; side * side];
+        for y in 0..side {
+            tab[y * side] = -1;
+            tab[y] = -1;
+        }
+        for y in 1..=tb_mask as usize {
+            for x in 1..=tb_mask as usize {
+                tab[y * side + x] = (y * side + x) as i32;
+            }
+        }
+        RefGeometry {
+            width: 64,
+            height: 64,
+            log2_ctb_size: 6,
+            log2_min_pu_size: 2,
+            log2_min_tb_size: 2,
+            ctb_width: 1,
+            tb_mask,
+            log2_parallel_merge_level: 2,
+            ctb_addr_rs_to_ts: vec![0],
+            min_tb_addr_zs_offset: side + 1,
+            min_tb_addr_zs_tab: tab,
+        }
+    }
+
+    #[test]
+    fn min_tb_addr_zs_matches_ffmpeg_table_and_sentinels() {
+        let geo = geometry();
+        // Non-negative coordinates read the same value as RefGeometry's
+        // (already offset) accessor: pps->min_tb_addr_zs points at (1, 1).
+        for y in 0..16 {
+            for x in 0..16 {
+                assert_eq!(
+                    min_tb_addr_zs(&geo, x, y),
+                    geo.min_tb_addr_zs(x as usize, y as usize).unwrap()
+                );
+            }
+        }
+        // The row/column before (0, 0) are -1 sentinels, never wrapped.
+        assert_eq!(min_tb_addr_zs(&geo, -1, 0), -1);
+        assert_eq!(min_tb_addr_zs(&geo, 0, -1), -1);
+        assert_eq!(min_tb_addr_zs(&geo, -1, -1), -1);
+    }
 }
