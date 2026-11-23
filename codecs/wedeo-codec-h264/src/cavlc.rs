@@ -300,8 +300,11 @@ pub fn compute_nc(
         let left = if blk_x > 0 {
             Some(nz_cache[block_idx - 1] as i32)
         } else if neighbor.left_available {
+            // 4:2:2 stores Cb right-column NNZ in left_nz[4..7] and Cr in
+            // left_nz[12..15] (see update_after_mb), so the per-plane stride is
+            // 8. 4:2:0 stores Cb in [4..5] and Cr in [6..7] (stride 2).
             let row = if chroma422 {
-                4 + blk_y as usize + comp * 4
+                4 + blk_y as usize + comp * 8
             } else {
                 4 + blk_y as usize + comp * 2
             };
@@ -1626,6 +1629,30 @@ mod tests {
         // Block 0 (top-left of MB), no left or top available.
         let nc = compute_nc(0, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 0);
+    }
+
+    #[test]
+    fn compute_nc_chroma422_cr_left_uses_correct_slot() {
+        // 4:2:2 stores Cb right-column NNZ in left_nz[4..7] and Cr in
+        // left_nz[12..15] (see update_after_mb). The per-plane stride is 8.
+        // A stride of 4 would read the uninitialized left_nz[8..11] for Cr.
+        let mut neighbor = NeighborContext::new(2);
+        neighbor.left_available = true;
+        neighbor.left_nz[4] = 3; // Cb row 0
+        neighbor.left_nz[7] = 5; // Cb row 3
+        neighbor.left_nz[12] = 4; // Cr row 0
+        neighbor.left_nz[15] = 6; // Cr row 3
+        let mut nz = [0u8; 40];
+        // Keep within-MB top neighbors equal to the expected left value so
+        // merge_nc returns that same value for the blk_y > 0 blocks.
+        nz[20] = 5; // top of Cb block 22
+        nz[28] = 6; // top of Cr block 30
+
+        // Cb blocks 16..23; Cr blocks 24..31.
+        assert_eq!(compute_nc(16, 0, &neighbor, &nz, true), 3);
+        assert_eq!(compute_nc(22, 0, &neighbor, &nz, true), 5);
+        assert_eq!(compute_nc(24, 0, &neighbor, &nz, true), 4);
+        assert_eq!(compute_nc(30, 0, &neighbor, &nz, true), 6);
     }
 
     #[test]
