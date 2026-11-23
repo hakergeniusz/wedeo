@@ -4185,6 +4185,9 @@ name = "wedeo-format-hevc"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
+ "wedeo-codec-hevc-ps",
  "wedeo-core",
  "wedeo-format",
 ]
