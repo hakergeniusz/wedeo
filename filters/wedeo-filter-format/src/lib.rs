@@ -7,17 +7,13 @@
 //! the input and the output link to the lists given as options. Frames are
 //! then passed through by the framework, untouched.
 //!
-//! The frozen Wedeo `Filter` interface has no link-format negotiation hook
-//! (`descriptor()` only carries a `MediaType` per pad). The maximal valid
-//! behavior implemented here is therefore:
-//!
-//!   - parse and retain all five option lists exactly like FFmpeg's `init()`;
-//!   - pass frames through unchanged, never converting or mislabelling pixel
-//!     data (doing so would be wrong without a link negotiation step);
-//!   - record the requested lists as frame metadata, the only channel the
-//!     frozen `Frame` interface exposes for carrying that information.
-//!
-//! See the final report for the precise interface gap.
+//! Wedeo's [`Filter::query_formats`] provides the negotiation hook. This crate
+//! therefore restricts the pixel formats on every video pad to the parsed
+//! `pix_fmts` list, exactly like FFmpeg's `ff_set_common_formats2()`. Frames
+//! pass through unchanged; no ad-hoc metadata is added. Color spaces, color
+//! ranges, alpha modes and chroma locations are parsed and retained, but
+//! `FormatsConfig` currently carries only pixel/sample formats, so those four
+//! lists cannot narrow a pad yet (reported as an interface need).
 
 use wedeo_core::ChromaLocation;
 use wedeo_core::error::{Error, Result};
@@ -26,22 +22,15 @@ use wedeo_core::media_type::MediaType;
 use wedeo_core::pixel_format::PixelFormat;
 
 // Re-exported so that `wedeo-fate` (which does not depend on `wedeo-filter`
-// directly) can inspect registrations through this crate.
-pub use wedeo_filter::registry::{FilterFactory, filters, find_filter_by_name};
+// directly) can inspect registrations and format negotiation through this crate.
+pub use wedeo_filter::formats::{FilterFormat, FilterFormats, FormatsConfig, PadFormats};
+pub use wedeo_filter::graph::{FilterGraph, FilterLinkConfig};
+pub use wedeo_filter::registry::{
+    FilterFactory, create_filter_with_options, filters, find_filter_by_name,
+};
 pub use wedeo_filter::{
     Filter, FilterDescriptor, FilterFlags, FilterPadDescriptor, FilterPadDirection,
 };
-
-/// Metadata key holding the requested `'|'`-separated pixel format names.
-pub const METADATA_PIX_FMTS: &str = "wedeo.format.pix_fmts";
-/// Metadata key holding the requested `'|'`-separated color space names.
-pub const METADATA_COLOR_SPACES: &str = "wedeo.format.color_spaces";
-/// Metadata key holding the requested `'|'`-separated color range names.
-pub const METADATA_COLOR_RANGES: &str = "wedeo.format.color_ranges";
-/// Metadata key holding the requested `'|'`-separated alpha mode names.
-pub const METADATA_ALPHA_MODES: &str = "wedeo.format.alpha_modes";
-/// Metadata key holding the requested `'|'`-separated chroma location names.
-pub const METADATA_CHROMA_LOCATIONS: &str = "wedeo.format.chroma_locations";
 
 // FFmpeg:
 // static const AVFilterPad inputs[] = {
@@ -282,64 +271,30 @@ impl Filter for FormatFilter {
 
     fn activate(&mut self) -> Result<()> {
         // FFmpeg has no activate() callback; negotiation happens once in
-        // init()/query_formats(). The frozen interface has no equivalent, so
-        // activation only records that the filter is live.
+        // init()/query_formats(). Activation only records that the filter is
+        // live.
         self.activated = true;
         Ok(())
     }
 
-    fn filter_frame(&mut self, mut frame: Frame) -> Result<Vec<Frame>> {
+    fn query_formats(&self, cfg: &mut FormatsConfig) -> Result<()> {
+        // FFmpeg: if (s->formats && (ret = ff_set_common_formats2(ctx, cfg_in,
+        // cfg_out, s->formats)) < 0) return ret;
+        // An empty list means "no restriction" (invert_formats() comment), so
+        // leave every pad unrestricted in that case.
+        if !self.formats.is_empty() {
+            cfg.set_common_pixel_formats(&self.formats);
+        }
+        // FFmpeg also narrows color spaces / ranges / alpha modes / chroma
+        // locations here, but FormatsConfig has no fields for them yet.
+        Ok(())
+    }
+
+    fn filter_frame(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         // FFmpeg's format filter has NO filter_frame(): frames are passed
         // through by the framework unchanged (AVFILTER_FLAG_METADATA_ONLY).
-        // We must not rewrite frame.format either: without link negotiation
-        // the incoming format is already the negotiated one, and changing it
-        // would mislabel the pixel data. Record the requests on the frame,
-        // the only channel the frozen Frame interface exposes.
-        if !self.formats.is_empty() {
-            frame.metadata.set(
-                METADATA_PIX_FMTS,
-                self.formats
-                    .iter()
-                    .map(|fmt| fmt.name())
-                    .collect::<Vec<_>>()
-                    .join("|"),
-            );
-        }
-        if !self.color_spaces.is_empty() {
-            frame.metadata.set(
-                METADATA_COLOR_SPACES,
-                self.color_spaces
-                    .iter()
-                    .map(|csp| color_space_name(*csp))
-                    .collect::<Vec<_>>()
-                    .join("|"),
-            );
-        }
-        if !self.color_ranges.is_empty() {
-            frame.metadata.set(
-                METADATA_COLOR_RANGES,
-                self.color_ranges
-                    .iter()
-                    .map(|range| color_range_name(*range))
-                    .collect::<Vec<_>>()
-                    .join("|"),
-            );
-        }
-        if !self.alpha_modes.is_empty() {
-            frame
-                .metadata
-                .set(METADATA_ALPHA_MODES, self.alpha_modes.join("|"));
-        }
-        if !self.chroma_locations.is_empty() {
-            frame.metadata.set(
-                METADATA_CHROMA_LOCATIONS,
-                self.chroma_locations
-                    .iter()
-                    .map(|loc| loc.name())
-                    .collect::<Vec<_>>()
-                    .join("|"),
-            );
-        }
+        // The incoming format is the one negotiated on the link, so rewriting
+        // frame.format would mislabel the pixel data.
         Ok(vec![frame])
     }
 }
@@ -428,14 +383,6 @@ fn color_space_from_i32(value: i32) -> Option<ColorSpace> {
         .find(|csp| *csp as i32 == value)
 }
 
-fn color_space_name(csp: ColorSpace) -> &'static str {
-    let index = ALL_COLOR_SPACES
-        .iter()
-        .position(|candidate| *candidate == csp)
-        .unwrap_or(2);
-    COLOR_SPACE_NAMES.get(index).copied().unwrap_or("unknown")
-}
-
 // FFmpeg: DEFINE_PARSE(color_space, AVColorSpace, av_color_space_from_name,
 // "color space", 0)
 fn parse_color_space(arg: &str) -> Result<ColorSpace> {
@@ -446,15 +393,6 @@ fn parse_color_space(arg: &str) -> Result<ColorSpace> {
     }
     let value = parse_c_int(arg).ok_or(Error::InvalidArgument)?;
     color_space_from_i32(value).ok_or(Error::InvalidArgument)
-}
-
-fn color_range_name(range: ColorRange) -> &'static str {
-    let index = match range {
-        ColorRange::Unspecified => 0,
-        ColorRange::Mpeg => 1,
-        ColorRange::Jpeg => 2,
-    };
-    COLOR_RANGE_NAMES[index]
 }
 
 // FFmpeg: DEFINE_PARSE(color_range, AVColorRange, av_color_range_from_name,
@@ -507,11 +445,28 @@ impl FilterFactory for FormatFilterFactory {
         &FORMAT_DESCRIPTOR
     }
 
-    // `FilterFactory::create()` has no options parameter, so a factory-created
-    // filter has no restriction (FFmpeg's default when pix_fmts is unset).
-    // Callers needing a restriction construct FormatFilter directly.
+    // No options: FFmpeg's default when pix_fmts is unset, i.e. no restriction.
     fn create(&self) -> Result<Box<dyn Filter>> {
         Ok(Box::new(FormatFilter::new([])))
+    }
+
+    // FFmpeg applies the private options with av_opt_set() before
+    // avfilter_graph_config(). Map the five AVOption names to FormatOptions and
+    // run the same init() parsing as FormatFilter::with_options().
+    fn create_with_options(&self, options: &[(&str, &str)]) -> Result<Box<dyn Filter>> {
+        let mut parsed = FormatOptions::new();
+        for &(key, value) in options {
+            match key {
+                "pix_fmts" => parsed.pix_fmts = value.to_string(),
+                "color_spaces" => parsed.color_spaces = value.to_string(),
+                "color_ranges" => parsed.color_ranges = value.to_string(),
+                "alpha_modes" => parsed.alpha_modes = value.to_string(),
+                "chroma_locations" => parsed.chroma_locations = value.to_string(),
+                // av_opt_set() rejects unknown option names.
+                _ => return Err(Error::InvalidArgument),
+            }
+        }
+        Ok(Box::new(FormatFilter::with_options(parsed)?))
     }
 }
 
@@ -659,7 +614,9 @@ mod tests {
         assert_eq!(out.pts, 123);
         assert_eq!(out.duration, 7);
         assert_eq!(out.metadata.get("title"), Some("keep me"));
-        assert_eq!(out.metadata.get(METADATA_PIX_FMTS), Some("rgb24"));
+        // No ad-hoc wedeo.format.* metadata is attached: restrictions live on
+        // the pads, negotiated by query_formats().
+        assert_eq!(out.metadata.len(), 1);
         let video = out.video().unwrap();
         assert_eq!(video.width, 16);
         assert_eq!(video.height, 8);
@@ -671,35 +628,68 @@ mod tests {
     }
 
     #[test]
-    fn filter_frame_records_all_requested_lists() {
-        let mut filter = FormatFilter::with_options(
+    fn query_formats_restricts_both_video_pads() {
+        // FFmpeg: ff_set_common_formats2() applies s->formats to cfg_in and
+        // cfg_out; frames then pass through untouched.
+        let filter = FormatFilter::new([PixelFormat::Yuv420p, PixelFormat::Nv12]);
+        let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+        filter.query_formats(&mut cfg).unwrap();
+
+        let expected =
+            wedeo_filter::FilterFormats::from_pixels([PixelFormat::Yuv420p, PixelFormat::Nv12]);
+        assert_eq!(cfg.inputs.len(), 1);
+        assert_eq!(cfg.outputs.len(), 1);
+        assert_eq!(cfg.inputs[0].formats, expected);
+        assert_eq!(cfg.outputs[0].formats, expected);
+        assert!(cfg.inputs[0].accepts(wedeo_filter::FilterFormat::Pixel(PixelFormat::Nv12)));
+        assert!(!cfg.inputs[0].accepts(wedeo_filter::FilterFormat::Pixel(PixelFormat::Rgb24)));
+    }
+
+    #[test]
+    fn query_formats_without_restriction_leaves_pads_unrestricted() {
+        let filter = FormatFilter::new([]);
+        let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+        filter.query_formats(&mut cfg).unwrap();
+        assert!(cfg.pads_mut().all(|pad| pad.formats.is_any()));
+    }
+
+    #[test]
+    fn factory_options_reach_the_filter() {
+        let factory = FormatFilterFactory;
+        let filter = factory
+            .create_with_options(&[
+                ("pix_fmts", "yuv420p|rgb24"),
+                ("color_spaces", "bt709"),
+                ("color_ranges", "tv"),
+                ("alpha_modes", "straight"),
+                ("chroma_locations", "left"),
+            ])
+            .unwrap();
+
+        let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+        filter.query_formats(&mut cfg).unwrap();
+        assert_eq!(
+            cfg.outputs[0].formats,
+            wedeo_filter::FilterFormats::from_pixels([PixelFormat::Yuv420p, PixelFormat::Rgb24])
+        );
+
+        // The non-pixel lists are parsed and retained by the concrete filter;
+        // FormatsConfig cannot carry them yet.
+        let concrete = FormatFilter::with_options(
             FormatOptions::new()
-                .pix_fmts("yuv420p")
+                .pix_fmts("yuv420p|rgb24")
                 .color_spaces("bt709")
                 .color_ranges("tv")
                 .alpha_modes("straight")
                 .chroma_locations("left"),
         )
         .unwrap();
-        let out = filter
-            .filter_frame(Frame::new_video(2, 2, PixelFormat::Yuv420p))
-            .unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].metadata.get(METADATA_PIX_FMTS), Some("yuv420p"));
-        assert_eq!(out[0].metadata.get(METADATA_COLOR_SPACES), Some("bt709"));
-        assert_eq!(out[0].metadata.get(METADATA_COLOR_RANGES), Some("tv"));
-        assert_eq!(out[0].metadata.get(METADATA_ALPHA_MODES), Some("straight"));
-        assert_eq!(out[0].metadata.get(METADATA_CHROMA_LOCATIONS), Some("left"));
-    }
+        assert_eq!(concrete.color_spaces, vec![ColorSpace::Bt709]);
+        assert_eq!(concrete.color_ranges, vec![ColorRange::Mpeg]);
+        assert_eq!(concrete.alpha_modes, vec!["straight".to_string()]);
+        assert_eq!(concrete.chroma_locations, vec![ChromaLocation::Left]);
 
-    #[test]
-    fn filter_frame_without_restriction_adds_no_metadata() {
-        let mut filter = FormatFilter::new([]);
-        let out = filter
-            .filter_frame(Frame::new_video(2, 2, PixelFormat::Yuv420p))
-            .unwrap();
-        assert_eq!(out.len(), 1);
-        assert!(out[0].metadata.is_empty());
+        assert!(factory.create_with_options(&[("bogus", "1")]).is_err());
     }
 
     #[test]

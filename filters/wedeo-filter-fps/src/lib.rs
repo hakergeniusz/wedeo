@@ -10,14 +10,12 @@
 //! are duplicated. Frame metadata and side data are carried over because the
 //! emitted frames are clones of the input frames.
 //!
-//! # Interface gap
-//!
-//! FFmpeg's `activate()` drives the graph and can push the tail (EOF) frames
-//! through `ff_filter_frame()`. The frozen [`wedeo_filter::Filter`] trait has
-//! `activate(&mut self) -> Result<()>`, which cannot return frames. The tail is
-//! therefore produced by [`FpsFilter::finish()`] on the concrete type; it uses
-//! the last frame's `duration` as a stand-in for FFmpeg's input status
-//! timestamp. An interface change is needed to drive this through the trait.
+//! FFmpeg's `activate()` drives the graph and pushes the tail (EOF) frames
+//! through `ff_filter_frame()`. Wedeo's [`Filter::flush`] is the equivalent
+//! hook: [`FpsFilter`] emits its tail there, so a [`wedeo_filter::graph::FilterGraph`]
+//! can drain it at end of stream. Since this interface has no explicit input
+//! status timestamp, the last frame's `duration` is used as the stand-in for
+//! FFmpeg's `status_pts`, matching the `update_eof_pts()` path in `vf_fps.c`.
 
 use std::collections::VecDeque;
 
@@ -31,8 +29,10 @@ use wedeo_core::timestamp::{NOPTS_VALUE, TIME_BASE_Q};
 use wedeo_filter::{Filter, FilterDescriptor, FilterPadDescriptor, FilterPadDirection};
 
 // Re-exports so downstream crates whose dependency list does not include
-// `wedeo-filter` directly can still discover the registered factory.
-pub use wedeo_filter::registry::{FilterFactory, find_filter_by_name};
+// `wedeo-filter` directly can still discover the registered factory and drive
+// the graph-level EOF flush.
+pub use wedeo_filter::graph::{FilterGraph, FilterLinkConfig};
+pub use wedeo_filter::registry::{FilterFactory, create_filter_with_options, find_filter_by_name};
 pub use wedeo_filter::{
     Filter as FilterTrait, FilterDescriptor as FilterDescriptorType, FilterFlags,
 };
@@ -44,6 +44,30 @@ pub enum EofAction {
     Round,
     /// Pass through the last frame: round its end timestamp up.
     Pass,
+}
+
+/// Options of the `fps` filter, mirroring FFmpeg's `fps_options` table.
+#[derive(Debug, Clone)]
+pub struct FpsOptions {
+    /// FFmpeg `fps`: expression describing the desired output framerate.
+    pub fps: String,
+    /// FFmpeg `start_time`: assumed pts of the first frame, in seconds.
+    pub start_time: Option<f64>,
+    /// FFmpeg `round`: timestamp rescaling method.
+    pub round: Option<Rounding>,
+    /// FFmpeg `eof_action`: action performed for the last frame.
+    pub eof_action: Option<EofAction>,
+}
+
+impl Default for FpsOptions {
+    fn default() -> Self {
+        Self {
+            fps: "25".to_string(),
+            start_time: None,
+            round: None,
+            eof_action: None,
+        }
+    }
 }
 
 /// A buffered frame, the number of times it has been emitted, and the end
@@ -136,6 +160,71 @@ pub fn f64_to_rational(value: f64, max: i32) -> Rational {
     }
 }
 
+// FFmpeg's fps option is an expression; config_props() evaluates it with the
+// named constants below and converts the result with av_d2q(res, INT_MAX).
+// `source_fps` needs the input link, which this interface does not expose, so
+// it is rejected rather than silently guessed.
+fn parse_rate(value: &str) -> Result<Rational> {
+    let constant = match value {
+        "ntsc" => Some(Rational::new(30000, 1001)),
+        "pal" => Some(Rational::new(25, 1)),
+        "film" => Some(Rational::new(24, 1)),
+        "ntsc_film" => Some(Rational::new(24000, 1001)),
+        _ => None,
+    };
+    if let Some(rate) = constant {
+        return Ok(rate);
+    }
+    if let Some((num, den)) = value.split_once('/') {
+        let num = num
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| Error::InvalidArgument)?;
+        let den = den
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| Error::InvalidArgument)?;
+        let rate = Rational::new(num, den);
+        return if rate.num > 0 && rate.den > 0 {
+            Ok(rate)
+        } else {
+            Err(Error::InvalidArgument)
+        };
+    }
+    let fps = value.parse::<f64>().map_err(|_| Error::InvalidArgument)?;
+    if !fps.is_finite() || fps <= 0.0 {
+        return Err(Error::InvalidArgument);
+    }
+    let rate = f64_to_rational(fps, i32::MAX);
+    if rate.num <= 0 || rate.den <= 0 {
+        return Err(Error::InvalidArgument);
+    }
+    Ok(rate)
+}
+
+// FFmpeg's `round` option: zero/inf/down/up/near/near_inf (NEAR and NEAR_INF
+// both map to our nearest-away-from-zero variant).
+fn parse_rounding(value: &str) -> Result<Rounding> {
+    let rounding = match value {
+        "zero" | "0" => Rounding::Zero,
+        "inf" | "1" => Rounding::Inf,
+        "down" | "2" => Rounding::Down,
+        "up" | "3" => Rounding::Up,
+        "near" | "4" | "near_inf" | "5" => Rounding::NearInf,
+        _ => return Err(Error::InvalidArgument),
+    };
+    Ok(rounding)
+}
+
+// FFmpeg's `eof_action` option: round/pass.
+fn parse_eof_action(value: &str) -> Result<EofAction> {
+    match value {
+        "round" | "0" => Ok(EofAction::Round),
+        "pass" | "1" => Ok(EofAction::Pass),
+        _ => Err(Error::InvalidArgument),
+    }
+}
+
 /// The `fps` filter: convert a variable frame rate stream to a constant one.
 pub struct FpsFilter {
     /// Target frame rate (the output link's `frame_rate`).
@@ -212,6 +301,29 @@ impl FpsFilter {
             return Err(Error::InvalidArgument);
         }
         Self::new(rate)
+    }
+
+    /// Create a filter from FFmpeg-style options (the equivalent of applying
+    /// `av_opt_set()` to an `fps` filter context before graph configuration).
+    pub fn with_options(options: FpsOptions) -> Result<Self> {
+        let mut filter = Self::new(parse_rate(&options.fps)?)?;
+        if let Some(rounding) = options.round {
+            filter.rounding = rounding;
+        }
+        if let Some(eof_action) = options.eof_action {
+            filter.eof_action = eof_action;
+        }
+        if let Some(start_time) = options.start_time {
+            // FFmpeg: first_pts = start_time * AV_TIME_BASE; reject values that
+            // cannot be represented in the internal time base.
+            if !start_time.is_finite()
+                || (start_time * wedeo_core::timestamp::TIME_BASE as f64).abs() > i64::MAX as f64
+            {
+                return Err(Error::InvalidArgument);
+            }
+            filter.start_time = Some(start_time);
+        }
+        Ok(filter)
     }
 
     /// Set the rounding method for timestamp rescaling.
@@ -394,9 +506,10 @@ impl FpsFilter {
     /// Produce the end-of-stream tail frames.
     ///
     /// FFmpeg derives the end timestamp from the input link status (typically
-    /// the demuxer's stream end). This interface has no EOF signal, so the last
-    /// frame's `duration` is used as a stand-in. Frames with no positive
-    /// duration produce no tail. Call this once after the last input frame.
+    /// the demuxer's stream end). This interface has no explicit EOF status, so
+    /// the last frame's `duration` is used as a stand-in. Call this once after
+    /// the last input frame; later calls return an empty vec. The graph drives
+    /// the same path through [`Filter::flush`].
     pub fn finish(&mut self) -> Vec<Frame> {
         if self.eof_drained {
             return Vec::new();
@@ -424,7 +537,22 @@ impl FpsFilter {
             None => front.frame.pts,
         };
 
+        // FFmpeg's first_output_due: when EOF lands exactly on the next output
+        // timestamp and nothing has been written yet, the buffered frame is
+        // still due at that timestamp (write_frame() does not drop it).
+        let first_output_due = self.frames_out == 0
+            && front.out_count == 0
+            && front.frame.pts == next
+            && status_pts == next;
+
         let mut n = next;
+        if first_output_due {
+            let mut out = front.frame.clone();
+            out.pts = n;
+            out.duration = 1;
+            outputs.push(out);
+            n = n.wrapping_add(1);
+        }
         while n < status_pts {
             let mut out = front.frame.clone();
             out.pts = n;
@@ -450,14 +578,19 @@ impl Filter for FpsFilter {
     }
 
     fn activate(&mut self) -> Result<()> {
-        // FFmpeg's activate() pumps the graph and can push output frames via
-        // ff_filter_frame(). The frozen Filter trait gives activate() no way to
-        // return frames, so the tail is exposed through `FpsFilter::finish()`.
+        // FFmpeg's activate() pumps the graph; the frame-producing part of that
+        // work is exposed through flush() in this interface.
         Ok(())
     }
 
     fn filter_frame(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         self.process_frame(frame)
+    }
+
+    fn flush(&mut self) -> Result<Vec<Frame>> {
+        // FFmpeg's activate() pushes the tail with ff_filter_frame() once the
+        // input link reports EOF. Here the graph calls flush() instead.
+        Ok(self.finish())
     }
 }
 
@@ -480,6 +613,29 @@ impl FilterFactory for FpsFilterFactory {
 
     fn create(&self) -> Result<Box<dyn Filter>> {
         Ok(Box::new(FpsFilter::new(self.rate)?))
+    }
+
+    // FFmpeg applies the private options with av_opt_set() before graph
+    // configuration. The factory's rate is the default for the `fps` option.
+    fn create_with_options(&self, options: &[(&str, &str)]) -> Result<Box<dyn Filter>> {
+        let mut parsed = FpsOptions {
+            fps: format!("{}/{}", self.rate.num, self.rate.den),
+            ..FpsOptions::default()
+        };
+        for &(key, value) in options {
+            match key {
+                "fps" => parsed.fps = value.to_string(),
+                "start_time" => {
+                    parsed.start_time =
+                        Some(value.parse::<f64>().map_err(|_| Error::InvalidArgument)?);
+                }
+                "round" => parsed.round = Some(parse_rounding(value)?),
+                "eof_action" => parsed.eof_action = Some(parse_eof_action(value)?),
+                // av_opt_set() rejects unknown option names.
+                _ => return Err(Error::InvalidArgument),
+            }
+        }
+        Ok(Box::new(FpsFilter::with_options(parsed)?))
     }
 }
 
@@ -517,7 +673,8 @@ mod tests {
                     .unwrap(),
             );
         }
-        out.extend(filter.finish());
+        // Exercise the trait-level EOF path the graph uses.
+        out.extend(filter.flush().unwrap());
         out.into_iter().map(|f| f.pts).collect()
     }
 
@@ -616,5 +773,126 @@ mod tests {
         // 30000/1001 is the canonical NTSC rate.
         let r = f64_to_rational(30000.0 / 1001.0, 100_000);
         assert!((r.to_f64() - 30000.0 / 1001.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn flush_emits_eof_tail_and_is_idempotent() {
+        // Two frames at 0s and 1.5s (tb 1/2), fps=2 -> 0,1,2 from the regular
+        // path plus the tail frame at pts 3 derived from the last frame's end.
+        let mut filter = FpsFilter::with_fps(2, 1).unwrap();
+        let mut out = filter
+            .filter_frame(video_frame(0, Rational::new(1, 2), 1))
+            .unwrap();
+        out.extend(
+            filter
+                .filter_frame(video_frame(3, Rational::new(1, 2), 1))
+                .unwrap(),
+        );
+        assert_eq!(out.iter().map(|f| f.pts).collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        let tail = filter.flush().unwrap();
+        assert_eq!(tail.iter().map(|f| f.pts).collect::<Vec<_>>(), vec![3]);
+        assert_eq!(tail[0].time_base, Rational::new(1, 2));
+        assert_eq!(tail[0].duration, 1);
+        // A second flush must not repeat the tail.
+        assert!(filter.flush().unwrap().is_empty());
+    }
+
+    #[test]
+    fn flush_outputs_first_frame_when_eof_is_at_its_pts() {
+        // FFmpeg's first_output_due: a zero-duration frame still produces one
+        // output when EOF is exactly at the next output timestamp.
+        let mut filter = FpsFilter::with_fps(25, 1).unwrap();
+        let frame = video_frame(0, Rational::new(1, 25), 0);
+        assert!(filter.filter_frame(frame).unwrap().is_empty());
+        let tail = filter.flush().unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].pts, 0);
+    }
+
+    #[test]
+    fn options_reach_the_concrete_filter() {
+        let options = FpsOptions {
+            fps: "ntsc".to_string(),
+            round: Some(Rounding::Down),
+            eof_action: Some(EofAction::Pass),
+            start_time: Some(1.0),
+        };
+        let filter = FpsFilter::with_options(options).unwrap();
+        assert_eq!(filter.target_rate(), Rational::new(30000, 1001));
+        assert_eq!(filter.rounding, Rounding::Down);
+        assert_eq!(filter.eof_action, EofAction::Pass);
+        assert_eq!(filter.start_time, Some(1.0));
+
+        assert_eq!(
+            FpsFilter::with_options(FpsOptions {
+                fps: "30000/1001".to_string(),
+                ..FpsOptions::default()
+            })
+            .unwrap()
+            .target_rate(),
+            Rational::new(30000, 1001)
+        );
+        assert_eq!(
+            FpsFilter::with_options(FpsOptions {
+                fps: "29.97".to_string(),
+                ..FpsOptions::default()
+            })
+            .unwrap()
+            .target_rate()
+            .to_f64()
+            .round(),
+            30.0
+        );
+        assert!(
+            FpsFilter::with_options(FpsOptions {
+                fps: "source_fps".to_string(),
+                ..FpsOptions::default()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn factory_options_reach_the_registered_filter() {
+        let factory = find_filter_by_name("fps").unwrap();
+        let mut filter = factory
+            .create_with_options(&[
+                ("fps", "10"),
+                ("round", "near"),
+                ("eof_action", "pass"),
+                ("start_time", "0"),
+            ])
+            .unwrap();
+        let mut out = Vec::new();
+        for pts in 0..3 {
+            out.extend(
+                filter
+                    .filter_frame(video_frame(pts, Rational::new(1, 1), 1))
+                    .unwrap(),
+            );
+        }
+        out.extend(filter.flush().unwrap());
+        assert_eq!(
+            out.iter().map(|f| f.pts).collect::<Vec<_>>(),
+            (0..30).collect::<Vec<_>>()
+        );
+
+        assert!(factory.create_with_options(&[("fps", "0")]).is_err());
+        assert!(
+            factory
+                .create_with_options(&[("round", "sideways")])
+                .is_err()
+        );
+        assert!(
+            factory
+                .create_with_options(&[("eof_action", "jump")])
+                .is_err()
+        );
+        assert!(
+            factory
+                .create_with_options(&[("not_an_option", "1")])
+                .is_err()
+        );
     }
 }
