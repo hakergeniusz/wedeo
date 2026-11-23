@@ -8,6 +8,7 @@ members = [
     "crates/wedeo-resample",
     "crates/wedeo-scale",
     "crates/wedeo-limits",
+    "formats/wedeo-format-hevc",
     "codecs/wedeo-codec-pcm",
     "codecs/wedeo-codec-h264",
     "formats/wedeo-format-wav",
@@ -135,3 +136,4 @@ wedeo-codec-hevc-dsp = { path = "codecs/wedeo-codec-hevc-dsp", version = "0.2.0"
 wedeo-codec-hevc-refs = { path = "codecs/wedeo-codec-hevc-refs", version = "0.2.0" }
 wedeo-codec-hevc = { path = "codecs/wedeo-codec-hevc", version = "0.2.0" }
 wedeo-limits = { path = "crates/wedeo-limits", version = "0.2.0" }
+wedeo-format-hevc = { path = "formats/wedeo-format-hevc", version = "0.2.0" }

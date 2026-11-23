@@ -63,5 +63,7 @@ wedeo-codec-hevc-dsp = { workspace = true }
 wedeo-codec-hevc-refs = { workspace = true }
 wedeo-codec-hevc = { workspace = true }
 
+wedeo-format-hevc = { workspace = true }
+
 [lints]
 workspace = true

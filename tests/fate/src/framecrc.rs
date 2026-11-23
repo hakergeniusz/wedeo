@@ -50,6 +50,7 @@ use wedeo_format_wav as _;
 use wedeo_format_webm as _;
 use wedeo_rav1d as _;
 use wedeo_symphonia as _;
+use wedeo_format_hevc as _;
 
 use wedeo_codec::decoder::{Decoder, DecoderBuilder};
 use wedeo_core::error::Error;

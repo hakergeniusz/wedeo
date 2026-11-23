@@ -3747,6 +3747,7 @@ dependencies = [
  "wedeo-format-flv-demux",
  "wedeo-format-flv-mux",
  "wedeo-format-h264",
+ "wedeo-format-hevc",
  "wedeo-format-ivf-mux",
  "wedeo-format-matroska-mux",
  "wedeo-format-mp4",
@@ -3823,6 +3824,7 @@ dependencies = [
  "wedeo-format-flv-demux",
  "wedeo-format-flv-mux",
  "wedeo-format-h264",
+ "wedeo-format-hevc",
  "wedeo-format-ivf",
  "wedeo-format-ivf-mux",
  "wedeo-format-matroska-mux",
@@ -4016,6 +4018,7 @@ dependencies = [
  "wedeo-format-flv-demux",
  "wedeo-format-flv-mux",
  "wedeo-format-h264",
+ "wedeo-format-hevc",
  "wedeo-format-ivf",
  "wedeo-format-ivf-mux",
  "wedeo-format-matroska-mux",
@@ -4178,6 +4181,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wedeo-format-hevc"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "wedeo-core",
+ "wedeo-format",
+]
+
+[[package]]
 name = "wedeo-format-ivf"
 version = "0.2.0"
 dependencies = [
@@ -4319,6 +4331,7 @@ dependencies = [
  "wedeo-format-flv-demux",
  "wedeo-format-flv-mux",
  "wedeo-format-h264",
+ "wedeo-format-hevc",
  "wedeo-format-ivf-mux",
  "wedeo-format-matroska-mux",
  "wedeo-format-mp4",
