@@ -4061,6 +4061,7 @@ name = "wedeo-filter-fps"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
  "wedeo-core",
  "wedeo-filter",
 ]
@@ -4176,6 +4177,8 @@ name = "wedeo-format-ivf-mux"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
 ]
