@@ -1499,6 +1499,15 @@ fn update_mv_ctx(
         let grid_row = row + y;
         for x in 0..grid_w4 {
             let grid_col = col + x;
+            // FFmpeg indexes the MV grid with a superblock-aligned stride
+            // (`s->sb_cols * 8` MI columns), which is wider than the frame's
+            // `s->cols`.  Wedeo uses `cols_4x4` as the stride, so an unbounded
+            // write for a block that extends past the frame's right edge
+            // wraps into the next row and corrupts another block's MV
+            // prediction.  Skip cells outside the frame instead.
+            if grid_col >= td.cols_4x4 || grid_row >= td.rows_4x4 {
+                continue;
+            }
             let idx = grid_row * td.cols_4x4 + grid_col;
             if idx < td.cur_mv_grid.len() {
                 if is_intra {
