@@ -168,6 +168,11 @@ impl BufferPool {
 /// SAFETY: Concurrent access is mediated by `row_progress`:
 /// - Writer has exclusive access to rows > row_progress
 /// - Readers may access rows <= row_progress.load(Acquire)
+///
+/// The `UnsafeCell` is needed because the decoder writes individual rows and
+/// publishes progress while reference-frame readers consume published rows on
+/// other threads. Every access goes through the `unsafe fn` accessors below,
+/// which document the row-level contract callers must uphold.
 pub struct SharedPicture {
     data: UnsafeCell<PictureBuffer>,
     row_progress: AtomicI32,
@@ -179,9 +184,15 @@ pub struct SharedPicture {
     return_to: Option<Arc<Mutex<BufferPool>>>,
 }
 
-// SAFETY: Concurrent access is mediated by `row_progress` atomic.
-// Writer has exclusive access to rows > row_progress; readers only
-// access rows <= row_progress.load(Acquire).
+// SAFETY: `PictureBuffer` contains only owned `Vec`s and integer fields, so
+// it is itself `Send + Sync`. The `UnsafeCell<PictureBuffer>` is reachable
+// only through `data()` / `data_mut()`, which are `unsafe fn` with an explicit
+// row-level contract: the writer publishes rows with a `Release` store and
+// readers observe them with `Acquire` loads (or block on the condvar), so no
+// two threads ever touch the same byte concurrently. `Mutex`, `Condvar` and
+// `Arc<Mutex<BufferPool>>` are thread-safe by construction. The known
+// whole-struct aliasing limitation of this design is recorded in
+// docs/SAFETY_AUDIT.md.
 unsafe impl Sync for SharedPicture {}
 
 impl SharedPicture {
@@ -215,9 +226,19 @@ impl SharedPicture {
     /// # Safety
     ///
     /// Caller must only access pixel rows that have been published
-    /// (rows <= self.row_progress). For fully-complete pictures
-    /// (PROGRESS_COMPLETE), all access is safe.
+    /// (rows <= self.row_progress.load(Ordering::Acquire)). For fully-complete
+    /// pictures (PROGRESS_COMPLETE), all access is safe.
+    ///
+    /// `UnsafeCell::get()` on a live `&self` returns a non-null, aligned
+    /// pointer to the initialized `PictureBuffer` owned by this allocation;
+    /// the borrow of `self` keeps it alive for as long as the returned
+    /// reference can be used. The returned `&PictureBuffer` must not coexist
+    /// with a `&mut PictureBuffer` from `data_mut()` on the same picture.
     pub unsafe fn data(&self) -> &PictureBuffer {
+        // SAFETY: `self.data.get()` is never null and the pointee was fully
+        // initialized by `new` / `new_pooled`. The caller upholds the row
+        // protocol above, and the borrow checker ties the reference to
+        // `&self`, so the buffer cannot be freed while it is in use.
         unsafe { &*self.data.get() }
     }
 
@@ -229,8 +250,18 @@ impl SharedPicture {
     /// Only the decode thread for this picture should call this.
     /// This returns `&mut` from `&self` via `UnsafeCell`, which is the
     /// standard interior mutability pattern for concurrent data structures.
+    ///
+    /// The pointer is non-null and aligned because the buffer is owned by
+    /// `self`. The returned `&mut PictureBuffer` must not overlap any live
+    /// `&PictureBuffer` obtained from `data()` on the same picture.
+    // Justification: returning `&mut` from `&self` is the documented
+    // sole-writer capability for the row-level decode protocol. The method is
+    // `unsafe`, so callers explicitly opt into that contract.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn data_mut(&self) -> &mut PictureBuffer {
+        // SAFETY: as above. `UnsafeCell` is the only legal way to hand out
+        // mutable access through a shared reference; the caller guarantees
+        // no other shared or mutable reference to this buffer is live.
         unsafe { &mut *self.data.get() }
     }
 
@@ -282,8 +313,11 @@ impl SharedPicture {
 impl Drop for SharedPicture {
     fn drop(&mut self) {
         if let Some(pool) = self.return_to.take() {
-            // SAFETY: &mut self in drop() guarantees exclusive access.
-            // No other references exist (Arc refcount hit 0).
+            // SAFETY: `Drop` runs only after the last `Arc` reference is
+            // gone, so `&mut self` is exclusive and no `data()` /
+            // `data_mut()` borrow can be live. `UnsafeCell::get_mut` is safe
+            // with `&mut self`, and `PictureBuffer::empty()` leaves the cell
+            // holding a valid value.
             let buf = std::mem::replace(self.data.get_mut(), PictureBuffer::empty());
             if let Ok(mut pool) = pool.lock() {
                 pool.reclaim(buf);
@@ -345,18 +379,21 @@ impl Deref for PicHandle {
     type Target = PictureBuffer;
 
     fn deref(&self) -> &PictureBuffer {
-        // SAFETY: During decode, only one PicHandle exists per frame, and the
-        // decode thread is the sole writer. Deref for read access is safe because
-        // no other thread accesses this picture's data until it's published.
+        // SAFETY: During decode, only one PicHandle exists per frame and the
+        // decode thread is the sole writer. The frame is not yet in any DPB
+        // reference list, so no other thread can call `data()` on it. The
+        // `Arc<SharedPicture>` keeps the storage alive for as long as the
+        // returned reference can be used (bounded by `&self`).
         unsafe { self.shared.data() }
     }
 }
 
 impl DerefMut for PicHandle {
     fn deref_mut(&mut self) -> &mut PictureBuffer {
-        // SAFETY: PicHandle has exclusive ownership semantics — only one exists
-        // per frame, and &mut self guarantees no concurrent borrows. The decode
-        // thread is the sole writer to this picture's data.
+        // SAFETY: `&mut self` guarantees this is the only live borrow of this
+        // PicHandle, and there is exactly one PicHandle per frame. The frame
+        // has not been published to the DPB yet, so no reader thread can be
+        // observing it through `data()`. The `Arc` keeps the storage alive.
         unsafe { self.shared.data_mut() }
     }
 }
