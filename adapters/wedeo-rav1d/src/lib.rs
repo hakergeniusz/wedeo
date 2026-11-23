@@ -83,8 +83,19 @@ fn chroma_dims(layout: Dav1dPixelLayout, w: usize, h: usize) -> (usize, usize) {
 /// Handles both positive strides (top-down) and negative strides (bottom-up).
 /// For 8-bit, copies `width` bytes per row. For 10/12-bit, copies `width * 2`.
 ///
+/// The whole plane is materialised as one slice, so extracting each row below
+/// is plain bounds-checked slicing instead of one `from_raw_parts` per row.
+///
 /// # Safety
-/// `plane_ptr` must point to valid pixel data with the given stride for `height` rows.
+///
+/// `plane_ptr` must point to a rav1d-owned plane buffer that stays alive for
+/// the duration of this call, with at least `row_bytes` readable bytes at
+/// every row address `plane_ptr + row * stride` for `row` in `0..height`.
+/// rav1d allocates each plane as a single padded allocation (see
+/// `Rav1dPictureDataComponentInner`), so all those bytes lie in one allocation;
+/// `width`, `height`, `stride` and `bpc` must come from the same `Dav1dPicture`
+/// that owns `plane_ptr`. The caller must keep that picture alive (via
+/// `PictureGuard`) until this function returns.
 unsafe fn copy_plane(
     plane_ptr: NonNull<c_void>,
     stride: isize,
@@ -94,16 +105,41 @@ unsafe fn copy_plane(
 ) -> Vec<u8> {
     let bytes_per_pixel = if bpc > 8 { 2 } else { 1 };
     let row_bytes = width * bytes_per_pixel;
-    let mut buf = Vec::with_capacity(row_bytes * height);
+    if row_bytes == 0 || height == 0 {
+        return Vec::new();
+    }
 
     let base = plane_ptr.as_ptr() as *const u8;
+    // Compute the lowest-addressed byte touched by any row and the plane's
+    // total extent. With a negative stride the C pointer addresses the bottom
+    // (last) row, so the first row in memory is `base + (height - 1) * stride`.
+    let (start, plane_len) = if stride >= 0 {
+        let stride = stride as usize;
+        (base, (height - 1) * stride + row_bytes)
+    } else {
+        let abs_stride = stride.unsigned_abs();
+        // SAFETY: `stride` is negative, so `(height - 1) * stride` is a
+        // non-positive offset landing on the first row of the plane. The
+        // caller guarantees the plane allocation covers all `height` rows.
+        let start = unsafe { base.offset((height as isize - 1) * stride) };
+        (start, (height - 1) * abs_stride + row_bytes)
+    };
+
+    // SAFETY: `base` is non-null because it came from `NonNull<c_void>`;
+    // `u8` has alignment 1. The caller guarantees `[start, start + plane_len)`
+    // lies inside one live, initialized plane allocation. The slice does not
+    // escape this function and we only read through it, so it cannot alias a
+    // live mutable borrow of the plane for longer than this call.
+    let plane = unsafe { std::slice::from_raw_parts(start, plane_len) };
+
+    let mut buf = Vec::with_capacity(row_bytes * height);
     for row in 0..height {
-        // SAFETY: Caller guarantees plane_ptr is valid for height rows at the given stride.
-        // Negative strides are valid — dav1d adjusts the base pointer so that
-        // base + row * stride always lands within the allocated region.
-        let row_ptr = unsafe { base.offset(row as isize * stride) };
-        let slice = unsafe { std::slice::from_raw_parts(row_ptr, row_bytes) };
-        buf.extend_from_slice(slice);
+        let row_start = if stride >= 0 {
+            row * stride as usize
+        } else {
+            (height - 1 - row) * stride.unsigned_abs()
+        };
+        buf.extend_from_slice(&plane[row_start..row_start + row_bytes]);
     }
 
     buf
@@ -116,7 +152,13 @@ struct PictureGuard(Option<Dav1dPicture>);
 impl Drop for PictureGuard {
     fn drop(&mut self) {
         if let Some(ref mut pic) = self.0 {
-            // SAFETY: The picture was successfully obtained from dav1d_get_picture.
+            // SAFETY: `pic` is an initialized `Dav1dPicture` returned by a
+            // successful `dav1d_get_picture`. The stack address is non-null
+            // and valid for the read/write that `dav1d_picture_unref`
+            // performs. `PictureGuard` owns the only local reference to this
+            // picture, nothing else borrows it at drop time, and rav1d's
+            // picture buffers are reference counted, so unref cannot
+            // invalidate any other live object.
             unsafe {
                 dav1d_picture_unref(NonNull::new(pic as *mut _));
             }
@@ -126,9 +168,10 @@ impl Drop for PictureGuard {
 
 /// Convert a `Dav1dPicture` to a wedeo `Frame`.
 ///
-/// # Safety
-/// The picture must contain valid plane pointers and be fully decoded.
-unsafe fn picture_to_frame(pic: &Dav1dPicture) -> Result<Frame> {
+/// The caller must keep the picture (and its `PictureGuard`) alive for the
+/// duration of this call: the raw plane and frame-header pointers stored in
+/// `Dav1dPicture` are owned by the picture's reference-counted buffers.
+fn picture_to_frame(pic: &Dav1dPicture) -> Result<Frame> {
     let w = pic.p.w;
     let h = pic.p.h;
     debug_assert!(w >= 0 && h >= 0, "negative picture dimensions from rav1d");
@@ -147,7 +190,10 @@ unsafe fn picture_to_frame(pic: &Dav1dPicture) -> Result<Frame> {
     // Luma plane
     let y_ptr = pic.data[0].ok_or(Error::InvalidData)?;
     let y_stride = pic.stride[0];
-    // SAFETY: Picture planes are valid after successful dav1d_get_picture.
+    // SAFETY: `y_ptr` is a valid plane pointer from a successfully decoded
+    // picture. The caller's `PictureGuard` keeps its allocation alive for
+    // this call, and `w`/`h`/`bpc` describe that same plane. We only read
+    // pixels and copy them into an owned `Vec<u8>`.
     let y_data = unsafe { copy_plane(y_ptr, y_stride, w, h, bpc) };
 
     let y_plane = FramePlane {
@@ -163,7 +209,10 @@ unsafe fn picture_to_frame(pic: &Dav1dPicture) -> Result<Frame> {
         let v_ptr = pic.data[2].ok_or(Error::InvalidData)?;
         let c_stride = pic.stride[1];
 
-        // SAFETY: Picture planes are valid after successful dav1d_get_picture.
+        // SAFETY: As for the luma plane: `u_ptr`/`v_ptr` are valid plane
+        // pointers kept alive by the caller's `PictureGuard`, and `cw`/`ch`/
+        // `bpc` describe those planes. `u_data` and `v_data` are independent
+        // owned buffers, so the two reads cannot alias each other.
         let u_data = unsafe { copy_plane(u_ptr, c_stride, cw, ch, bpc) };
         let v_data = unsafe { copy_plane(v_ptr, c_stride, cw, ch, bpc) };
 
@@ -186,8 +235,12 @@ unsafe fn picture_to_frame(pic: &Dav1dPicture) -> Result<Frame> {
 
     // Determine picture type from frame header
     let pict_type = if let Some(frame_hdr) = pic.frame_hdr {
-        // SAFETY: frame_hdr is valid while the picture (and its PictureGuard) is alive.
-        let hdr = unsafe { &*frame_hdr.as_ptr() };
+        // SAFETY: `frame_hdr` points into the Arc-owned `Dav1dFrameHeader`
+        // held by `pic.frame_hdr_ref`. The caller's `PictureGuard` keeps that
+        // reference alive, rav1d treats the header as immutable while the
+        // picture exists, and the `frame_type` we read is a `Copy` value that
+        // does not outlive this borrow.
+        let hdr = unsafe { frame_hdr.as_ref() };
         if hdr.frame_type == DAV1D_FRAME_TYPE_KEY || hdr.frame_type == DAV1D_FRAME_TYPE_INTRA {
             PictureType::I
         } else if hdr.frame_type == DAV1D_FRAME_TYPE_INTER
@@ -216,13 +269,21 @@ unsafe fn picture_to_frame(pic: &Dav1dPicture) -> Result<Frame> {
 /// rav1d AV1 decoder wrapper — implements wedeo's Decoder trait.
 ///
 /// # Safety
-/// `Dav1dContext` is `RawArc<Rav1dContext>` — a `Copy` raw pointer to an
-/// `Arc<Rav1dContext>`. `RawArc` deliberately doesn't impl `Send` to force
-/// C API callers to reason about ownership, but the underlying `Arc` is
-/// `Send + Sync` and rav1d uses `Mutex`/atomics for internal synchronization.
-/// We maintain single logical ownership: `ctx` lives in `Option<Dav1dContext>`,
-/// is only freed once in `Drop` via `dav1d_close`, and intermediate copies
-/// (from `Copy`) are only used for read-access API calls.
+///
+/// `Dav1dContext` is `RawArc<Rav1dContext>`, a `Copy` raw pointer to an
+/// `Arc<Rav1dContext>`. `RawArc` is deliberately `!Send`/`!Sync` to make C API
+/// callers reason about ownership, but the pointee is `Send + Sync`: rav1d
+/// explicitly implements both for `Rav1dContext` (see
+/// <https://github.com/memorysafety/rav1d/pull/1329>) and synchronises every
+/// access with its state `Mutex`, task-thread locks and atomics.
+///
+/// We keep a single logical owner: `ctx` is populated once by `dav1d_open`,
+/// copied only into transient locals for FFI calls, and consumed exactly once
+/// by `dav1d_close` in `Drop`. Moving this wrapper to another thread therefore
+/// moves the one owning pointer; no `RawArc` copy is ever closed or used after
+/// the close. The other fields (`VecDeque<Packet>`, `VecDeque<Frame>`, flags,
+/// descriptor) are plain owned data touched only through `&mut self` and add
+/// no extra thread-safety obligations.
 unsafe impl Send for Rav1dDecoderWrapper {}
 
 struct Rav1dDecoderWrapper {
@@ -237,10 +298,16 @@ impl Rav1dDecoderWrapper {
     fn new(params: CodecParameters) -> Result<Self> {
         let mut settings = std::mem::MaybeUninit::<Dav1dSettings>::uninit();
 
-        // SAFETY: dav1d_default_settings initializes the settings struct.
+        // SAFETY: `settings` points to writable memory sized for a
+        // `Dav1dSettings` in this stack frame. rav1d's
+        // `dav1d_default_settings` does a single full-struct `ptr::write`
+        // and never reads the old, uninitialised contents.
         unsafe {
             dav1d_default_settings(NonNull::new(settings.as_mut_ptr()).unwrap());
         }
+        // SAFETY: the full-struct write above initialized every field of
+        // `Dav1dSettings`; it has no validity invariant beyond its field
+        // values, so `assume_init` is sound.
         let mut settings = unsafe { settings.assume_init() };
 
         // Configure threading
@@ -252,7 +319,11 @@ impl Rav1dDecoderWrapper {
 
         let mut ctx: Option<Dav1dContext> = None;
 
-        // SAFETY: dav1d_open writes a context handle to ctx.
+        // SAFETY: `&mut ctx` is a valid, writable `Option<Dav1dContext>` slot
+        // and `&mut settings` points to the fully initialized settings above.
+        // On failure rav1d writes `None` into `ctx`, so the slot is always
+        // safe to inspect. A successful call yields the sole owning raw Arc
+        // pointer to a fresh context; no other copy exists yet.
         let result = unsafe {
             dav1d_open(
                 Some(NonNull::new(&mut ctx as *mut _).unwrap()),
@@ -295,19 +366,28 @@ impl Rav1dDecoderWrapper {
         let mut dav1d_data = std::mem::MaybeUninit::<Dav1dData>::zeroed();
         let dav1d_data_ptr = NonNull::new(dav1d_data.as_mut_ptr()).unwrap();
 
-        // SAFETY: dav1d_data_create allocates a buffer of the given size.
-        // Returns a pointer to the allocated buffer, or null on error.
+        // SAFETY: `dav1d_data_ptr` points to writable memory sized for a
+        // `Dav1dData` in this stack frame. On success `dav1d_data_create`
+        // writes every field of that struct; on failure it leaves the
+        // `MaybeUninit` untouched and returns null, which we check before
+        // calling `assume_init`.
         let buf_ptr = unsafe { dav1d_data_create(Some(dav1d_data_ptr), data.len()) };
         if buf_ptr.is_null() {
             return Err(Error::InvalidData);
         }
 
-        // SAFETY: dav1d_data_create succeeded, struct is now initialized.
+        // SAFETY: `dav1d_data_create` succeeded, so the full struct write
+        // described above happened; no `Dav1dData` field is left uninitialized.
         let mut dav1d_data = unsafe { dav1d_data.assume_init() };
 
         // Copy packet data into the rav1d buffer
         if let Some(ptr) = dav1d_data.data {
-            // SAFETY: dav1d_data_create allocated a buffer of exactly data.len() bytes.
+            // SAFETY: `dav1d_data_create` allocated exactly `data.len()`
+            // readable/writable bytes at `ptr`, so the copy is in bounds.
+            // `data.as_ptr()` points into the caller's packet buffer, a
+            // distinct allocation, so the ranges cannot overlap. With an
+            // empty packet the pointers may be dangling, but `count == 0`
+            // makes `copy_nonoverlapping` a no-op.
             unsafe {
                 std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr(), data.len());
             }
@@ -317,7 +397,11 @@ impl Rav1dDecoderWrapper {
         dav1d_data.m.timestamp = timestamp;
         dav1d_data.m.duration = duration;
 
-        // SAFETY: We pass valid data to the decoder.
+        // SAFETY: `ctx` came from `dav1d_open` and has not been closed;
+        // `&mut dav1d_data` is an initialized, writable `Dav1dData` that
+        // rav1d reads and writes back (taking its own refcount on the
+        // buffer). Ownership stays single-threaded because `send_raw_data`
+        // takes `&mut self`, and rav1d synchronises the context internally.
         let result = unsafe {
             dav1d_send_data(
                 Some(ctx),
@@ -325,15 +409,17 @@ impl Rav1dDecoderWrapper {
             )
         };
 
-        // On EAGAIN, rav1d didn't consume the data (internal buffer busy).
-        // On other errors, data may not have been consumed either.
-        // On success, rav1d takes ownership (clears dav1d_data internally).
-        // Free our allocation in the non-success cases.
-        if dav1d_data.sz > 0 {
-            // SAFETY: Unreferencing data that rav1d did not consume.
-            unsafe {
-                dav1d_data_unref(Some(NonNull::new(&mut dav1d_data as *mut _).unwrap()));
-            }
+        // Always release our local Arc reference to the data buffer. Even on
+        // success, `dav1d_send_data` writes back a `Dav1dData` holding its own
+        // refcount copy; skipping unref would leak ours (notably for
+        // zero-length packets where `sz == 0`). On EAGAIN or other errors
+        // rav1d may not have taken the data at all, in which case this is the
+        // only reference and must be released.
+        // SAFETY: `dav1d_data` is initialized and valid for read/write;
+        // `dav1d_data_unref` replaces it with a default (empty) value and
+        // never dereferences stale pointers.
+        unsafe {
+            dav1d_data_unref(Some(NonNull::new(&mut dav1d_data as *mut _).unwrap()));
         }
 
         check_result(result)
@@ -347,20 +433,28 @@ impl Rav1dDecoderWrapper {
             let mut pic = std::mem::MaybeUninit::<Dav1dPicture>::zeroed();
             let pic_ptr = NonNull::new(pic.as_mut_ptr()).unwrap();
 
-            // SAFETY: dav1d_get_picture writes a picture to the output.
+            // SAFETY: `pic_ptr` points to writable memory sized for a
+            // `Dav1dPicture` in this stack frame. `ctx` is from `dav1d_open`
+            // and has not been closed. rav1d writes a complete
+            // `Dav1dPicture` (possibly all-empty on failure) through `out`.
             let result = unsafe { dav1d_get_picture(Some(ctx), Some(pic_ptr)) };
 
             if result.0 < 0 {
                 break; // EAGAIN or error — no more pictures available
             }
 
-            // SAFETY: dav1d_get_picture succeeded, pic is now initialized.
-            // Wrap in PictureGuard to ensure dav1d_picture_unref is called
-            // even if pixel copying panics (e.g. OOM).
+            // SAFETY: on success `dav1d_get_picture` has written every field
+            // of `Dav1dPicture`, including zeros/defaults for absent planes,
+            // so `assume_init` is valid. The picture owns its plane buffers
+            // and header Arc's; the guard now takes responsibility for
+            // releasing them, even if pixel copying panics (e.g. OOM).
             let guard = PictureGuard(Some(unsafe { pic.assume_init() }));
 
-            // SAFETY: picture planes are valid while the guard holds the picture.
-            let frame_result = unsafe { picture_to_frame(guard.0.as_ref().unwrap()) };
+            // SAFETY: `guard.0` is an initialized picture whose buffers stay
+            // alive until `drop(guard)` below. `picture_to_frame` only reads
+            // through the raw pointers and copies pixels into owned Vecs;
+            // no reference to the picture escapes the call.
+            let frame_result = picture_to_frame(guard.0.as_ref().unwrap());
 
             // Explicitly unref via the guard (drop releases it)
             drop(guard);
@@ -443,7 +537,10 @@ impl Decoder for Rav1dDecoderWrapper {
 
     fn flush(&mut self) {
         if let Some(ctx) = self.ctx {
-            // SAFETY: dav1d_flush resets the decoder state.
+            // SAFETY: `ctx` is a live handle from `dav1d_open` that has not
+            // been closed. `flush` takes `&mut self`, so no other call through
+            // this wrapper can be in flight, and rav1d additionally
+            // synchronises with its internal state mutex.
             unsafe {
                 dav1d_flush(ctx);
             }
@@ -462,8 +559,12 @@ impl Drop for Rav1dDecoderWrapper {
     fn drop(&mut self) {
         if let Some(ctx) = self.ctx.take() {
             let mut ctx_opt: Option<Dav1dContext> = Some(ctx);
-            // SAFETY: dav1d_close reads the context from ctx_opt, frees it,
-            // and writes None back.
+            // SAFETY: `ctx_opt` is an initialized local `Option<Dav1dContext>`
+            // holding the single owning raw Arc pointer created by
+            // `dav1d_open`. It is valid for the read/write `dav1d_close`
+            // performs; `dav1d_close` takes the value and writes `None` back,
+            // so the pointer is consumed exactly once and cannot be
+            // double-freed. `self.ctx.take()` above prevents a second close.
             unsafe {
                 dav1d_close(NonNull::new(&mut ctx_opt as *mut _));
             }
