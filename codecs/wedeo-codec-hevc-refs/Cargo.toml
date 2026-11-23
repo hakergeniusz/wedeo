@@ -4,13 +4,14 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Work unit for libavcodec/hevc/refs.c (scaffolding, not yet implemented)"
+description = "Pure-Rust HEVC reference pictures (DPB/RPS), reference lists and motion vector prediction"
 repository.workspace = true
 publish = false
 
 [dependencies]
 wedeo-core = { workspace = true }
 wedeo-codec = { workspace = true }
+wedeo-codec-hevc-ps = { workspace = true }
 inventory = { workspace = true }
 
 [lints]
