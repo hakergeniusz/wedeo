@@ -1,14 +1,29 @@
-//! Work unit: `wedeo-filter-graph`.
+//! Functional filter graph for Wedeo.
 //!
-//! FFmpeg reference: `libavfilter/avfilter.c`.
+//! FFmpeg references: `libavfilter/avfilter.c`, `libavfilter/avfiltergraph.c`,
+//! `libavfilter/buffersrc.c`, `libavfilter/buffersink.c`.
 //!
-//! This crate is scaffolding created by the Phase 0 factory. A single subagent
-//! owns this directory. The implementer replaces this stub with the full Filter
-//! implementation, registers it via `inventory::submit!`, and adds conformance
-//! tests in `tests/fate/tests/fate_filter_graph.rs`.
-//!
-//! Do not implement this work unit in any other crate.
+//! This crate owns node creation from the filter registry, pad/link
+//! validation, per-link frame queues and the `run` path that pushes frames
+//! through a chain of `Box<dyn Filter>` via `filter_frame`. The frozen
+//! `wedeo_filter::graph::FilterGraph` stub in the framework crate is not
+//! modified.
+
+mod builtin;
+mod graph;
+
+#[cfg(test)]
+mod tests;
+
+pub use builtin::PassThrough;
+pub use graph::{Graph, Link, LinkId, Node, NodeId};
+// Re-exported so the FATE harness can query the registry without adding a
+// direct dependency on the framework crate.
+pub use wedeo_filter::graph::FilterLinkConfig;
+pub use wedeo_filter::registry::{FilterFactory, filters, find_filter_by_name};
+pub use wedeo_filter::{
+    Filter, FilterDescriptor, FilterFlags, FilterPadDescriptor, FilterPadDirection,
+};
 
 use inventory as _;
 use wedeo_core as _;
-use wedeo_filter as _;
