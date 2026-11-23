@@ -1,0 +1,16 @@
+[package]
+name = "wedeo-limits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+description = "Checked allocation and dimension guards for untrusted media headers"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+wedeo-core = { workspace = true }
+
+[lints]
+workspace = true
