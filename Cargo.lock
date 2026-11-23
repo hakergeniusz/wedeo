@@ -4128,6 +4128,8 @@ name = "wedeo-format-avi-demux"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
 ]
@@ -4137,6 +4139,8 @@ name = "wedeo-format-flv-demux"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
 ]
