@@ -25,3 +25,34 @@ additionally exercises the engine on real HEVC slice data.
 
 Do not put this work unit in another crate. Conformance tests belong in
 `tests/fate/tests/fate_codec_hevc_cabac.rs`.
+
+## Ground-truth parity notes (wave C, agent 50)
+
+The bin stream was compared against a debug FFmpeg build
+(`--disable-optimizations --enable-debug=3 --disable-asm`) with gdb
+breakpoints at `libavcodec/cabac_functions.h:128` (regular bins, printing
+`bit`/`low`/`range`/bytestream offset) and `libavcodec/hevc/cabac.c:1470`
+(`coeff_abs_level_greater1_flag` bins, printing `inc`/`ctx_set` and the
+context index).
+
+- `hdr10_plus_h265_sample.hevc`: all **96,427** regular CABAC bins decoded by
+  Wedeo for the first frame match FFmpeg exactly in `bit`, `low`, `range`
+  and byte position, including every `coeff_abs_level_greater1_flag` context
+  (18,566 bins). Residual *bin* decoding is therefore bit-exact for this
+  vector; its framecrc mismatch comes from reconstruction downstream, not
+  from this crate or `coefficients.rs`.
+- `pir.hevc`: the first 10,542 regular bins (through the first CTU row)
+  match exactly. The first divergence is at the first WPP row boundary,
+  where FFmpeg's `ff_hevc_cabac_init()` calls `substream_continue()` and
+  `load_states()` (contexts from the previous row's second CTB) while the
+  decoder re-creates `Cabac` with `init_state_from_slice()`. Wedeo's
+  `wpp_offsets()` also adds `sh.data_offset` to offsets that are already
+  relative to `slice_data` (measured: `off=1428` vs FFmpeg's `1402`, i.e.
+  `data_offset=26` double counted). Both defects live in
+  `wedeo-codec-hevc/src/decoder.rs`, outside this crate's ownership.
+- FFmpeg's `ff_init_cabac_decoder()` pointer-alignment branch is equivalent
+  to the fixed aligned path used by `Cabac::new`: framecrc is identical for
+  default and `-thread_type 0` runs, so no change was needed there.
+
+No residual-bin defect was found in this crate or in `coefficients.rs`;
+no decoder code change resulted from this investigation.
