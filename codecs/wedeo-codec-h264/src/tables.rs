@@ -55,6 +55,50 @@ pub const ZIGZAG_SCAN_8X8_CAVLC: [[u8; 16]; 4] = [
     [16, 10, 25, 5, 33, 34, 6, 28, 56, 36, 23, 51, 45, 46, 54, 63],
 ];
 
+/// Maximum QP supported by FFmpeg's high bit-depth tables.
+///
+/// From FFmpeg `libavcodec/h264.h`:
+/// `#define QP_MAX_NUM (51 + 6*6)  // The maximum supported qp`
+pub const QP_MAX_NUM: usize = 51 + 6 * 6;
+
+/// Build the QP-to-chroma-QP table for one luma bit depth.
+///
+/// FFmpeg's `h264data.c` defines each row of `ff_h264_chroma_qp` as a run of
+/// identity entries (`QP(i, depth) = i + 6*(depth-8)`) for QPs below the
+/// bit-depth offset, followed by `CHROMA_QP_TABLE_END(depth)` (the 8-bit table
+/// shifted by the same offset). Remaining entries are implicitly zero.
+const fn chroma_qp_table_for_depth(bit_depth: u8) -> [u8; QP_MAX_NUM + 1] {
+    let offset = 6 * (bit_depth - 8);
+    let mut table = [0u8; QP_MAX_NUM + 1];
+    let mut i = 0;
+    while i < QP_MAX_NUM + 1 {
+        if i < offset as usize {
+            table[i] = i as u8;
+        } else if i - (offset as usize) < CHROMA_QP_TABLE.len() {
+            table[i] = CHROMA_QP_TABLE[i - (offset as usize)] + offset;
+        }
+        i += 1;
+    }
+    table
+}
+
+/// QP-to-chroma-QP mapping for all supported bit depths (H.264 spec Table 8-15).
+///
+/// Indexed as `CHROMA_QP_TABLES[bit_depth_luma - 8][qp]`, equivalent to
+/// FFmpeg's `ff_h264_chroma_qp[depth - 8][qp]`. The 8-bit row is identical to
+/// [`CHROMA_QP_TABLE`] for qp 0..51. This table is used for every chroma
+/// geometry (4:2:0, 4:2:2, 4:4:4); geometry only changes how many blocks are
+/// decoded, not their QP mapping.
+pub const CHROMA_QP_TABLES: [[u8; QP_MAX_NUM + 1]; 7] = [
+    chroma_qp_table_for_depth(8),
+    chroma_qp_table_for_depth(9),
+    chroma_qp_table_for_depth(10),
+    chroma_qp_table_for_depth(11),
+    chroma_qp_table_for_depth(12),
+    chroma_qp_table_for_depth(13),
+    chroma_qp_table_for_depth(14),
+];
+
 /// QP-to-chroma-QP mapping for 8-bit depth (H.264 spec Table 8-15).
 ///
 /// Maps luma QP (0-51) to chroma QP. Used for chroma deblocking and

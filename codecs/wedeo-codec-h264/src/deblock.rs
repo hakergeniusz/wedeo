@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use tracing::{debug, trace};
 
-use crate::tables::CHROMA_QP_TABLE;
+use crate::tables::{CHROMA_QP_TABLES, QP_MAX_NUM};
 
 /// Wrapper to send a `*mut PictureBuffer` across scoped threads.
 ///
@@ -103,12 +103,27 @@ const TC0_TABLE: [[i32; 3]; 52] = [
 
 /// Per-slice deblocking filter parameters.
 /// Each slice in a frame can have different alpha/beta offsets and idc.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SliceDeblockParams {
     pub alpha_c0_offset: i32,
     pub beta_offset: i32,
     pub disable_deblocking_filter_idc: u32,
     pub chroma_qp_index_offset: [i32; 2],
+    /// Luma bit depth from the SPS; selects the chroma QP mapping table and
+    /// scales the deblocking thresholds (FFmpeg uses `1 << (bit_depth - 8)`).
+    pub bit_depth_luma: u8,
+}
+
+impl Default for SliceDeblockParams {
+    fn default() -> Self {
+        Self {
+            alpha_c0_offset: 0,
+            beta_offset: 0,
+            disable_deblocking_filter_idc: 0,
+            chroma_qp_index_offset: [0, 0],
+            bit_depth_luma: 8,
+        }
+    }
 }
 
 /// Information about a decoded macroblock needed for deblocking.
@@ -172,17 +187,34 @@ impl Default for MbDeblockInfo {
 }
 
 /// Picture buffer with Y, U, V planes.
+///
+/// 8-bit content uses the `y`/`u`/`v` byte planes. For bit depths 9..14 the
+/// parallel `y16`/`u16`/`v16` planes hold the full-precision samples (as
+/// native-endian `u16` values in the range `0..=max_pixel()`), matching
+/// FFmpeg's `uint16_t` sample buffers for high bit depth. Both sets are
+/// allocated so the existing 8-bit reconstruction kernels can operate while
+/// the typed-pixel pipeline is being generalized.
 #[derive(Clone)]
 pub struct PictureBuffer {
     pub y: Vec<u8>,
     pub u: Vec<u8>,
     pub v: Vec<u8>,
+    /// Full-precision luma samples for bit depths above 8 (empty at 8-bit).
+    pub y16: Vec<u16>,
+    /// Full-precision Cb samples for bit depths above 8 (empty at 8-bit).
+    pub u16: Vec<u16>,
+    /// Full-precision Cr samples for bit depths above 8 (empty at 8-bit).
+    pub v16: Vec<u16>,
     pub y_stride: usize,
     pub uv_stride: usize,
     pub width: u32,
     pub height: u32,
     pub mb_width: u32,
     pub mb_height: u32,
+    /// Luma bit depth from the active SPS (8..=14).
+    pub bit_depth: u8,
+    /// Chroma format: 0 = monochrome, 1 = 4:2:0, 2 = 4:2:2, 3 = 4:4:4.
+    pub chroma_format_idc: u8,
 }
 
 impl PictureBuffer {
@@ -192,13 +224,61 @@ impl PictureBuffer {
             y: Vec::new(),
             u: Vec::new(),
             v: Vec::new(),
+            y16: Vec::new(),
+            u16: Vec::new(),
+            v16: Vec::new(),
             y_stride: 0,
             uv_stride: 0,
             width: 0,
             height: 0,
             mb_width: 0,
             mb_height: 0,
+            bit_depth: 8,
+            chroma_format_idc: 1,
         }
+    }
+
+    /// Largest valid sample value (`(1 << bit_depth) - 1`).
+    #[inline]
+    pub fn max_pixel(&self) -> u16 {
+        ((1u32 << self.bit_depth) - 1) as u16
+    }
+
+    /// `qp_bd_offset = 6 * (bit_depth - 8)` from H.264 spec 7.4.2.1.1.
+    #[inline]
+    pub fn qp_bd_offset(&self) -> i32 {
+        6 * (self.bit_depth as i32 - 8)
+    }
+
+    /// Chroma subsampling factors `SubWidthC`/`SubHeightC` (H.264 Table 6-1).
+    #[inline]
+    pub fn chroma_shift(&self) -> (u32, u32) {
+        match self.chroma_format_idc {
+            1 => (1, 1), // 4:2:0
+            2 => (1, 0), // 4:2:2
+            3 => (0, 0), // 4:4:4
+            _ => (0, 0), // monochrome: no chroma samples
+        }
+    }
+
+    /// Chroma plane width (0 for monochrome).
+    #[inline]
+    pub fn chroma_width(&self) -> u32 {
+        let (shift_w, _) = self.chroma_shift();
+        self.width >> shift_w
+    }
+
+    /// Chroma plane height (0 for monochrome).
+    #[inline]
+    pub fn chroma_height(&self) -> u32 {
+        let (_, shift_h) = self.chroma_shift();
+        self.height >> shift_h
+    }
+
+    /// True when samples are stored in the `y16`/`u16`/`v16` planes.
+    #[inline]
+    pub fn is_high_depth(&self) -> bool {
+        self.bit_depth > 8
     }
 }
 
@@ -226,10 +306,14 @@ fn clip_pixel(x: i32) -> u8 {
 
 /// Map luma QP to chroma QP using the spec table, applying the PPS
 /// chroma_qp_index_offset before lookup (H.264 spec eq. 7-30).
+///
+/// The table is selected by luma bit depth; for 8-bit this is identical to
+/// `crate::tables::CHROMA_QP_TABLE`. The upper clamp is `51 + qp_bd_offset`.
 #[inline(always)]
-fn chroma_qp(luma_qp: u8, chroma_qp_index_offset: i32) -> u8 {
-    let idx = (luma_qp as i32 + chroma_qp_index_offset).clamp(0, 51) as usize;
-    CHROMA_QP_TABLE[idx]
+fn chroma_qp(luma_qp: u8, chroma_qp_index_offset: i32, bit_depth_luma: u8) -> u8 {
+    let max_qp = 51 + 6 * (bit_depth_luma as i32 - 8);
+    let idx = (luma_qp as i32 + chroma_qp_index_offset).clamp(0, max_qp) as usize;
+    CHROMA_QP_TABLES[(bit_depth_luma as usize) - 8][idx.min(QP_MAX_NUM)]
 }
 
 /// Compute the average QP between two blocks for edge filtering.
@@ -1236,6 +1320,7 @@ fn deblock_mbaff_first_vert_edge(
     alpha_c0_offset: i32,
     beta_offset: i32,
     chroma_qp_index_offset: [i32; 2],
+    bit_depth_luma: u8,
 ) -> bool {
     let mb_idx = (mb_y * mb_width + mb_x) as usize;
     let cur = &mb_info[mb_idx];
@@ -1337,9 +1422,15 @@ fn deblock_mbaff_first_vert_edge(
 
     // --- Chroma (4:2:0) ---
     for (comp, &offset) in chroma_qp_index_offset.iter().enumerate() {
-        let chroma_qp_cur = chroma_qp(mb_qp, offset);
-        let cqp0 = avg_qp(chroma_qp_cur, chroma_qp(left_top_qp, offset));
-        let cqp1 = avg_qp(chroma_qp_cur, chroma_qp(left_bot_qp, offset));
+        let chroma_qp_cur = chroma_qp(mb_qp, offset, bit_depth_luma);
+        let cqp0 = avg_qp(
+            chroma_qp_cur,
+            chroma_qp(left_top_qp, offset, bit_depth_luma),
+        );
+        let cqp1 = avg_qp(
+            chroma_qp_cur,
+            chroma_qp(left_bot_qp, offset, bit_depth_luma),
+        );
 
         let (plane, base) = if comp == 0 {
             (&mut pic.u, chroma_base_u)
@@ -1412,6 +1503,7 @@ fn deblock_mbaff_horiz_edge0(
     alpha_c0_offset: i32,
     beta_offset: i32,
     chroma_qp_index_offset: [i32; 2],
+    bit_depth_luma: u8,
 ) -> bool {
     // Only applies at top of pair when above pair is field and current is frame
     if mb_y & 1 != 0 || mb_y < 2 {
@@ -1501,7 +1593,10 @@ fn deblock_mbaff_horiz_edge0(
 
         // Chroma
         for (comp, &offset) in chroma_qp_index_offset.iter().enumerate() {
-            let cqp = avg_qp(chroma_qp(cur.qp, offset), chroma_qp(above.qp, offset));
+            let cqp = avg_qp(
+                chroma_qp(cur.qp, offset, bit_depth_luma),
+                chroma_qp(above.qp, offset, bit_depth_luma),
+            );
             let (plane, base) = if comp == 0 {
                 (&mut pic.u, chroma_base_u)
             } else {
@@ -1574,6 +1669,7 @@ fn deblock_mb(
     let alpha_c0_offset = params.alpha_c0_offset;
     let beta_offset = params.beta_offset;
     let chroma_qp_index_offset = params.chroma_qp_index_offset;
+    let bit_depth_luma = params.bit_depth_luma;
 
     // Compute field-aware pixel offsets and strides for this MB.
     trace!(
@@ -1630,6 +1726,7 @@ fn deblock_mb(
                     alpha_c0_offset,
                     beta_offset,
                     chroma_qp_index_offset,
+                    bit_depth_luma,
                 )
         } else {
             top_available
@@ -1642,6 +1739,7 @@ fn deblock_mb(
                     alpha_c0_offset,
                     beta_offset,
                     chroma_qp_index_offset,
+                    bit_depth_luma,
                 )
         };
 
@@ -1716,12 +1814,16 @@ fn deblock_mb(
             }
 
             for (comp, &offset) in chroma_qp_index_offset.iter().enumerate() {
-                let chroma_qp_cur = chroma_qp(cur_qp, offset);
+                let chroma_qp_cur = chroma_qp(cur_qp, offset, bit_depth_luma);
                 let qp = if edge == 0 {
                     let neighbor_qp = if is_vertical && mb_x > 0 {
-                        Some(chroma_qp(mb_info[mb_idx - 1].qp, offset))
+                        Some(chroma_qp(mb_info[mb_idx - 1].qp, offset, bit_depth_luma))
                     } else if !is_vertical && has_above {
-                        Some(chroma_qp(mb_info[mb_idx - above_stride].qp, offset))
+                        Some(chroma_qp(
+                            mb_info[mb_idx - above_stride].qp,
+                            offset,
+                            bit_depth_luma,
+                        ))
                     } else {
                         None
                     };
@@ -2022,6 +2124,7 @@ mod tests {
             height: 16,
             mb_width: 1,
             mb_height: 1,
+            ..PictureBuffer::empty()
         }
     }
 
@@ -2038,6 +2141,7 @@ mod tests {
             height: 16,
             mb_width: 2,
             mb_height: 1,
+            ..PictureBuffer::empty()
         }
     }
 
@@ -2054,6 +2158,7 @@ mod tests {
             height: 32,
             mb_width: 1,
             mb_height: 2,
+            ..PictureBuffer::empty()
         }
     }
 
@@ -2721,13 +2826,19 @@ mod tests {
     #[test]
     fn chroma_qp_mapping() {
         // offset=0: identity through table
-        assert_eq!(chroma_qp(0, 0), 0);
-        assert_eq!(chroma_qp(29, 0), 29);
-        assert_eq!(chroma_qp(30, 0), 29);
-        assert_eq!(chroma_qp(51, 0), 39);
+        assert_eq!(chroma_qp(0, 0, 8), 0);
+        assert_eq!(chroma_qp(29, 0, 8), 29);
+        assert_eq!(chroma_qp(30, 0, 8), 29);
+        assert_eq!(chroma_qp(51, 0, 8), 39);
         // negative offset: shifts QP down before lookup
-        assert_eq!(chroma_qp(30, -1), 29); // 30-1=29 → table[29]=29
-        assert_eq!(chroma_qp(10, -12), 0); // 10-12=-2 → clamped to 0 → table[0]=0
+        assert_eq!(chroma_qp(30, -1, 8), 29); // 30-1=29 → table[29]=29
+        assert_eq!(chroma_qp(10, -12, 8), 0); // 10-12=-2 → clamped to 0 → table[0]=0
+        // High bit depth: 10-bit QP 63 maps to the same Table 8-15 entry as
+        // 8-bit QP 51, shifted by qp_bd_offset = 12.
+        assert_eq!(chroma_qp(63, 0, 10), 51);
+        // 11-bit (non-byte-aligned) depths use their own table row.
+        assert_eq!(chroma_qp(0, 0, 11), 0);
+        assert_eq!(chroma_qp(17, 0, 11), 17);
     }
 
     // --- Average QP ---
@@ -2826,6 +2937,7 @@ mod tests {
             height: h as u32,
             mb_width: mb_w,
             mb_height: mb_h,
+            ..PictureBuffer::empty()
         }
     }
 
@@ -2849,6 +2961,7 @@ mod tests {
             beta_offset: 0,
             disable_deblocking_filter_idc: 0,
             chroma_qp_index_offset: [0, 0],
+            bit_depth_luma: 8,
         }];
         (mb_info, slice_table, slice_params)
     }
@@ -2918,6 +3031,7 @@ mod tests {
             height: h as u32,
             mb_width: mb_w,
             mb_height: mb_h,
+            ..PictureBuffer::empty()
         };
         let mut pic_frame = pic.clone();
         let mut pic_row = pic;

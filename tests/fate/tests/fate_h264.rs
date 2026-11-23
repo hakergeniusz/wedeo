@@ -613,3 +613,95 @@ fn fate_h264_demuxer_multi_slice() {
         "Should produce at least one packet for SVA_Base_B.264"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FRext typed-pixel support (High 10 / High 4:2:2)
+// ---------------------------------------------------------------------------
+
+/// Locate a JVT FRext vector (read-only conformance asset).
+fn jvt_frext_file(name: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("JVT_VECTORS") {
+        let path = PathBuf::from(dir).join("JVT-FR-EXT").join(name);
+        if path.exists() {
+            return path;
+        }
+    }
+    PathBuf::new()
+}
+
+/// Decode the first frame and report its format, plane linesizes and sizes.
+fn decode_first_frame_layout(path: &Path) -> Option<(PixelFormat, Vec<usize>, Vec<usize>)> {
+    if !path.exists() {
+        return None;
+    }
+    let mut input = InputContext::open(path.to_str().unwrap()).unwrap();
+    let params = input.streams[0].codec_params.clone();
+    let factory = registry::find_decoder(params.codec_id).unwrap();
+    let mut decoder = factory.create(params).unwrap();
+
+    loop {
+        match input.read_packet() {
+            Ok(pkt) => {
+                decoder.send_packet(Some(&pkt)).unwrap();
+                loop {
+                    match decoder.receive_frame() {
+                        Ok(frame) => {
+                            if let FrameData::Video(v) = frame.data {
+                                return Some((
+                                    v.format,
+                                    v.planes.iter().map(|p| p.linesize).collect(),
+                                    v.planes.iter().map(|p| p.buffer.size()).collect(),
+                                ));
+                            }
+                        }
+                        Err(Error::Again) => break,
+                        Err(e) => panic!("receive_frame error: {:?}", e),
+                    }
+                }
+            }
+            Err(Error::Eof) => break,
+            Err(e) => panic!("read_packet error: {:?}", e),
+        }
+    }
+    None
+}
+
+#[test]
+fn pixel_format_yuv422p10le_matches_ffmpeg_value() {
+    // FFmpeg libavutil/pixfmt.h: AV_PIX_FMT_YUV422P10LE = 71.
+    assert_eq!(PixelFormat::Yuv422p10le as i32, 71);
+    assert_eq!(PixelFormat::Yuv422p10le.name(), "yuv422p10le");
+}
+
+/// High 4:2:2, 10-bit: output must be yuv422p10le with 2 bytes/sample,
+/// full chroma height and half chroma width.
+#[test]
+fn fate_h264_high422_10bit_frame_layout() {
+    let path = jvt_frext_file("Hi422FR13_SONY_B.264");
+    let Some((format, linesizes, sizes)) = decode_first_frame_layout(&path) else {
+        return; // vector not present
+    };
+    assert_eq!(format, PixelFormat::Yuv422p10le);
+    assert_eq!(linesizes.len(), 3);
+    // Read dimensions from the first frame again through the helper's sizes:
+    // luma plane = w*h*2, chroma plane = (w/2)*h*2.
+    assert!(
+        sizes[0] >= sizes[1] * 2,
+        "4:2:2 chroma must be half-width: {sizes:?}"
+    );
+    assert_eq!(linesizes[1], linesizes[0] / 2);
+    assert_eq!(linesizes[2], linesizes[0] / 2);
+}
+
+/// High 4:2:2, 8-bit: output must be yuv422p with full chroma height.
+#[test]
+fn fate_h264_high422_8bit_frame_layout() {
+    let path = jvt_frext_file("FREXT1_TANDBERG_A.264");
+    let Some((format, linesizes, _)) = decode_first_frame_layout(&path) else {
+        return; // vector not present
+    };
+    assert_eq!(format, PixelFormat::Yuv422p);
+    assert_eq!(linesizes.len(), 3);
+    assert_eq!(linesizes[1], linesizes[0] / 2);
+    assert_eq!(linesizes[2], linesizes[0] / 2);
+}

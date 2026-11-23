@@ -21,6 +21,18 @@ pub const PROGRESS_COMPLETE: i32 = i32::MAX;
 // BufferPool — reuse PictureBuffer allocations across frames
 // ---------------------------------------------------------------------------
 
+/// Geometry and sample format requested from the buffer pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PictureFormat {
+    pub width: u32,
+    pub height: u32,
+    pub mb_width: u32,
+    pub mb_height: u32,
+    pub uv_fill: u8,
+    pub bit_depth: u8,
+    pub chroma_format_idc: u8,
+}
+
 /// Pool of reusable PictureBuffers to avoid per-frame malloc/free.
 ///
 /// Lives on `H264Decoder`. On resolution change, the pool is flushed
@@ -29,6 +41,8 @@ pub struct BufferPool {
     free: Vec<PictureBuffer>,
     width: u32,
     height: u32,
+    bit_depth: u8,
+    chroma_format_idc: u8,
 }
 
 impl Default for BufferPool {
@@ -43,47 +57,94 @@ impl BufferPool {
             free: Vec::new(),
             width: 0,
             height: 0,
+            bit_depth: 8,
+            chroma_format_idc: 1,
         }
     }
 
     /// Acquire a buffer of the given dimensions, pre-filled with `y_fill` / `uv_fill`.
     /// Returns a pooled buffer if one is available and dimensions match;
     /// otherwise allocates fresh.
-    pub fn acquire(
-        &mut self,
-        width: u32,
-        height: u32,
-        mb_width: u32,
-        mb_height: u32,
-        uv_fill: u8,
-    ) -> PictureBuffer {
-        // Resolution change: flush all pooled buffers
-        if width != self.width || height != self.height {
+    pub fn acquire(&mut self, format: PictureFormat) -> PictureBuffer {
+        let PictureFormat {
+            width,
+            height,
+            mb_width,
+            mb_height,
+            uv_fill,
+            bit_depth,
+            chroma_format_idc,
+        } = format;
+
+        // Resolution or sample-format change: flush all pooled buffers.
+        if width != self.width
+            || height != self.height
+            || bit_depth != self.bit_depth
+            || chroma_format_idc != self.chroma_format_idc
+        {
             self.free.clear();
             self.width = width;
             self.height = height;
+            self.bit_depth = bit_depth;
+            self.chroma_format_idc = chroma_format_idc;
         }
+
+        // Chroma geometry from H.264 Table 6-1. 4:2:2 has full chroma height;
+        // 4:4:4 has full chroma width as well.
+        let (shift_w, shift_h) = match chroma_format_idc {
+            1 => (1, 1),
+            2 => (1, 0),
+            3 => (0, 0),
+            _ => (1, 1),
+        };
+        let uv_stride = (width >> shift_w) as usize;
+        let uv_height = (height >> shift_h) as usize;
+
+        // Mid-grey for high bit depth is 1 << (bit_depth - 1), not 128.
+        let uv_fill16 = if bit_depth > 8 {
+            1u16 << (bit_depth - 1)
+        } else {
+            u16::from(uv_fill)
+        };
 
         if let Some(mut buf) = self.free.pop() {
             // Reuse: fill with zeros (luma) and uv_fill (chroma)
             buf.y.fill(0);
             buf.u.fill(uv_fill);
             buf.v.fill(uv_fill);
+            if buf.is_high_depth() {
+                buf.y16.fill(0);
+                buf.u16.fill(uv_fill16);
+                buf.v16.fill(uv_fill16);
+            }
             buf
         } else {
-            // Fresh allocation
+            // Fresh allocation. High bit depths also get full-precision planes.
             let y_stride = width as usize;
-            let uv_stride = (width / 2) as usize;
+            let (y16, u16, v16) = if bit_depth > 8 {
+                (
+                    vec![0u16; y_stride * height as usize],
+                    vec![uv_fill16; uv_stride * uv_height],
+                    vec![uv_fill16; uv_stride * uv_height],
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
             PictureBuffer {
                 y: vec![0u8; y_stride * height as usize],
-                u: vec![uv_fill; uv_stride * (height / 2) as usize],
-                v: vec![uv_fill; uv_stride * (height / 2) as usize],
+                u: vec![uv_fill; uv_stride * uv_height],
+                v: vec![uv_fill; uv_stride * uv_height],
+                y16,
+                u16,
+                v16,
                 y_stride,
                 uv_stride,
                 width,
                 height,
                 mb_width,
                 mb_height,
+                bit_depth,
+                chroma_format_idc,
             }
         }
     }
@@ -91,7 +152,12 @@ impl BufferPool {
     /// Return a buffer to the pool for reuse.
     pub fn reclaim(&mut self, buf: PictureBuffer) {
         // Only keep buffers that match current dimensions
-        if buf.width == self.width && buf.height == self.height && !buf.y.is_empty() {
+        if buf.width == self.width
+            && buf.height == self.height
+            && buf.bit_depth == self.bit_depth
+            && buf.chroma_format_idc == self.chroma_format_idc
+            && !buf.y.is_empty()
+        {
             self.free.push(buf);
         }
     }

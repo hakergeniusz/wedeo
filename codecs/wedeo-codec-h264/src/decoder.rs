@@ -52,6 +52,29 @@ fn decode_thread_count() -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Sample format helpers
+// ---------------------------------------------------------------------------
+
+/// Select the output pixel format from SPS bit depth and chroma format.
+///
+/// FFmpeg's `ff_h264_get_pix_fmt` maps 8-bit 4:2:0/4:2:2/4:4:4 to
+/// AV_PIX_FMT_YUV420P/YUV422P/YUV444P and 10-bit to the corresponding *P10LE
+/// formats. Monochrome is output as 4:2:0 (matching the existing Wedeo
+/// behavior and FFmpeg's `AV_PIX_FMT_YUV420P` fallback).
+pub(crate) fn pixel_format_for(bit_depth: u8, chroma_format_idc: u8) -> PixelFormat {
+    match (bit_depth, chroma_format_idc) {
+        (8, 2) => PixelFormat::Yuv422p,
+        (8, 3) => PixelFormat::Yuv444p,
+        (10, 0) | (10, 1) => PixelFormat::Yuv420p10le,
+        (10, 2) => PixelFormat::Yuv422p10le,
+        (10, 3) => PixelFormat::Yuv444p10le,
+        // Bit depths other than 8/10 have no Frame pixel format yet; keep the
+        // legacy 8-bit representation rather than losing the frame.
+        _ => PixelFormat::Yuv420p,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Decoder state
 // ---------------------------------------------------------------------------
 
@@ -636,6 +659,9 @@ impl H264Decoder {
                         height: pic_h,
                         mb_width: mb_w,
                         mb_height: mb_h,
+                        bit_depth: sps.bit_depth_luma,
+                        chroma_format_idc: sps.chroma_format_idc,
+                        ..PictureBuffer::empty()
                     }),
                     0,
                 )
@@ -874,9 +900,12 @@ impl H264Decoder {
                     // Store per-slice deblocking parameters on the FDC.
                     // The worker thread uses these for inline deblock.
                     let slice_idx = fdc.current_slice as usize;
-                    let slice_chroma_qp_offset = self.pps_list[hdr.pps_id as usize]
+                    let (slice_chroma_qp_offset, slice_bit_depth) = self.pps_list
+                        [hdr.pps_id as usize]
                         .as_ref()
-                        .map_or([0, 0], |pps| pps.chroma_qp_index_offset);
+                        .map_or(([0, 0], 8), |pps| {
+                            (pps.chroma_qp_index_offset, pps.bit_depth_luma)
+                        });
                     if slice_idx >= fdc.slice_deblock_params.len() {
                         fdc.slice_deblock_params
                             .resize(slice_idx + 1, deblock::SliceDeblockParams::default());
@@ -886,6 +915,7 @@ impl H264Decoder {
                         beta_offset: hdr.slice_beta_offset,
                         disable_deblocking_filter_idc: hdr.disable_deblocking_filter_idc,
                         chroma_qp_index_offset: slice_chroma_qp_offset,
+                        bit_depth_luma: slice_bit_depth,
                     };
 
                     // Build list of SharedPicture references for MC.
@@ -1923,7 +1953,12 @@ impl H264Decoder {
 
         // Initialize context states
         let is_intra = hdr.slice_type.is_intra();
-        let mut cabac_state = init_cabac_states(hdr.slice_qp, is_intra, hdr.cabac_init_idc);
+        let mut cabac_state = init_cabac_states(
+            hdr.slice_qp,
+            sps.bit_depth_luma,
+            is_intra,
+            hdr.cabac_init_idc,
+        );
 
         // Initialize CABAC neighbor context
         let mut cabac_nb = CabacNeighborCtx::new(mb_width, mb_height);
@@ -2474,51 +2509,74 @@ impl H264Decoder {
         // Convert PictureBuffer to Frame, applying SPS crop offsets.
         let width = self.width as usize;
         let height = self.height as usize;
-        let chroma_width = width / 2;
-        let chroma_height = height / 2;
+        let bit_depth = fdc.pic.bit_depth;
+        // Only 10-bit has a matching Frame pixel format so far.
+        let high_depth = bit_depth == 10;
+        let (shift_w, shift_h) = match fdc.pic.chroma_format_idc {
+            1 => (1usize, 1usize), // 4:2:0
+            2 => (1, 0),           // 4:2:2
+            3 => (0, 0),           // 4:4:4
+            _ => (1, 1),           // monochrome is output as 4:2:0 (FFmpeg behavior)
+        };
+        let chroma_width = width >> shift_w;
+        let chroma_height = height >> shift_h;
         let crop_x = self.crop_left as usize;
         let crop_y = self.crop_top as usize;
-        let chroma_crop_x = crop_x / 2;
-        let chroma_crop_y = crop_y / 2;
+        let chroma_crop_x = crop_x >> shift_w;
+        let chroma_crop_y = crop_y >> shift_h;
 
-        let mut y_data = Vec::with_capacity(width * height);
+        // Output linesize is in bytes; 10-bit samples occupy two bytes each.
+        let bytes_per_sample = usize::from(high_depth) + 1;
+        let y_linesize = width * bytes_per_sample;
+        let uv_linesize = chroma_width * bytes_per_sample;
+
+        let mut y_data = Vec::with_capacity(y_linesize * height);
+        let mut u_data = Vec::with_capacity(uv_linesize * chroma_height);
+        let mut v_data = Vec::with_capacity(uv_linesize * chroma_height);
+
         for row in 0..height {
             let src_start = (crop_y + row) * fdc.pic.y_stride + crop_x;
-            y_data.extend_from_slice(&fdc.pic.y[src_start..src_start + width]);
+            if high_depth {
+                for &sample in &fdc.pic.y16[src_start..src_start + width] {
+                    y_data.extend_from_slice(&sample.to_le_bytes());
+                }
+            } else {
+                y_data.extend_from_slice(&fdc.pic.y[src_start..src_start + width]);
+            }
         }
-        let y_buf = Buffer::from_slice(&y_data);
-
-        let mut u_data = Vec::with_capacity(chroma_width * chroma_height);
         for row in 0..chroma_height {
             let src_start = (chroma_crop_y + row) * fdc.pic.uv_stride + chroma_crop_x;
-            u_data.extend_from_slice(&fdc.pic.u[src_start..src_start + chroma_width]);
+            if high_depth {
+                for &sample in &fdc.pic.u16[src_start..src_start + chroma_width] {
+                    u_data.extend_from_slice(&sample.to_le_bytes());
+                }
+                for &sample in &fdc.pic.v16[src_start..src_start + chroma_width] {
+                    v_data.extend_from_slice(&sample.to_le_bytes());
+                }
+            } else {
+                u_data.extend_from_slice(&fdc.pic.u[src_start..src_start + chroma_width]);
+                v_data.extend_from_slice(&fdc.pic.v[src_start..src_start + chroma_width]);
+            }
         }
-        let u_buf = Buffer::from_slice(&u_data);
-
-        let mut v_data = Vec::with_capacity(chroma_width * chroma_height);
-        for row in 0..chroma_height {
-            let src_start = (chroma_crop_y + row) * fdc.pic.uv_stride + chroma_crop_x;
-            v_data.extend_from_slice(&fdc.pic.v[src_start..src_start + chroma_width]);
-        }
-        let v_buf = Buffer::from_slice(&v_data);
 
         let y_plane = FramePlane {
-            buffer: y_buf,
+            buffer: Buffer::from_slice(&y_data),
             offset: 0,
-            linesize: width,
+            linesize: y_linesize,
         };
         let u_plane = FramePlane {
-            buffer: u_buf,
+            buffer: Buffer::from_slice(&u_data),
             offset: 0,
-            linesize: chroma_width,
+            linesize: uv_linesize,
         };
         let v_plane = FramePlane {
-            buffer: v_buf,
+            buffer: Buffer::from_slice(&v_data),
             offset: 0,
-            linesize: chroma_width,
+            linesize: uv_linesize,
         };
 
-        let mut frame = Frame::new_video(self.width, self.height, PixelFormat::Yuv420p);
+        let format = pixel_format_for(bit_depth, fdc.pic.chroma_format_idc);
+        let mut frame = Frame::new_video(self.width, self.height, format);
         frame.pts = pts;
 
         let pict_type = match hdr.slice_type {

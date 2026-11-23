@@ -19,10 +19,9 @@ use crate::intra_pred;
 use crate::mc;
 use crate::mvpred::{self, MvContext};
 use crate::pps::Pps;
-use crate::shared_picture::{BufferPool, PicHandle, SharedPicture};
+use crate::shared_picture::{BufferPool, PicHandle, PictureFormat, SharedPicture};
 use crate::slice::SliceHeader;
 use crate::sps::Sps;
-use crate::tables::CHROMA_QP_TABLE;
 
 // ---------------------------------------------------------------------------
 // Per-MB pixel checksum for pipeline-stage tracing
@@ -481,26 +480,59 @@ impl FrameDecodeContext {
         // yuv420p with U/V=128, not gray8. Chroma prediction/MC on 128-filled planes
         // naturally produces 128, so no additional guards needed in reconstruction.
         let uv_fill = if decode_chroma { 0u8 } else { 128u8 };
+        let bit_depth = sps.bit_depth_luma;
+        let chroma_format_idc = sps.chroma_format_idc;
+        let (shift_w, shift_h) = match chroma_format_idc {
+            1 => (1, 1),
+            2 => (1, 0),
+            3 => (0, 0),
+            _ => (1, 1),
+        };
+        let uv_stride = (width >> shift_w) as usize;
+        let uv_height = (height >> shift_h) as usize;
+        let uv_fill16 = if bit_depth > 8 {
+            1u16 << (bit_depth - 1)
+        } else {
+            u16::from(uv_fill)
+        };
 
         let pic = if let Some(pool) = buffer_pool {
-            let buf = pool
-                .lock()
-                .unwrap()
-                .acquire(width, height, mb_width, mb_height, uv_fill);
+            let buf = pool.lock().unwrap().acquire(PictureFormat {
+                width,
+                height,
+                mb_width,
+                mb_height,
+                uv_fill,
+                bit_depth,
+                chroma_format_idc,
+            });
             PicHandle::new_pooled(buf, pool)
         } else {
             let y_stride = width as usize;
-            let uv_stride = (width / 2) as usize;
+            let (y16, u16, v16) = if bit_depth > 8 {
+                (
+                    vec![0u16; y_stride * height as usize],
+                    vec![uv_fill16; uv_stride * uv_height],
+                    vec![uv_fill16; uv_stride * uv_height],
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
             PicHandle::new(PictureBuffer {
                 y: vec![0u8; y_stride * height as usize],
-                u: vec![uv_fill; uv_stride * (height / 2) as usize],
-                v: vec![uv_fill; uv_stride * (height / 2) as usize],
+                u: vec![uv_fill; uv_stride * uv_height],
+                v: vec![uv_fill; uv_stride * uv_height],
+                y16,
+                u16,
+                v16,
                 y_stride,
                 uv_stride,
                 width,
                 height,
                 mb_width,
                 mb_height,
+                bit_depth,
+                chroma_format_idc,
             })
         };
 
@@ -535,8 +567,16 @@ impl FrameDecodeContext {
             qp: 0,
             mb_width,
             mb_height,
-            dequant4: Dequant4Table::new(&pps.scaling_matrix4),
-            dequant8: Dequant8Table::new(&pps.scaling_matrix8),
+            dequant4: Dequant4Table::new(
+                &pps.scaling_matrix4,
+                sps.bit_depth_luma,
+                sps.transform_bypass,
+            ),
+            dequant8: Dequant8Table::new(
+                &pps.scaling_matrix8,
+                sps.bit_depth_luma,
+                sps.transform_bypass,
+            ),
             transform_8x8: vec![false; total_mbs],
             mb_field_flag: vec![false; total_mbs],
             mv_ctx: MvContext::new(mb_width, mb_height),
@@ -1090,16 +1130,19 @@ pub fn apply_macroblock(
     // I_PCM: QP=0 for deblocking table, but running QP stays unchanged
     // (FFmpeg h264_cavlc.c: sl->qscale is NOT modified for I_PCM).
     if mb.mb_qp_delta != 0 {
-        ctx.qp = ((ctx.qp as i32 + mb.mb_qp_delta).rem_euclid(52)) as u8;
+        // QP wraps at `max_qp + 1` (51 + qp_bd_offset + 1), not at 52.
+        // Reference: FFmpeg h264_cabac.c:2409-2414 and h264_cavlc.c.
+        let range = 52 + 6 * (pps.bit_depth_luma as i32 - 8);
+        ctx.qp = ((ctx.qp as i32 + mb.mb_qp_delta).rem_euclid(range)) as u8;
     }
     ctx.last_qscale_diff = mb.mb_qp_delta;
     let qp = if mb.is_pcm { 0 } else { ctx.qp };
 
-    // Compute per-plane chroma QP (Cb uses offset[0], Cr uses offset[1])
-    let c_qp = [
-        CHROMA_QP_TABLE[(qp as i32 + pps.chroma_qp_index_offset[0]).clamp(0, 51) as usize],
-        CHROMA_QP_TABLE[(qp as i32 + pps.chroma_qp_index_offset[1]).clamp(0, 51) as usize],
-    ];
+    // Compute per-plane chroma QP (Cb uses offset[0], Cr uses offset[1]).
+    // `Pps::chroma_qp` applies both the PPS offset and the bit-depth-dependent
+    // H.264 Table 8-15 mapping; geometry (4:2:0/4:2:2/4:4:4) only decides how
+    // many chroma blocks are decoded, not how their QP is computed.
+    let c_qp = [pps.chroma_qp(0, qp as i32), pps.chroma_qp(1, qp as i32)];
 
     // Check neighbor availability with slice boundary awareness.
     // H.264 spec: neighbors from different slices are unavailable.

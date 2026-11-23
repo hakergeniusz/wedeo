@@ -103,16 +103,14 @@ impl<'a> CabacReader<'a> {
 
     /// Read a byte from the data buffer, returning 0 if past the end.
     ///
-    /// SAFETY: The RBSP data is padded with AV_INPUT_BUFFER_PADDING_SIZE (64)
-    /// zero bytes after the end. All CABAC reads stay well within this padding
-    /// because refill reads at most 2 bytes per ~16 decoded bins. We use
-    /// unchecked access to eliminate bounds checks on the hot path.
+    /// The RBSP data is padded with AV_INPUT_BUFFER_PADDING_SIZE (64) zero
+    /// bytes, so in-bounds reads normally see that padding. A checked access
+    /// is used here: malformed or not-yet-supported streams can drive the CABAC
+    /// cursor past the padding, and `get_unchecked` would be undefined behavior
+    /// in that case. Returning zero matches what the padding bytes contain.
     #[inline(always)]
     fn byte_at(&self, pos: usize) -> u8 {
-        // SAFETY: RBSP is padded with 64 zero bytes after the data. The CABAC
-        // engine refills at most 2 bytes per renormalization cycle, and the
-        // padding guarantees at least 64 bytes are readable beyond data.len().
-        unsafe { *self.data.get_unchecked(pos) }
+        self.data.get(pos).copied().unwrap_or(0)
     }
 
     /// Decode one context-adaptive binary symbol.
@@ -1311,6 +1309,7 @@ fn decode_cabac_mb_dqp(
     reader: &mut CabacReader,
     state: &mut [u8; 1024],
     last_qscale_diff: i32,
+    max_qp: i32,
 ) -> Result<i32> {
     let ctx0 = if last_qscale_diff != 0 { 1 } else { 0 };
     if reader.get_cabac(&mut state[60 + ctx0]) == 0 {
@@ -1322,7 +1321,7 @@ fn decode_cabac_mb_dqp(
     while reader.get_cabac(&mut state[60 + ctx]) != 0 {
         ctx = 3;
         val += 1;
-        if val > 102 {
+        if val > 2 * max_qp {
             // prevent infinite loop (2 * max_qp)
             return Err(Error::InvalidData);
         }
@@ -2699,7 +2698,12 @@ pub fn decode_mb_cabac(
     let is_i16x16 = mb.is_intra16x16;
     if cbp > 0 || is_i16x16 {
         // Decode QP delta
-        mb.mb_qp_delta = decode_cabac_mb_dqp(reader, state, last_qscale_diff)?;
+        mb.mb_qp_delta = decode_cabac_mb_dqp(
+            reader,
+            state,
+            last_qscale_diff,
+            51 + 6 * (_pps.bit_depth_luma as i32 - 8),
+        )?;
 
         // Decode luma residual
         trace!("CABAC_SECTION luma_residual");
