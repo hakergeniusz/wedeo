@@ -142,8 +142,9 @@ fn byte_at(data: &[u8], pos: usize) -> i32 {
 /// are all zero.
 #[inline(always)]
 fn refill(low: &mut i32, data: &[u8], pos: &mut usize) {
-    *low += (byte_at(data, *pos) << 9) + (byte_at(data, *pos + 1) << 1);
-    *low -= CABAC_MASK;
+    // FFmpeg relies on C i32 wraparound in all of these operations.
+    let add = (byte_at(data, *pos) << 9) + (byte_at(data, *pos + 1) << 1);
+    *low = low.wrapping_add(add).wrapping_sub(CABAC_MASK);
     // FFmpeg: only advance if bytestream < bytestream_end.
     if *pos < data.len() {
         *pos += CABAC_BITS as usize / 8;
@@ -154,8 +155,8 @@ fn refill(low: &mut i32, data: &[u8], pos: &mut usize) {
 #[inline(always)]
 fn renorm_once(range: &mut i32, low: &mut i32, data: &[u8], pos: &mut usize) {
     let shift = ((range.wrapping_sub(0x100) as u32) >> 31) as i32;
-    *range <<= shift;
-    *low <<= shift;
+    *range = range.wrapping_shl(shift as u32);
+    *low = low.wrapping_shl(shift as u32);
     if *low & CABAC_MASK == 0 {
         refill(low, data, pos);
     }
@@ -168,8 +169,8 @@ fn refill2(low: &mut i32, data: &[u8], pos: &mut usize) {
     let i = u32::from_ne_bytes(low.to_ne_bytes()).trailing_zeros() as i32 - CABAC_BITS as i32;
     let b0 = byte_at(data, *pos);
     let b1 = byte_at(data, *pos + 1);
-    let x = -CABAC_MASK + (b0 << 9) + (b1 << 1);
-    *low += x.wrapping_shl(i as u32);
+    let x = (-CABAC_MASK).wrapping_add(b0 << 9).wrapping_add(b1 << 1);
+    *low = low.wrapping_add(x.wrapping_shl(i as u32));
     if *pos < data.len() {
         *pos += CABAC_BITS as usize / 8;
     }
@@ -181,19 +182,21 @@ fn decode_bin(low: &mut i32, range: &mut i32, state: &mut u8, data: &[u8], pos: 
     let s = *state as i32;
     let range_lps = LPS_RANGE[(2 * (*range & 0xC0) + s) as usize] as i32;
 
-    *range -= range_lps;
-    let lps_mask = ((*range << (CABAC_BITS + 1)) - *low) >> 31;
+    // FFmpeg's C arithmetic wraps on i32 overflow; debug builds must not panic.
+    *range = range.wrapping_sub(range_lps);
+    let range_shifted = range.wrapping_shl(CABAC_BITS + 1);
+    let lps_mask = range_shifted.wrapping_sub(*low) >> 31;
 
-    *low -= (*range << (CABAC_BITS + 1)) & lps_mask;
-    *range += (range_lps - *range) & lps_mask;
+    *low = low.wrapping_sub(range_shifted & lps_mask);
+    *range = range.wrapping_add(range_lps.wrapping_sub(*range) & lps_mask);
 
     let s = s ^ lps_mask;
     *state = MLPS_STATE[(128 + s) as usize];
     let bit = s & 1;
 
     let shift = NORM_SHIFT[*range as usize] as i32;
-    *range <<= shift;
-    *low <<= shift;
+    *range = range.wrapping_shl(shift as u32);
+    *low = low.wrapping_shl(shift as u32);
     if *low & CABAC_MASK == 0 {
         refill2(low, data, pos);
     }
@@ -384,14 +387,14 @@ impl<'a> Cabac<'a> {
     /// for 1 (`get_cabac_bypass_sign`).
     #[inline]
     pub fn get_cabac_bypass_sign(&mut self, val: i32) -> i32 {
-        self.low += self.low;
+        self.low = self.low.wrapping_add(self.low);
         if self.low & CABAC_MASK == 0 {
             refill(&mut self.low, self.data, &mut self.pos);
         }
-        let r = self.range << (CABAC_BITS + 1);
-        self.low -= r;
+        let r = self.range.wrapping_shl(CABAC_BITS + 1);
+        self.low = self.low.wrapping_sub(r);
         let mask = self.low >> 31;
-        self.low += r & mask;
+        self.low = self.low.wrapping_add(r & mask);
         (val ^ mask) - mask
     }
 
@@ -399,8 +402,8 @@ impl<'a> Cabac<'a> {
     /// number of bytes consumed (`get_cabac_terminate`).
     #[inline]
     pub fn get_cabac_terminate(&mut self) -> u32 {
-        self.range -= 2;
-        if self.low < (self.range << (CABAC_BITS + 1)) {
+        self.range = self.range.wrapping_sub(2);
+        if self.low < self.range.wrapping_shl(CABAC_BITS + 1) {
             renorm_once(&mut self.range, &mut self.low, self.data, &mut self.pos);
             0
         } else {

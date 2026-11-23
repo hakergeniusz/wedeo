@@ -279,32 +279,46 @@ pub fn intra_predict_tu(
     let spin = c_idx != 0
         && ((1usize << log2_size) >> sps.log2_min_tb_size) == 0
         && ((2 * y0) & (1 << sps.log2_min_tb_size)) != 0;
-    let cur_tb_addr = geo
-        .min_tb_addr_zs(x_tb as usize, y_tb as usize)
-        .unwrap_or(0);
+    // FFmpeg's MIN_TB_ADDR_ZS indexes pps->min_tb_addr_zs, which points into
+    // the flat table at `side + 1`. Wedeo's PS crate writes the same values
+    // starting at index 0 while RefGeometry adds the offset again, so read
+    // the flat table directly here for FFmpeg's z-scan values.
+    let zs = |x: usize, y: usize| -> i32 {
+        let side = sps.tb_mask as usize + 2;
+        geo.min_tb_addr_zs_tab
+            .get(y * side + x)
+            .copied()
+            .unwrap_or(-1)
+    };
+    let cur_tb_addr = zs(x_tb as usize, y_tb as usize);
     let size_in_tbs_h = (size << hshift as usize) >> sps.log2_min_tb_size;
     let size_in_tbs_v = (size << vshift as usize) >> sps.log2_min_tb_size;
 
     let mut cand_up_left = na.cand_up_left;
     let mut cand_up = na.cand_up;
     let mut cand_left = na.cand_left;
+    // FFmpeg's MIN_TB_ADDR_ZS takes *signed* neighbours. Wrapping -1 into the
+    // tb_mask here (as unsigned indexing does) makes unavailable top-right /
+    // bottom-left samples look available, so infer them as 1 << (bitdepth-1)
+    // and poison the whole prediction. A negative neighbour coordinate is not
+    // in z-scan order, so the candidate stays unavailable.
+    let zs_up_y = y_tb as i32 - 1;
+    let zs_left_x = x_tb as i32 - 1;
     let mut cand_up_right = na.cand_up_right
         && !spin
+        && zs_up_y >= 0
         && cur_tb_addr
-            > geo
-                .min_tb_addr_zs(
-                    (x_tb as usize + size_in_tbs_h) & sps.tb_mask as usize,
-                    y_tb.wrapping_sub(1) as usize & sps.tb_mask as usize,
-                )
-                .unwrap_or(i32::MIN);
+            > zs(
+                ((x_tb as i32 + size_in_tbs_h as i32) & sps.tb_mask as i32) as usize,
+                zs_up_y as usize,
+            );
     let mut cand_bottom_left = na.cand_bottom_left
+        && zs_left_x >= 0
         && cur_tb_addr
-            > geo
-                .min_tb_addr_zs(
-                    x_tb.wrapping_sub(1) as usize & sps.tb_mask as usize,
-                    (y_tb as usize + size_in_tbs_v) & sps.tb_mask as usize,
-                )
-                .unwrap_or(i32::MIN);
+            > zs(
+                zs_left_x as usize,
+                ((y_tb as i32 + size_in_tbs_v as i32) & sps.tb_mask as i32) as usize,
+            );
 
     let bottom_left_size = ((height.min(y0 + 2 * (size as i32) * (1 << vshift))
         - (y0 + size as i32 * (1 << vshift)))
