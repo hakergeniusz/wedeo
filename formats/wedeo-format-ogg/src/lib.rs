@@ -1,14 +1,21 @@
-//! Work unit: `wedeo-format-ogg`.
+//! Ogg container demuxer for wedeo.
 //!
-//! FFmpeg reference: `libavformat/ogg/demuxer.c`.
+//! FFmpeg reference: `libavformat/ogg/demuxer.c` and the codec mappings in
+//! `libavformat/ogg/mapping/{vorbis,opus,theora,flac,ogm}.c`.
 //!
-//! This crate is scaffolding created by the Phase 0 factory. A single subagent
-//! owns this directory. The implementer replaces this stub with the full Demuxer/Muxer
-//! implementation, registers it via `inventory::submit!`, and adds conformance
-//! tests in `tests/fate/tests/fate_format_ogg.rs`.
-//!
-//! Do not implement this work unit in any other crate.
+//! Implements page parsing (capture pattern, CRC validation, segment tables),
+//! packet assembly across pages, stream identification, codec header parsing
+//! (Vorbis, Opus, Theora, FLAC, Ogm) and granule-to-timestamp conversion.
 
-use inventory as _;
-use wedeo_core as _;
-use wedeo_format as _;
+pub mod crc;
+mod demuxer;
+mod mapping;
+#[cfg(test)]
+mod tests;
+mod vorbis_parser;
+
+pub(crate) use vorbis_parser::BitReader;
+
+use wedeo_format::registry::DemuxerFactory;
+
+inventory::submit!(&crate::demuxer::OggDemuxerFactory as &dyn DemuxerFactory);
