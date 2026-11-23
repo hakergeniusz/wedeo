@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Work unit for libavfilter/vf_format.c (scaffolding, not yet implemented)"
+description = "FFmpeg vf_format.c port: the metadata-only 'format' video filter"
 repository.workspace = true
 publish = false
 
