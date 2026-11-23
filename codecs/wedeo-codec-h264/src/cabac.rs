@@ -365,7 +365,7 @@ impl CabacNeighborCtx {
             mb_type_intra16x16_or_pcm: vec![false; total_mbs],
             cbp: vec![0; total_mbs],
             chroma_pred_mode: vec![0; total_mbs],
-            nz_count: vec![0; total_mbs * 24],
+            nz_count: vec![0; total_mbs * 40],
             mb_intra: vec![false; total_mbs],
             mb_direct: vec![false; total_mbs],
             mvd_cache_l0: vec![[0; 2]; total_mbs * 16],
@@ -475,7 +475,7 @@ impl CabacNeighborCtx {
         is_direct: bool,
         cbp: u32,
         chroma_pred: u8,
-        nz: &[u8; 24],
+        nz: &[u8; 40],
         transform_8x8_flag: bool,
     ) {
         self.mb_skip[mb_idx] = is_skip;
@@ -484,8 +484,8 @@ impl CabacNeighborCtx {
         self.mb_direct[mb_idx] = is_direct;
         self.cbp[mb_idx] = cbp;
         self.chroma_pred_mode[mb_idx] = chroma_pred;
-        let nz_base = mb_idx * 24;
-        self.nz_count[nz_base..nz_base + 24].copy_from_slice(nz);
+        let nz_base = mb_idx * 40;
+        self.nz_count[nz_base..nz_base + 40].copy_from_slice(nz);
         self.transform_8x8[mb_idx] = transform_8x8_flag;
     }
 
@@ -1358,9 +1358,10 @@ fn get_cabac_cbf_ctx(
     cat: usize,
     block_idx: usize,
     is_dc: bool,
-    nz_cache: &[u8; 24],
+    nz_cache: &[u8; 40],
     is_intra: bool,
     left_block_option: u8,
+    chroma422: bool,
 ) -> usize {
     let mut ctx = 0usize;
     // For unavailable neighbors, FFmpeg's fill_decode_caches uses:
@@ -1426,6 +1427,7 @@ fn get_cabac_cbf_ctx(
             nz_cache,
             unavail_nz,
             left_block_option,
+            chroma422,
         );
         if nza > 0 {
             ctx += 1;
@@ -1482,9 +1484,10 @@ fn get_nz_neighbors(
     left_idx_bot: Option<usize>,
     top_idx: Option<usize>,
     block_idx: usize,
-    nz_cache: &[u8; 24],
+    nz_cache: &[u8; 40],
     unavail_nz: u8,
     left_block_option: u8,
+    chroma422: bool,
 ) -> (u8, u8) {
     if block_idx < 16 {
         // Luma block: raster index = block_idx
@@ -1499,7 +1502,7 @@ fn get_nz_neighbors(
             if let Some(li) = li {
                 let remapped_row = LEFT_LUMA_NZ_ROW[left_block_option as usize][blk_y] as usize;
                 let left_blk = remapped_row * 4 + 3;
-                cabac_nb.nz_count[li * 24 + left_blk]
+                cabac_nb.nz_count[li * 40 + left_blk]
             } else {
                 unavail_nz
             }
@@ -1510,55 +1513,31 @@ fn get_nz_neighbors(
         } else if let Some(ti) = top_idx {
             // Bottom row of top MB
             let top_blk = 12 + blk_x;
-            cabac_nb.nz_count[ti * 24 + top_blk]
-        } else {
-            unavail_nz
-        };
-
-        (nza, nzb)
-    } else if block_idx < 20 {
-        // Cb chroma block: block_idx 16..19, raster within 2x2
-        let c_idx = block_idx - 16;
-        let blk_x = c_idx % 2;
-        let blk_y = c_idx / 2;
-
-        let nza = if blk_x > 0 {
-            nz_cache[block_idx - 1]
-        } else {
-            let li = if blk_y < 1 { left_idx } else { left_idx_bot };
-            if let Some(li) = li {
-                let chroma_row = LEFT_CHROMA_NZ_ROW[left_block_option as usize][blk_y] as usize;
-                let left_blk = 16 + chroma_row * 2 + 1;
-                cabac_nb.nz_count[li * 24 + left_blk]
-            } else {
-                unavail_nz
-            }
-        };
-
-        let nzb = if blk_y > 0 {
-            nz_cache[block_idx - 2]
-        } else if let Some(ti) = top_idx {
-            let top_blk = 16 + 2 + blk_x;
-            cabac_nb.nz_count[ti * 24 + top_blk]
+            cabac_nb.nz_count[ti * 40 + top_blk]
         } else {
             unavail_nz
         };
 
         (nza, nzb)
     } else {
-        // Cr chroma block: block_idx 20..23
-        let c_idx = block_idx - 20;
+        // Chroma blocks. 4:2:0: Cb=16..19, Cr=20..23 (2x2).
+        // 4:2:2: Cb=16..23, Cr=24..31 (2x4).
+        let cb_end = if chroma422 { 24 } else { 20 };
+        let comp = if block_idx < cb_end { 0 } else { 1 };
+        let base = if comp == 0 { 16 } else { cb_end };
+        let c_idx = block_idx - base;
         let blk_x = c_idx % 2;
         let blk_y = c_idx / 2;
 
         let nza = if blk_x > 0 {
             nz_cache[block_idx - 1]
         } else {
-            let li = if blk_y < 1 { left_idx } else { left_idx_bot };
+            let li = if blk_y < 2 { left_idx } else { left_idx_bot };
             if let Some(li) = li {
-                let chroma_row = LEFT_CHROMA_NZ_ROW[left_block_option as usize][blk_y] as usize;
-                let left_blk = 20 + chroma_row * 2 + 1;
-                cabac_nb.nz_count[li * 24 + left_blk]
+                let chroma_row =
+                    LEFT_CHROMA_NZ_ROW[left_block_option as usize][blk_y.min(1)] as usize;
+                let left_blk = base + chroma_row * 2 + 1;
+                cabac_nb.nz_count[li * 40 + left_blk]
             } else {
                 unavail_nz
             }
@@ -1567,8 +1546,8 @@ fn get_nz_neighbors(
         let nzb = if blk_y > 0 {
             nz_cache[block_idx - 2]
         } else if let Some(ti) = top_idx {
-            let top_blk = 20 + 2 + blk_x;
-            cabac_nb.nz_count[ti * 24 + top_blk]
+            let top_blk = base + 2 + blk_x;
+            cabac_nb.nz_count[ti * 40 + top_blk]
         } else {
             unavail_nz
         };
@@ -1594,6 +1573,7 @@ fn get_nz_neighbors(
 /// for AC blocks (where DC is separate) this is `&ZIGZAG_SCAN_4X4[1..]`
 /// (offset by 1 so that scan position 0 maps to raster position 1 in the
 /// zigzag order, skipping the DC position).
+#[allow(clippy::too_many_arguments)] // mirrors FFmpeg decode_cabac_residual_internal parameters
 #[inline]
 fn decode_cabac_residual(
     reader: &mut CabacReader,
@@ -1603,6 +1583,7 @@ fn decode_cabac_residual(
     max_coeff: usize,
     scantable: &[usize],
     mb_field: bool,
+    chroma422_dc: bool,
 ) -> usize {
     // MBAFF field-mode MBs use separate context offset tables for the
     // significance map. Reference: FFmpeg h264_cabac.c:1661-1664.
@@ -1628,6 +1609,9 @@ fn decode_cabac_residual(
     let mut coeff_count = 0usize;
     let mut terminated = false;
 
+    // FFmpeg h264_cabac.c:1689-1700 uses a shared 2x4 DC context layout
+    // for 4:2:2 chroma DC instead of the plain per-position offsets.
+    const DC422_SIG_OFF: [usize; 7] = [0, 0, 1, 1, 2, 2, 2];
     for last in 0..max_coeff.saturating_sub(1) {
         let sig_ctx = if is_8x8 {
             let sig_off = if mb_field {
@@ -1636,6 +1620,8 @@ fn decode_cabac_residual(
                 SIGNIFICANT_COEFF_FLAG_OFFSET_8X8[last] as usize
             };
             sig_ctx_base + sig_off
+        } else if chroma422_dc {
+            sig_ctx_base + DC422_SIG_OFF[last]
         } else {
             sig_ctx_base + last
         };
@@ -1644,6 +1630,8 @@ fn decode_cabac_residual(
             coeff_count += 1;
             let last_ctx = if is_8x8 {
                 last_ctx_base + LAST_COEFF_FLAG_OFFSET_8X8[last] as usize
+            } else if chroma422_dc {
+                last_ctx_base + DC422_SIG_OFF[last]
             } else {
                 last_ctx_base + last
             };
@@ -1679,7 +1667,8 @@ fn decode_cabac_residual(
             coeff_abs = 1;
         } else {
             // |coeff| >= 2
-            let ctx_gt1 = COEFF_ABS_LEVELGT1_CTX[0][node_ctx] as usize + abs_level_ctx_base;
+            let gt1_table = usize::from(chroma422_dc);
+            let ctx_gt1 = COEFF_ABS_LEVELGT1_CTX[gt1_table][node_ctx] as usize + abs_level_ctx_base;
             node_ctx = COEFF_ABS_LEVEL_TRANSITION[1][node_ctx] as usize;
 
             let mut abs_val = 2u32;
@@ -1761,12 +1750,21 @@ fn decode_cabac_luma_residual(
             nz_cache,
             is_intra,
             left_block_option,
+            false,
         );
         if reader.get_cabac(&mut state[cbf_ctx]) != 0 {
             // Store DC coded flag in cbp (bit 8)
             // (We'll set this in the caller's cbp tracking)
-            let nz =
-                decode_cabac_residual(reader, state, &mut mb.luma_dc, 0, 16, scan_4x4, mb_field);
+            let nz = decode_cabac_residual(
+                reader,
+                state,
+                &mut mb.luma_dc,
+                0,
+                16,
+                scan_4x4,
+                mb_field,
+                false,
+            );
             let _ = nz; // nz used for DC coded flag
         }
 
@@ -1784,6 +1782,7 @@ fn decode_cabac_luma_residual(
                     nz_cache,
                     is_intra,
                     left_block_option,
+                    false,
                 );
                 if reader.get_cabac(&mut state[cbf_ctx]) != 0 {
                     let nz = decode_cabac_residual(
@@ -1794,6 +1793,7 @@ fn decode_cabac_luma_residual(
                         15,
                         &scan_4x4[1..],
                         mb_field,
+                        false,
                     );
                     nz_cache[raster_idx] = nz as u8;
                 }
@@ -1817,6 +1817,7 @@ fn decode_cabac_luma_residual(
                     64,
                     scan_8x8,
                     mb_field,
+                    false,
                 );
                 // Broadcast NNZ to all 4 sub-blocks for deblocking/neighbor context.
                 let nz_val = (nz as u8).min(16);
@@ -1844,6 +1845,7 @@ fn decode_cabac_luma_residual(
                         nz_cache,
                         is_intra,
                         left_block_option,
+                        false,
                     );
                     let cbf = reader.get_cabac(&mut state[cbf_ctx]);
                     if cbf != 0 {
@@ -1855,6 +1857,7 @@ fn decode_cabac_luma_residual(
                             16,
                             scan_4x4,
                             mb_field,
+                            false,
                         );
                         nz_cache[raster_idx] = nz as u8;
                     }
@@ -1881,7 +1884,9 @@ fn decode_cabac_chroma_residual(
     stored_cbp: &mut u32,
     is_intra: bool,
     left_block_option: u8,
+    chroma_format_idc: u8,
 ) {
+    let chroma422 = chroma_format_idc == 2;
     let nz_cache = &mut mb.non_zero_count;
     let scan_4x4 = if mb_field {
         &FIELD_SCAN_4X4
@@ -1903,20 +1908,35 @@ fn decode_cabac_chroma_residual(
                 nz_cache,
                 is_intra,
                 left_block_option,
+                false,
             );
             if reader.get_cabac(&mut state[cbf_ctx]) != 0 {
-                // Chroma DC 2x2 uses identity scan (positions map 1:1 to the
-                // chroma_dc[0..4] array, matching CAVLC's direct storage).
+                // Chroma DC: 2x2 for 4:2:0, 2x4 for 4:2:2.
                 const CHROMA_DC_SCAN: [usize; 4] = [0, 1, 2, 3];
-                decode_cabac_residual(
-                    reader,
-                    state,
-                    &mut mb.chroma_dc[c as usize],
-                    3,
-                    4,
-                    &CHROMA_DC_SCAN,
-                    mb_field,
-                );
+                const CHROMA422_DC_SCAN: [usize; 8] = [0, 2, 1, 4, 6, 3, 5, 7];
+                if chroma422 {
+                    decode_cabac_residual(
+                        reader,
+                        state,
+                        &mut mb.chroma_dc[c as usize],
+                        3,
+                        8,
+                        &CHROMA422_DC_SCAN,
+                        mb_field,
+                        chroma422,
+                    );
+                } else {
+                    decode_cabac_residual(
+                        reader,
+                        state,
+                        &mut mb.chroma_dc[c as usize],
+                        3,
+                        4,
+                        &CHROMA_DC_SCAN,
+                        mb_field,
+                        chroma422,
+                    );
+                }
                 // Set chroma DC coded flag in cbp (bits 6..7)
                 *stored_cbp |= 0x40 << c;
             }
@@ -1925,10 +1945,12 @@ fn decode_cabac_chroma_residual(
 
     // Chroma AC (cat=4): 15 coefficients per 4x4 block
     if cbp & 0x20 != 0 {
+        let num_blocks = if chroma422 { 8 } else { 4 };
+        let blocks_per_plane = if chroma422 { 8 } else { 4 };
         for c in 0..2usize {
-            for i in 0..4usize {
-                let _block_idx = 16 + 4 * c + i;
-                let nz_idx = 16 + 4 * c + i;
+            for i in 0..num_blocks {
+                let _block_idx = 16 + blocks_per_plane * c + i;
+                let nz_idx = 16 + blocks_per_plane * c + i;
                 let cbf_ctx = get_cabac_cbf_ctx(
                     cabac_nb,
                     left_idx,
@@ -1940,6 +1962,7 @@ fn decode_cabac_chroma_residual(
                     nz_cache,
                     is_intra,
                     left_block_option,
+                    chroma422,
                 );
                 if reader.get_cabac(&mut state[cbf_ctx]) != 0 {
                     let nz = decode_cabac_residual(
@@ -1950,6 +1973,7 @@ fn decode_cabac_chroma_residual(
                         15,
                         &scan_4x4[1..],
                         mb_field,
+                        false,
                     );
                     nz_cache[nz_idx] = nz as u8;
                 }
@@ -1986,6 +2010,7 @@ pub fn decode_mb_cabac(
     direct_8x8_inference_flag: bool,
     decode_chroma: bool,
     mb_field: bool,
+    chroma_format_idc: u8,
     nb: &crate::mb::MbaffNeighbors,
 ) -> Result<Macroblock> {
     let mut mb = Macroblock::default();
@@ -2190,9 +2215,9 @@ pub fn decode_mb_cabac(
         reader.skip_bytes(mb_size)?;
 
         if decode_chroma {
-            mb.non_zero_count = [16; 24];
+            mb.non_zero_count = [16; 40];
         } else {
-            mb.non_zero_count = [0; 24];
+            mb.non_zero_count = [0; 40];
             for i in 0..16 {
                 mb.non_zero_count[i] = 16;
             }
@@ -2737,6 +2762,7 @@ pub fn decode_mb_cabac(
             &mut stored_cbp,
             is_intra,
             left_block_option,
+            chroma_format_idc,
         );
 
         // Per-MB coefficient summary for pipeline-stage tracing

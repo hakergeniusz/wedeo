@@ -153,6 +153,39 @@ const TOTAL_ZEROS_COUNT: [u8; 15] = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 
 // ---------------------------------------------------------------------------
 
 /// Codeword lengths for chroma DC total_zeros (4:2:0, max 4 coeffs).
+/// H.264 Table 9-7: chroma DC total_zeros for 4:2:2 (8 coefficients).
+const CHROMA422_DC_TOTAL_ZEROS_LEN: [[u8; 8]; 7] = [
+    [1, 3, 3, 4, 4, 4, 5, 5],
+    [3, 2, 3, 3, 3, 3, 3, 0],
+    [3, 3, 2, 2, 3, 3, 0, 0],
+    [3, 2, 2, 2, 3, 0, 0, 0],
+    [2, 2, 2, 2, 0, 0, 0, 0],
+    [2, 2, 1, 0, 0, 0, 0, 0],
+    [1, 1, 0, 0, 0, 0, 0, 0],
+];
+
+/// Codeword values for the 4:2:2 chroma DC total_zeros table.
+const CHROMA422_DC_TOTAL_ZEROS_BITS: [[u8; 8]; 7] = [
+    [1, 2, 3, 2, 3, 1, 1, 0],
+    [0, 1, 1, 4, 5, 6, 7, 0],
+    [0, 1, 1, 2, 6, 7, 0, 0],
+    [6, 0, 1, 2, 7, 0, 0, 0],
+    [0, 1, 2, 3, 0, 0, 0, 0],
+    [0, 1, 1, 0, 0, 0, 0, 0],
+    [0, 1, 0, 0, 0, 0, 0, 0],
+];
+
+/// H.264 Table 9-5: coeff_token for 4:2:2 chroma DC (8 coefficients).
+const CHROMA422_DC_COEFF_TOKEN_LEN: [u8; 4 * 9] = [
+    1, 0, 0, 0, 7, 2, 0, 0, 7, 7, 3, 0, 9, 7, 7, 5, 9, 9, 7, 6, 10, 10, 9, 7, 11, 11, 10, 7, 12,
+    12, 11, 10, 13, 12, 12, 11,
+];
+
+const CHROMA422_DC_COEFF_TOKEN_BITS: [u8; 4 * 9] = [
+    1, 0, 0, 0, 15, 1, 0, 0, 14, 13, 1, 0, 7, 12, 11, 1, 6, 5, 10, 1, 7, 6, 4, 9, 7, 6, 5, 8, 7, 6,
+    5, 4, 7, 5, 4, 4,
+];
+
 const CHROMA_DC_TOTAL_ZEROS_LEN: [[u8; 4]; 3] = [[1, 2, 3, 3], [1, 2, 2, 0], [1, 1, 0, 0]];
 
 /// Codeword values for chroma DC total_zeros (4:2:0).
@@ -523,6 +556,34 @@ pub fn read_total_zeros(br: &mut BitReadBE<'_>, total_coeff: u8) -> Result<u8> {
     let max_bits = 9;
 
     let val = decode_vlc(br, lens, bits_tab, count, max_bits)?;
+    Ok(val as u8)
+}
+
+/// Read coeff_token for 4:2:2 chroma DC (up to 8 coefficients).
+pub fn read_coeff_token_chroma422_dc(br: &mut BitReadBE<'_>) -> Result<(u8, u8)> {
+    let idx = decode_vlc(
+        br,
+        &CHROMA422_DC_COEFF_TOKEN_LEN,
+        &CHROMA422_DC_COEFF_TOKEN_BITS,
+        CHROMA422_DC_COEFF_TOKEN_LEN.len(),
+        13,
+    )?;
+    Ok(((idx / 4) as u8, (idx % 4) as u8))
+}
+
+/// Read total_zeros for a 2x4 chroma DC block (4:2:2).
+pub fn read_total_zeros_chroma422_dc(br: &mut BitReadBE<'_>, total_coeff: u8) -> Result<u8> {
+    if total_coeff == 0 || total_coeff > 7 {
+        return Err(Error::InvalidData);
+    }
+    let table_idx = (total_coeff - 1) as usize;
+    let val = decode_vlc(
+        br,
+        &CHROMA422_DC_TOTAL_ZEROS_LEN[table_idx],
+        &CHROMA422_DC_TOTAL_ZEROS_BITS[table_idx],
+        8,
+        5,
+    )?;
     Ok(val as u8)
 }
 

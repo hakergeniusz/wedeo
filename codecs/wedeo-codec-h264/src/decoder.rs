@@ -1757,10 +1757,10 @@ impl H264Decoder {
         let mut mb_field_decoding_flag = false;
 
         // Two separate left-side contexts for top and bottom MB rows.
-        let mut top_left_nz = [0u8; 8];
+        let mut top_left_nz = [0u8; 16];
         let mut top_left_modes = [-1i8; 4];
         let mut top_left_avail = false;
-        let mut bot_left_nz = [0u8; 8];
+        let mut bot_left_nz = [0u8; 16];
         let mut bot_left_modes = [-1i8; 4];
         let mut bot_left_avail = false;
         // MBAFF: save top-row context for the bottom MB (same as CABAC path).
@@ -2040,7 +2040,7 @@ impl H264Decoder {
 
                         // Update CABAC neighbor context for skip MB
                         cabac_nb.update_after_mb(
-                            mb_idx, true, false, false, false, 0, 0, &[0; 24], false,
+                            mb_idx, true, false, false, false, 0, 0, &[0; 40], false,
                         );
                         let skip_modes = if pps.constrained_intra_pred {
                             [-1i8; 16]
@@ -2105,6 +2105,7 @@ impl H264Decoder {
                     fdc.direct_8x8_inference_flag,
                     fdc.decode_chroma,
                     false, // non-MBAFF: always frame mode
+                    sps.chroma_format_idc,
                     &nb,
                 )?;
 
@@ -2190,10 +2191,10 @@ impl H264Decoder {
         // Two separate left-side contexts for MBAFF: one for top MBs, one for bottom MBs.
         // After each pair, the top row's left context holds the top MB's right edge,
         // and the bottom row's holds the bottom MB's right edge.
-        let mut top_left_nz = [0u8; 8];
+        let mut top_left_nz = [0u8; 16];
         let mut top_left_modes = [-1i8; 4];
         let mut top_left_avail = false;
-        let mut bot_left_nz = [0u8; 8];
+        let mut bot_left_nz = [0u8; 16];
         let mut bot_left_modes = [-1i8; 4];
         let mut bot_left_avail = false;
         // MBAFF: save top-row context (intra4x4 modes + NNZ) for the bottom MB.
@@ -2360,7 +2361,7 @@ impl H264Decoder {
                         fdc.last_qscale_diff = 0;
 
                         cabac_nb.update_after_mb(
-                            mb_idx, true, false, false, false, 0, 0, &[0; 24], false,
+                            mb_idx, true, false, false, false, 0, 0, &[0; 40], false,
                         );
                         let skip_modes = if pps.constrained_intra_pred {
                             [-1i8; 16]
@@ -2446,6 +2447,7 @@ impl H264Decoder {
                     fdc.direct_8x8_inference_flag,
                     fdc.decode_chroma,
                     mb_field_decoding_flag,
+                    sps.chroma_format_idc,
                     &nb,
                 )?;
 

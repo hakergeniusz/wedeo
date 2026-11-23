@@ -10,7 +10,8 @@ use wedeo_codec::bitstream::{BitRead, BitReadBE, get_se_golomb, get_ue_golomb};
 use wedeo_core::error::{Error, Result};
 
 use crate::cavlc_tables::{
-    read_coeff_token, read_run_before, read_total_zeros, read_total_zeros_chroma_dc,
+    read_coeff_token, read_coeff_token_chroma422_dc, read_run_before, read_total_zeros,
+    read_total_zeros_chroma_dc, read_total_zeros_chroma422_dc,
 };
 use crate::pps::Pps;
 use crate::slice::SliceType;
@@ -46,7 +47,7 @@ pub struct NeighborContext {
     pub top_nz_cr: Vec<u8>,
     /// Non-zero counts for the block to the left.
     /// [0..3] = luma (top to bottom within MB), [4..5] = Cb, [6..7] = Cr.
-    pub left_nz: [u8; 8],
+    pub left_nz: [u8; 16],
     /// Whether the left neighbor MB is available.
     pub left_available: bool,
     /// Whether the top neighbor MB is available.
@@ -66,9 +67,9 @@ impl NeighborContext {
     pub fn new(mb_width: u32) -> Self {
         Self {
             top_nz_luma: vec![0; mb_width as usize * 4],
-            top_nz_cb: vec![0; mb_width as usize * 2],
-            top_nz_cr: vec![0; mb_width as usize * 2],
-            left_nz: [0; 8],
+            top_nz_cb: vec![0; mb_width as usize * 4],
+            top_nz_cr: vec![0; mb_width as usize * 4],
+            left_nz: [0; 16],
             left_available: false,
             top_available: false,
             top_intra4x4_mode: vec![-1; mb_width as usize * 4],
@@ -147,7 +148,13 @@ impl NeighborContext {
     /// the right column into `left_nz`, etc.
     /// `intra4x4_modes` contains the 16 prediction modes in raster order
     /// (or all -1 if the MB is not I_4x4).
-    pub fn update_after_mb(&mut self, mb_x: u32, nz: &[u8; 24], intra4x4_modes: &[i8; 16]) {
+    pub fn update_after_mb(
+        &mut self,
+        mb_x: u32,
+        nz: &[u8; 40],
+        intra4x4_modes: &[i8; 16],
+        chroma422: bool,
+    ) {
         // Luma: nz[0..15] in raster order (row-major 4x4)
         // Bottom row of luma (blk_y=3): indices 12, 13, 14, 15
         let luma_base = mb_x as usize * 4;
@@ -162,19 +169,31 @@ impl NeighborContext {
         self.left_nz[2] = nz[11];
         self.left_nz[3] = nz[15];
 
-        // Chroma Cb: nz[16..19] in raster order (2x2)
+        // Chroma non-zero counts. 4:2:2 has 8 blocks per plane (2x4);
+        // 4:2:0 has 4 (2x2). `nz.len() == 40` signals the FRext layout.
         let cb_base = mb_x as usize * 2;
-        self.top_nz_cb[cb_base] = nz[18]; // bottom row: indices 18, 19
-        self.top_nz_cb[cb_base + 1] = nz[19];
-        self.left_nz[4] = nz[17]; // right column: 17, 19
-        self.left_nz[5] = nz[19];
-
-        // Chroma Cr: nz[20..23]
         let cr_base = mb_x as usize * 2;
-        self.top_nz_cr[cr_base] = nz[22];
-        self.top_nz_cr[cr_base + 1] = nz[23];
-        self.left_nz[6] = nz[21];
-        self.left_nz[7] = nz[23];
+        if chroma422 {
+            self.top_nz_cb[cb_base] = nz[22];
+            self.top_nz_cb[cb_base + 1] = nz[23];
+            for (i, &v) in [17usize, 19, 21, 23].iter().enumerate() {
+                self.left_nz[4 + i] = nz[v];
+            }
+            self.top_nz_cr[cr_base] = nz[30];
+            self.top_nz_cr[cr_base + 1] = nz[31];
+            for (i, &v) in [25usize, 27, 29, 31].iter().enumerate() {
+                self.left_nz[12 + i] = nz[v];
+            }
+        } else {
+            self.top_nz_cb[cb_base] = nz[18];
+            self.top_nz_cb[cb_base + 1] = nz[19];
+            self.left_nz[4] = nz[17];
+            self.left_nz[5] = nz[19];
+            self.top_nz_cr[cr_base] = nz[22];
+            self.top_nz_cr[cr_base + 1] = nz[23];
+            self.left_nz[6] = nz[21];
+            self.left_nz[7] = nz[23];
+        }
 
         // Intra4x4 prediction modes: store bottom row and right column.
         // Bottom row (blk_y=3): raster indices 12, 13, 14, 15
@@ -193,7 +212,7 @@ impl NeighborContext {
     /// Reset left context at the start of a new MB row.
     pub fn new_row(&mut self) {
         self.left_available = false;
-        self.left_nz = [0; 8];
+        self.left_nz = [0; 16];
         self.left_intra4x4_mode = [-1; 4];
     }
 }
@@ -226,7 +245,8 @@ pub fn compute_nc(
     block_idx: usize,
     mb_x: u32,
     neighbor: &NeighborContext,
-    nz_cache: &[u8; 24],
+    nz_cache: &[u8; 40],
+    chroma422: bool,
 ) -> i32 {
     if block_idx < 16 {
         // Luma
@@ -251,40 +271,41 @@ pub fn compute_nc(
         };
 
         merge_nc(left, top)
-    } else if block_idx < 20 {
-        // Chroma Cb
-        let cb_idx = block_idx - 16; // 0..3
-        let blk_x = (cb_idx % 2) as u32;
-        let blk_y = (cb_idx / 2) as u32;
-
-        let left = if blk_x > 0 {
-            Some(nz_cache[block_idx - 1] as i32)
-        } else if neighbor.left_available {
-            Some(neighbor.left_nz[4 + blk_y as usize] as i32)
-        } else {
-            None
-        };
-
-        let top = if blk_y > 0 {
-            Some(nz_cache[block_idx - 2] as i32)
-        } else if neighbor.top_available {
-            let abs_blk_x = mb_x * 2 + blk_x;
-            Some(neighbor.top_nz_cb[abs_blk_x as usize] as i32)
-        } else {
-            None
-        };
-
-        merge_nc(left, top)
     } else {
-        // Chroma Cr
-        let cr_idx = block_idx - 20; // 0..3
-        let blk_x = (cr_idx % 2) as u32;
-        let blk_y = (cr_idx / 2) as u32;
+        // Chroma. 4:2:0: Cb=16..19, Cr=20..23 (2x2 blocks).
+        // 4:2:2: Cb=16..23, Cr=24..31 (2x4 blocks).
+        let (plane_base, cb_blocks) = if chroma422 {
+            if block_idx < 24 {
+                (16usize, 8usize)
+            } else {
+                (24usize, 8usize)
+            }
+        } else {
+            if block_idx < 20 {
+                (16usize, 4usize)
+            } else {
+                (20usize, 4usize)
+            }
+        };
+        let comp = if block_idx < (if chroma422 { 24 } else { 20 }) {
+            0
+        } else {
+            1
+        };
+        let idx = block_idx - plane_base;
+        let blk_x = (idx % 2) as u32;
+        let blk_y = (idx / 2) as u32;
+        let _ = cb_blocks;
 
         let left = if blk_x > 0 {
             Some(nz_cache[block_idx - 1] as i32)
         } else if neighbor.left_available {
-            Some(neighbor.left_nz[6 + blk_y as usize] as i32)
+            let row = if chroma422 {
+                4 + blk_y as usize + comp * 4
+            } else {
+                4 + blk_y as usize + comp * 2
+            };
+            Some(neighbor.left_nz[row] as i32)
         } else {
             None
         };
@@ -293,7 +314,12 @@ pub fn compute_nc(
             Some(nz_cache[block_idx - 2] as i32)
         } else if neighbor.top_available {
             let abs_blk_x = mb_x * 2 + blk_x;
-            Some(neighbor.top_nz_cr[abs_blk_x as usize] as i32)
+            let top_nz = if comp == 0 {
+                &neighbor.top_nz_cb
+            } else {
+                &neighbor.top_nz_cr
+            };
+            Some(top_nz[abs_blk_x as usize] as i32)
         } else {
             None
         };
@@ -345,13 +371,18 @@ pub fn decode_residual(
     br: &mut BitReadBE<'_>,
     nc: i32,
     max_coeff: usize,
+    chroma422_dc: bool,
 ) -> Result<([i16; 16], u8)> {
     debug_assert!(max_coeff <= 16);
 
     let mut coeffs = [0i16; 16];
 
     // 1. Read coeff_token
-    let (total_coeff, trailing_ones) = read_coeff_token(br, nc)?;
+    let (total_coeff, trailing_ones) = if chroma422_dc {
+        read_coeff_token_chroma422_dc(br)?
+    } else {
+        read_coeff_token(br, nc)?
+    };
 
     if total_coeff == 0 {
         return Ok((coeffs, 0));
@@ -485,7 +516,9 @@ pub fn decode_residual(
 
     // 3. Read total_zeros
     let total_zeros = if (total_coeff as usize) < max_coeff {
-        if max_coeff <= 4 {
+        if chroma422_dc {
+            read_total_zeros_chroma422_dc(br, total_coeff)?
+        } else if max_coeff <= 4 {
             // Chroma DC
             read_total_zeros_chroma_dc(br, total_coeff)?
         } else {
@@ -516,7 +549,9 @@ pub fn decode_residual(
             zeros_left
         };
 
-        if coeff_idx >= max_coeff {
+        // AC blocks decode into a 16-entry scratch block: scan position 15 is
+        // valid even though only  coefficients are coded.
+        if coeff_idx >= coeffs.len() {
             trace!(bits_consumed = br.consumed(), "CAVLC error site 526");
             return Err(Error::InvalidData);
         }
@@ -573,12 +608,12 @@ pub struct Macroblock {
     /// DC coefficients for Intra16x16 (16 entries, before inverse Hadamard).
     pub luma_dc: [i16; 16],
     /// Chroma DC coefficients per chroma plane (2 planes, 4 DCs each for 4:2:0).
-    pub chroma_dc: [[i16; 4]; 2],
+    pub chroma_dc: [[i16; 8]; 2],
     /// Chroma AC coefficients per chroma plane (2 planes, 4 blocks, 15 ACs each).
-    pub chroma_ac: [[[i16; 16]; 4]; 2],
+    pub chroma_ac: [[[i16; 16]; 8]; 2],
     /// Non-zero count per 4x4 block (used as context for neighbors).
     /// Layout: [0..15] = luma (raster), [16..19] = Cb, [20..23] = Cr.
-    pub non_zero_count: [u8; 24],
+    pub non_zero_count: [u8; 40],
     /// QP delta from slice QP.
     pub mb_qp_delta: i32,
     /// Sub-macroblock types for P_8x8 / B_8x8 (4 entries).
@@ -622,9 +657,9 @@ impl Default for Macroblock {
             cbp: 0,
             luma_coeffs: [[0; 16]; 16],
             luma_dc: [0; 16],
-            chroma_dc: [[0; 4]; 2],
-            chroma_ac: [[[0; 16]; 4]; 2],
-            non_zero_count: [0; 24],
+            chroma_dc: [[0; 8]; 2],
+            chroma_ac: [[[0; 16]; 8]; 2],
+            non_zero_count: [0; 40],
             mb_qp_delta: 0,
             sub_mb_type: [0; 4],
             ref_idx_l0: [-1; 4],
@@ -767,6 +802,7 @@ pub fn decode_mb_cavlc(
     direct_8x8_inference_flag: bool,
     decode_chroma: bool,
     mb_field: bool,
+    chroma_format_idc: u8,
 ) -> Result<Macroblock> {
     let mut mb = Macroblock::default();
 
@@ -868,9 +904,9 @@ pub fn decode_mb_cavlc(
 
         // Monochrome: only luma NNZ (256 bytes); 4:2:0: all 384 bytes.
         if decode_chroma {
-            mb.non_zero_count = [16; 24];
+            mb.non_zero_count = [16; 40];
         } else {
-            mb.non_zero_count = [0; 24];
+            mb.non_zero_count = [0; 40];
             for i in 0..16 {
                 mb.non_zero_count[i] = 16;
             }
@@ -1204,7 +1240,15 @@ pub fn decode_mb_cavlc(
             mb_qp_delta = mb.mb_qp_delta,
             "CAVLC MB header"
         );
-        decode_residual_blocks(br, &mut mb, neighbor, mb_x, pps, mb_field)?;
+        decode_residual_blocks(
+            br,
+            &mut mb,
+            neighbor,
+            mb_x,
+            pps,
+            mb_field,
+            chroma_format_idc,
+        )?;
     }
 
     Ok(mb)
@@ -1273,6 +1317,7 @@ fn decode_residual_blocks(
     mb_x: u32,
     _pps: &Pps,
     mb_field: bool,
+    chroma_format_idc: u8,
 ) -> Result<()> {
     // Select scan table based on interlace mode (field vs frame).
     // Field MBs use column-first scan; frame MBs use standard zigzag.
@@ -1285,8 +1330,8 @@ fn decode_residual_blocks(
 
     if mb.is_intra16x16 {
         // Luma DC: 16 coefficients, nC from luma context of block 0.
-        let nc = compute_nc(0, mb_x, neighbor, &mb.non_zero_count);
-        let (dc_coeffs_scan, _dc_nz) = decode_residual(br, nc, 16)?;
+        let nc = compute_nc(0, mb_x, neighbor, &mb.non_zero_count, false);
+        let (dc_coeffs_scan, _dc_nz) = decode_residual(br, nc, 16, false)?;
         // Descan from zigzag to raster order for the Hadamard input.
         mb.luma_dc = descan_4x4(&dc_coeffs_scan, 16, scan_4x4);
 
@@ -1296,8 +1341,8 @@ fn decode_residual_blocks(
                 for i4x4 in 0..4 {
                     let scan_idx = i8x8 * 4 + i4x4;
                     let raster_idx = SCAN_TO_RASTER[scan_idx];
-                    let nc = compute_nc(raster_idx, mb_x, neighbor, &mb.non_zero_count);
-                    let (ac_coeffs_scan, nz) = decode_residual(br, nc, 15)?;
+                    let nc = compute_nc(raster_idx, mb_x, neighbor, &mb.non_zero_count, false);
+                    let (ac_coeffs_scan, nz) = decode_residual(br, nc, 15, false)?;
                     // Descan AC coefficients (skip for zero-coefficient blocks).
                     if nz > 0 {
                         for scan_pos in 0..15 {
@@ -1319,8 +1364,8 @@ fn decode_residual_blocks(
                 for (i4x4, sub_scan) in ZIGZAG_SCAN_8X8_CAVLC.iter().enumerate() {
                     let scan_idx = i8x8 * 4 + i4x4;
                     let raster_idx = SCAN_TO_RASTER[scan_idx];
-                    let nc = compute_nc(raster_idx, mb_x, neighbor, &mb.non_zero_count);
-                    let (block_coeffs_scan, nz) = decode_residual(br, nc, 16)?;
+                    let nc = compute_nc(raster_idx, mb_x, neighbor, &mb.non_zero_count, false);
+                    let (block_coeffs_scan, nz) = decode_residual(br, nc, 16, false)?;
                     mb.non_zero_count[raster_idx] = nz;
                     // Place coefficients into the 8x8 block using sub-scan table.
                     for scan_pos in 0..16 {
@@ -1363,8 +1408,8 @@ fn decode_residual_blocks(
                 for i4x4 in 0..4 {
                     let scan_idx = i8x8 * 4 + i4x4;
                     let raster_idx = SCAN_TO_RASTER[scan_idx];
-                    let nc = compute_nc(raster_idx, mb_x, neighbor, &mb.non_zero_count);
-                    let (block_coeffs_scan, nz) = decode_residual(br, nc, 16)?;
+                    let nc = compute_nc(raster_idx, mb_x, neighbor, &mb.non_zero_count, false);
+                    let (block_coeffs_scan, nz) = decode_residual(br, nc, 16, false)?;
                     // Descan from zigzag to raster order (skip for zero-coefficient blocks).
                     if nz > 0 {
                         mb.luma_coeffs[raster_idx] = descan_4x4(&block_coeffs_scan, 16, scan_4x4);
@@ -1382,33 +1427,51 @@ fn decode_residual_blocks(
         }
     }
 
-    // Chroma (4:2:0)
+    // Chroma DC (4 coefficients per plane for 4:2:0, 8 for 4:2:2).
     if cbp & 0x30 != 0 {
-        // Chroma DC: 4 coefficients per plane, nC = -1.
+        let chroma422 = chroma_format_idc == 2;
+        let dc_max = if chroma422 { 8 } else { 4 };
+        // ff_h264_chroma422_dc_scan in FFmpeg h264data.c, divided by 16.
+        const DC422_SCAN: [usize; 8] = [0, 2, 1, 4, 6, 3, 5, 7];
         for chroma_idx in 0..2 {
-            let (dc_coeffs, _dc_nz) = decode_residual(br, -1, 4)?;
-            mb.chroma_dc[chroma_idx] = [dc_coeffs[0], dc_coeffs[1], dc_coeffs[2], dc_coeffs[3]];
+            let (dc_coeffs, _dc_nz) = decode_residual(br, -1, dc_max, chroma422)?;
+            for i in 0..dc_max {
+                let pos = if chroma422 { DC422_SCAN[i] } else { i };
+                mb.chroma_dc[chroma_idx][pos] = dc_coeffs[i];
+            }
         }
     }
 
     if cbp & 0x20 != 0 {
-        // Chroma AC: 15 coefficients per block, 4 blocks per plane.
+        // Chroma AC: 15 coefficients per block, 4 blocks per plane (4:2:0)
+        // or 8 blocks per plane (4:2:2).
+        let chroma422 = chroma_format_idc == 2;
+        let num_c8x8 = if chroma422 { 2 } else { 1 };
+        let blocks_per_plane = if chroma422 { 8 } else { 4 };
         for chroma_idx in 0..2 {
-            for blk in 0..4 {
-                let block_idx = 16 + chroma_idx * 4 + blk;
-                let nc = compute_nc(block_idx, mb_x, neighbor, &mb.non_zero_count);
-                let (ac_coeffs_scan, nz) = decode_residual(br, nc, 15)?;
-                // Descan AC coefficients: scan positions 0..14 -> raster via zigzag_scan[1..16].
-                for scan_pos in 0..15 {
-                    mb.chroma_ac[chroma_idx][blk][scan_4x4[scan_pos + 1]] =
-                        ac_coeffs_scan[scan_pos];
+            for i8x8 in 0..num_c8x8 {
+                for i4x4 in 0..4 {
+                    let blk = i8x8 * 4 + i4x4;
+                    let block_idx = 16 + chroma_idx * blocks_per_plane + blk;
+                    let nc = compute_nc(
+                        block_idx,
+                        mb_x,
+                        neighbor,
+                        &mb.non_zero_count,
+                        chroma_format_idc == 2,
+                    );
+                    let (ac_coeffs_scan, nz) = decode_residual(br, nc, 15, false)?;
+                    for scan_pos in 0..15 {
+                        mb.chroma_ac[chroma_idx][blk][scan_4x4[scan_pos + 1]] =
+                            ac_coeffs_scan[scan_pos];
+                    }
+                    mb.non_zero_count[block_idx] = nz;
                 }
-                mb.non_zero_count[block_idx] = nz;
             }
         }
     } else {
         // Zero out chroma non_zero_count.
-        for i in 16..24 {
+        for i in 16..40 {
             mb.non_zero_count[i] = 0;
         }
     }
@@ -1483,7 +1546,7 @@ mod tests {
         // nC=0: coeff_token for total_coeff=0 is "1" (len=1, bits=1).
         let data = bits_str_to_bytes("1");
         let mut br = BitReadBE::new(&data);
-        let (coeffs, nz) = decode_residual(&mut br, 0, 16).unwrap();
+        let (coeffs, nz) = decode_residual(&mut br, 0, 16, false).unwrap();
         assert_eq!(nz, 0);
         assert_eq!(coeffs, [0i16; 16]);
     }
@@ -1501,7 +1564,7 @@ mod tests {
         // = "0101"
         let data = bits_str_to_bytes("0101");
         let mut br = BitReadBE::new(&data);
-        let (coeffs, nz) = decode_residual(&mut br, 0, 16).unwrap();
+        let (coeffs, nz) = decode_residual(&mut br, 0, 16, false).unwrap();
         assert_eq!(nz, 1);
         // Single coefficient at position 0 (last scan position = total_coeff + total_zeros - 1 = 0).
         assert_eq!(coeffs[0], 1);
@@ -1516,7 +1579,7 @@ mod tests {
         // Bitstream: 01 | 1 | 1  = "0111"
         let data = bits_str_to_bytes("0111");
         let mut br = BitReadBE::new(&data);
-        let (coeffs, nz) = decode_residual(&mut br, 0, 16).unwrap();
+        let (coeffs, nz) = decode_residual(&mut br, 0, 16, false).unwrap();
         assert_eq!(nz, 1);
         assert_eq!(coeffs[0], -1);
     }
@@ -1533,7 +1596,7 @@ mod tests {
         // = "00101111"
         let data = bits_str_to_bytes("00101111");
         let mut br = BitReadBE::new(&data);
-        let (coeffs, nz) = decode_residual(&mut br, 0, 16).unwrap();
+        let (coeffs, nz) = decode_residual(&mut br, 0, 16, false).unwrap();
         assert_eq!(nz, 2);
         // Two coefficients at positions 0 and 1.
         // levels[0] = +1 (first trailing one, highest frequency)
@@ -1549,7 +1612,7 @@ mod tests {
         // coeff_token for total_coeff=0: len=2, bits=1 => "01"
         let data = bits_str_to_bytes("01");
         let mut br = BitReadBE::new(&data);
-        let (coeffs, nz) = decode_residual(&mut br, -1, 4).unwrap();
+        let (coeffs, nz) = decode_residual(&mut br, -1, 4, false).unwrap();
         assert_eq!(nz, 0);
         assert_eq!(coeffs[0..4], [0, 0, 0, 0]);
     }
@@ -1559,9 +1622,9 @@ mod tests {
     #[test]
     fn compute_nc_no_neighbors() {
         let neighbor = NeighborContext::new(10);
-        let nz_cache = [0u8; 24];
+        let nz_cache = [0u8; 40];
         // Block 0 (top-left of MB), no left or top available.
-        let nc = compute_nc(0, 0, &neighbor, &nz_cache);
+        let nc = compute_nc(0, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 0);
     }
 
@@ -1570,9 +1633,9 @@ mod tests {
         let mut neighbor = NeighborContext::new(10);
         neighbor.top_available = true;
         neighbor.top_nz_luma[0] = 4;
-        let nz_cache = [0u8; 24];
+        let nz_cache = [0u8; 40];
         // Block 0: has top neighbor with nz=4, no left.
-        let nc = compute_nc(0, 0, &neighbor, &nz_cache);
+        let nc = compute_nc(0, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 4);
     }
 
@@ -1581,9 +1644,9 @@ mod tests {
         let mut neighbor = NeighborContext::new(10);
         neighbor.left_available = true;
         neighbor.left_nz[0] = 6;
-        let nz_cache = [0u8; 24];
+        let nz_cache = [0u8; 40];
         // Block 0: has left neighbor with nz=6, no top.
-        let nc = compute_nc(0, 0, &neighbor, &nz_cache);
+        let nc = compute_nc(0, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 6);
     }
 
@@ -1594,43 +1657,43 @@ mod tests {
         neighbor.top_available = true;
         neighbor.left_nz[0] = 4;
         neighbor.top_nz_luma[0] = 6;
-        let nz_cache = [0u8; 24];
+        let nz_cache = [0u8; 40];
         // Block 0: both available => (4 + 6 + 1) >> 1 = 5
-        let nc = compute_nc(0, 0, &neighbor, &nz_cache);
+        let nc = compute_nc(0, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 5);
     }
 
     #[test]
     fn compute_nc_intra_mb_left() {
         let neighbor = NeighborContext::new(10);
-        let mut nz_cache = [0u8; 24];
+        let mut nz_cache = [0u8; 40];
         nz_cache[0] = 3; // block 0 has 3 non-zero coeffs
         // Block 1 (to the right of block 0 within MB): left = nz_cache[0] = 3, no top.
-        let nc = compute_nc(1, 0, &neighbor, &nz_cache);
+        let nc = compute_nc(1, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 3);
     }
 
     #[test]
     fn compute_nc_intra_mb_top() {
         let neighbor = NeighborContext::new(10);
-        let mut nz_cache = [0u8; 24];
+        let mut nz_cache = [0u8; 40];
         nz_cache[0] = 5; // block 0
         // Block 4 (below block 0 within MB): top = nz_cache[0] = 5, no left.
-        let nc = compute_nc(4, 0, &neighbor, &nz_cache);
+        let nc = compute_nc(4, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 5);
     }
 
     #[test]
     fn compute_nc_intra_mb_both() {
         let neighbor = NeighborContext::new(10);
-        let mut nz_cache = [0u8; 24];
+        let mut nz_cache = [0u8; 40];
         nz_cache[1] = 4; // block 1 (left of block 5)
         nz_cache[2] = 6; // block 2 (above is block 5? No, above block 5 is block 1)
         // Block 5 = (1, 1): left = block 4, top = block 1.
         nz_cache[4] = 2;
         nz_cache[1] = 8;
         // block 5: blk_x=1, blk_y=1. left = nz_cache[4] = 2, top = nz_cache[1] = 8.
-        let nc = compute_nc(5, 0, &neighbor, &nz_cache);
+        let nc = compute_nc(5, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, (2 + 8 + 1) >> 1); // 5
     }
 
@@ -1639,15 +1702,17 @@ mod tests {
     #[test]
     fn neighbor_context_update() {
         let mut ctx = NeighborContext::new(2);
-        let nz: [u8; 24] = [
+        let nz: [u8; 40] = [
             1, 2, 3, 4, // luma row 0
             5, 6, 7, 8, // luma row 1
             9, 10, 11, 12, // luma row 2
             13, 14, 15, 16, // luma row 3
             17, 18, 19, 20, // Cb
             21, 22, 23, 24, // Cr
+            0, 0, 0, 0, 0, 0, 0, 0, // 4:2:2 extra chroma blocks
+            0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        ctx.update_after_mb(0, &nz, &[-1i8; 16]);
+        ctx.update_after_mb(0, &nz, &[-1i8; 16], false);
 
         // Top: bottom row of luma
         assert_eq!(ctx.top_nz_luma[0], 13);
@@ -1764,9 +1829,9 @@ mod tests {
     #[test]
     fn compute_nc_chroma_no_neighbors() {
         let neighbor = NeighborContext::new(10);
-        let nz_cache = [0u8; 24];
+        let nz_cache = [0u8; 40];
         // Cb block 0 (index 16), no neighbors.
-        let nc = compute_nc(16, 0, &neighbor, &nz_cache);
+        let nc = compute_nc(16, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 0);
     }
 
@@ -1775,18 +1840,18 @@ mod tests {
         let mut neighbor = NeighborContext::new(10);
         neighbor.top_available = true;
         neighbor.top_nz_cb[0] = 3;
-        let nz_cache = [0u8; 24];
-        let nc = compute_nc(16, 0, &neighbor, &nz_cache);
+        let nz_cache = [0u8; 40];
+        let nc = compute_nc(16, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 3);
     }
 
     #[test]
     fn compute_nc_chroma_intra_mb() {
         let neighbor = NeighborContext::new(10);
-        let mut nz_cache = [0u8; 24];
+        let mut nz_cache = [0u8; 40];
         nz_cache[16] = 2; // Cb block 0
         // Cb block 1 (index 17): left neighbor is block 16.
-        let nc = compute_nc(17, 0, &neighbor, &nz_cache);
+        let nc = compute_nc(17, 0, &neighbor, &nz_cache, false);
         assert_eq!(nc, 2);
     }
 

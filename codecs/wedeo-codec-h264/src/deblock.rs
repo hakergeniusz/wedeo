@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use tracing::{debug, trace};
 
+use crate::pixel::Pixel;
 use crate::tables::{CHROMA_QP_TABLES, QP_MAX_NUM};
 
 /// Wrapper to send a `*mut PictureBuffer` across scoped threads.
@@ -139,7 +140,7 @@ pub struct MbDeblockInfo {
     /// Non-zero coefficient count per 4x4 block (16 luma + 8 chroma).
     /// Luma: indices 0..16 in raster scan of 4x4 sub-blocks.
     /// Chroma Cb: indices 16..20, Cr: indices 20..24.
-    pub non_zero_count: [u8; 24],
+    pub non_zero_count: [u8; 40],
     /// Reference picture identity per 4x4 block (list 0).
     /// B-slices: stores POC so cross-list (L0/L1) identity comparison works.
     /// P-slices: stores DPB index (cast to i32) — handles ref list duplicates
@@ -173,7 +174,7 @@ impl Default for MbDeblockInfo {
             is_intra: false,
             qp: 0,
             list_count: 1,
-            non_zero_count: [0; 24],
+            non_zero_count: [0; 40],
             ref_poc: [i32::MIN; 16],
             mv: [[0; 2]; 16],
             ref_poc_l1: [i32::MIN; 16],
@@ -299,6 +300,7 @@ fn clip3(lo: i32, hi: i32, x: i32) -> i32 {
 }
 
 /// Clamp a pixel value to [0, 255].
+#[cfg(test)]
 #[inline(always)]
 fn clip_pixel(x: i32) -> u8 {
     clip3(0, 255, x) as u8
@@ -459,7 +461,7 @@ pub fn compute_bs(
 /// Returns (p0', p1', q0', q1') -- only p0/q0 always change; p1/q1 may remain unchanged.
 #[allow(clippy::too_many_arguments)] // mirrors FFmpeg h264_loop_filter_luma per-pixel logic
 #[inline]
-fn filter_normal_luma(
+fn filter_normal_luma<P: Pixel>(
     p0: i32,
     p1: i32,
     p2: i32,
@@ -469,20 +471,20 @@ fn filter_normal_luma(
     alpha: i32,
     beta: i32,
     tc0: i32,
-) -> Option<(u8, u8, u8, u8)> {
+) -> Option<(P, P, P, P)> {
     // Threshold check
     if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
         return None;
     }
 
     let mut tc = tc0;
-    let mut new_p1 = p1 as u8;
-    let mut new_q1 = q1 as u8;
+    let mut new_p1 = P::from_i32(p1);
+    let mut new_q1 = P::from_i32(q1);
 
     // Optionally filter p1
     if (p2 - p0).abs() < beta {
         if tc0 != 0 {
-            new_p1 = (p1 + clip3(-tc0, tc0, ((p2 + ((p0 + q0 + 1) >> 1)) >> 1) - p1)) as u8;
+            new_p1 = P::from_i32(p1 + clip3(-tc0, tc0, ((p2 + ((p0 + q0 + 1) >> 1)) >> 1) - p1));
         }
         tc += 1;
     }
@@ -490,15 +492,15 @@ fn filter_normal_luma(
     // Optionally filter q1
     if (q2 - q0).abs() < beta {
         if tc0 != 0 {
-            new_q1 = (q1 + clip3(-tc0, tc0, ((q2 + ((p0 + q0 + 1) >> 1)) >> 1) - q1)) as u8;
+            new_q1 = P::from_i32(q1 + clip3(-tc0, tc0, ((q2 + ((p0 + q0 + 1) >> 1)) >> 1) - q1));
         }
         tc += 1;
     }
 
     // Filter p0, q0
     let delta = clip3(-tc, tc, ((q0 - p0) * 4 + (p1 - q1) + 4) >> 3);
-    let new_p0 = clip_pixel(p0 + delta);
-    let new_q0 = clip_pixel(q0 - delta);
+    let new_p0 = P::from_i32(p0 + delta);
+    let new_q0 = P::from_i32(q0 - delta);
 
     Some((new_p0, new_p1, new_q0, new_q1))
 }
@@ -511,7 +513,7 @@ fn filter_normal_luma(
 ///
 /// Chroma normal filter only modifies p0 and q0; tc = tc0 + 1.
 #[inline]
-fn filter_normal_chroma(
+fn filter_normal_chroma<P: Pixel>(
     p0: i32,
     p1: i32,
     q0: i32,
@@ -519,14 +521,14 @@ fn filter_normal_chroma(
     alpha: i32,
     beta: i32,
     tc: i32,
-) -> Option<(u8, u8)> {
+) -> Option<(P, P)> {
     if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
         return None;
     }
 
     let delta = clip3(-tc, tc, ((q0 - p0) * 4 + (p1 - q1) + 4) >> 3);
-    let new_p0 = clip_pixel(p0 + delta);
-    let new_q0 = clip_pixel(q0 - delta);
+    let new_p0 = P::from_i32(p0 + delta);
+    let new_q0 = P::from_i32(q0 - delta);
 
     Some((new_p0, new_q0))
 }
@@ -540,7 +542,7 @@ fn filter_normal_chroma(
 /// Returns (p0', p1', p2', q0', q1', q2') or None if thresholds not met.
 #[allow(clippy::too_many_arguments)] // mirrors FFmpeg h264_loop_filter_luma_intra per-pixel logic
 #[inline]
-fn filter_strong_luma(
+fn filter_strong_luma<P: Pixel>(
     p0: i32,
     p1: i32,
     p2: i32,
@@ -551,7 +553,7 @@ fn filter_strong_luma(
     q3: i32,
     alpha: i32,
     beta: i32,
-) -> Option<(u8, u8, u8, u8, u8, u8)> {
+) -> Option<(P, P, P, P, P, P)> {
     if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
         return None;
     }
@@ -565,32 +567,32 @@ fn filter_strong_luma(
 
     if small_gap {
         if ap < beta {
-            new_p0 = ((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3) as u8;
-            new_p1 = ((p2 + p1 + p0 + q0 + 2) >> 2) as u8;
-            new_p2 = ((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3) as u8;
+            new_p0 = P::from_i32((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
+            new_p1 = P::from_i32((p2 + p1 + p0 + q0 + 2) >> 2);
+            new_p2 = P::from_i32((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3);
         } else {
-            new_p0 = ((2 * p1 + p0 + q1 + 2) >> 2) as u8;
-            new_p1 = p1 as u8;
-            new_p2 = p2 as u8;
+            new_p0 = P::from_i32((2 * p1 + p0 + q1 + 2) >> 2);
+            new_p1 = P::from_i32(p1);
+            new_p2 = P::from_i32(p2);
         }
 
         if aq < beta {
-            new_q0 = ((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3) as u8;
-            new_q1 = ((p0 + q0 + q1 + q2 + 2) >> 2) as u8;
-            new_q2 = ((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3) as u8;
+            new_q0 = P::from_i32((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3);
+            new_q1 = P::from_i32((p0 + q0 + q1 + q2 + 2) >> 2);
+            new_q2 = P::from_i32((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3);
         } else {
-            new_q0 = ((2 * q1 + q0 + p1 + 2) >> 2) as u8;
-            new_q1 = q1 as u8;
-            new_q2 = q2 as u8;
+            new_q0 = P::from_i32((2 * q1 + q0 + p1 + 2) >> 2);
+            new_q1 = P::from_i32(q1);
+            new_q2 = P::from_i32(q2);
         }
     } else {
         // Weak form of the strong filter — only modify p0 and q0
-        new_p0 = ((2 * p1 + p0 + q1 + 2) >> 2) as u8;
-        new_p1 = p1 as u8;
-        new_p2 = p2 as u8;
-        new_q0 = ((2 * q1 + q0 + p1 + 2) >> 2) as u8;
-        new_q1 = q1 as u8;
-        new_q2 = q2 as u8;
+        new_p0 = P::from_i32((2 * p1 + p0 + q1 + 2) >> 2);
+        new_p1 = P::from_i32(p1);
+        new_p2 = P::from_i32(p2);
+        new_q0 = P::from_i32((2 * q1 + q0 + p1 + 2) >> 2);
+        new_q1 = P::from_i32(q1);
+        new_q2 = P::from_i32(q2);
     }
 
     Some((new_p0, new_p1, new_p2, new_q0, new_q1, new_q2))
@@ -605,20 +607,20 @@ fn filter_strong_luma(
 /// Chroma intra filter: p0' = (2*p1 + p0 + q1 + 2) >> 2
 ///                       q0' = (2*q1 + q0 + p1 + 2) >> 2
 #[inline]
-fn filter_strong_chroma(
+fn filter_strong_chroma<P: Pixel>(
     p0: i32,
     p1: i32,
     q0: i32,
     q1: i32,
     alpha: i32,
     beta: i32,
-) -> Option<(u8, u8)> {
+) -> Option<(P, P)> {
     if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
         return None;
     }
 
-    let new_p0 = ((2 * p1 + p0 + q1 + 2) >> 2) as u8;
-    let new_q0 = ((2 * q1 + q0 + p1 + 2) >> 2) as u8;
+    let new_p0 = P::from_i32((2 * p1 + p0 + q1 + 2) >> 2);
+    let new_q0 = P::from_i32((2 * q1 + q0 + p1 + 2) >> 2);
 
     Some((new_p0, new_q0))
 }
@@ -636,9 +638,9 @@ fn filter_strong_chroma(
 /// `stride`: row stride (doubled for field-mode MBs in MBAFF).
 #[inline]
 #[allow(clippy::too_many_arguments)] // edge filtering requires position, bS, QP, and offsets
-fn filter_mb_edge_luma(
+fn filter_mb_edge_luma<P: Pixel>(
     is_vertical: bool,
-    plane: &mut [u8],
+    plane: &mut [P],
     stride: usize,
     mb_base_offset: usize,
     edge: usize,
@@ -718,12 +720,12 @@ fn filter_mb_edge_luma(
             let (p0, p1, p2, q0, q1, q2);
             unsafe {
                 let pp = plane.as_ptr();
-                p0 = *pp.add(off - step) as i32;
-                p1 = *pp.add(off - 2 * step) as i32;
-                p2 = *pp.add(off - 3 * step) as i32;
-                q0 = *pp.add(off) as i32;
-                q1 = *pp.add(off + step) as i32;
-                q2 = *pp.add(off + 2 * step) as i32;
+                p0 = (*pp.add(off - step)).to_i32();
+                p1 = (*pp.add(off - 2 * step)).to_i32();
+                p2 = (*pp.add(off - 3 * step)).to_i32();
+                q0 = (*pp.add(off)).to_i32();
+                q1 = (*pp.add(off + step)).to_i32();
+                q2 = (*pp.add(off + 2 * step)).to_i32();
             }
 
             trace!(
@@ -753,7 +755,7 @@ fn filter_mb_edge_luma(
                 {
                     trace!(
                         mb_x,
-                        mb_y, is_vertical, edge, i, d, new_p0, new_q0, tc0, "DEBLOCK_PIXEL_OUT"
+                        mb_y, is_vertical, edge, i, d, tc0, "DEBLOCK_PIXEL_OUT"
                     );
                     // SAFETY: same bounds proof as reads above.
                     unsafe {
@@ -769,16 +771,13 @@ fn filter_mb_edge_luma(
                 let (p3, q3);
                 unsafe {
                     let pp = plane.as_ptr();
-                    p3 = *pp.add(off - 4 * step) as i32;
-                    q3 = *pp.add(off + 3 * step) as i32;
+                    p3 = (*pp.add(off - 4 * step)).to_i32();
+                    q3 = (*pp.add(off + 3 * step)).to_i32();
                 }
                 if let Some((new_p0, new_p1, new_p2, new_q0, new_q1, new_q2)) =
                     filter_strong_luma(p0, p1, p2, p3, q0, q1, q2, q3, alpha, beta)
                 {
-                    trace!(
-                        mb_x,
-                        mb_y, is_vertical, edge, i, d, new_p0, new_q0, "DEBLOCK_PIXEL_OUT"
-                    );
+                    trace!(mb_x, mb_y, is_vertical, edge, i, d, "DEBLOCK_PIXEL_OUT");
                     // SAFETY: same bounds proof as reads above.
                     unsafe {
                         let pp = plane.as_mut_ptr();
@@ -808,9 +807,9 @@ fn filter_mb_edge_luma(
 /// `mb_base_offset`: pre-computed byte offset of the MB's top-left chroma pixel.
 /// `stride`: row stride (doubled for field-mode MBs in MBAFF).
 #[allow(clippy::too_many_arguments)] // edge filtering requires plane, stride, position, bS, QP, and offsets
-fn filter_mb_edge_chroma(
+fn filter_mb_edge_chroma<P: Pixel>(
     is_vertical: bool,
-    plane: &mut [u8],
+    plane: &mut [P],
     stride: usize,
     mb_base_offset: usize,
     edge: usize,
@@ -862,10 +861,10 @@ fn filter_mb_edge_chroma(
                 base + i as usize * 2 + d
             };
 
-            let p0 = plane[off - step] as i32;
-            let p1 = plane[off - 2 * step] as i32;
-            let q0 = plane[off] as i32;
-            let q1 = plane[off + step] as i32;
+            let p0 = plane[off - step].to_i32();
+            let p1 = plane[off - 2 * step].to_i32();
+            let q0 = plane[off].to_i32();
+            let q1 = plane[off + step].to_i32();
 
             if cur_bs < 4 {
                 let tc = get_tc0(qp, alpha_offset, cur_bs) + 1;
@@ -1086,8 +1085,14 @@ fn compute_luma_bs(
 /// mapped 1:1 from the corresponding luma edge's bS values.
 /// Chroma edge 0 corresponds to luma edge 0; chroma edge 1 to luma edge 2.
 #[inline]
-fn derive_chroma_bs(luma_bs: &[[u8; 4]; 4]) -> [[u8; 4]; 2] {
-    [luma_bs[0], luma_bs[2]]
+fn derive_chroma_bs(luma_bs: &[[u8; 4]; 4], is_vertical: bool, chroma422: bool) -> [[u8; 4]; 4] {
+    if !is_vertical && chroma422 {
+        // 4:2:2 chroma has full vertical resolution: one chroma edge per luma edge.
+        *luma_bs
+    } else {
+        // 4:2:0 and 4:2:2 vertical: chroma edges at luma edges 0 and 2.
+        [[luma_bs[0], luma_bs[2], [0; 4], [0; 4]]][0]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,8 +1108,8 @@ fn derive_chroma_bs(luma_bs: &[[u8; 4]; 4]) -> [[u8; 4]; 2] {
 /// `bs`: 4 boundary strengths for this half-edge.
 /// `inner_iters`: 2 for luma, 1 for chroma.
 #[allow(clippy::too_many_arguments)]
-fn filter_mbaff_edge_luma(
-    plane: &mut [u8],
+fn filter_mbaff_edge_luma<P: Pixel>(
+    plane: &mut [P],
     pix_offset: usize,
     stride: usize,
     bs: &[u8],
@@ -1125,12 +1130,12 @@ fn filter_mbaff_edge_luma(
                 off += stride;
                 continue;
             }
-            let p0 = plane[off - 1] as i32;
-            let p1 = plane[off - 2] as i32;
-            let p2 = plane[off - 3] as i32;
-            let q0 = plane[off] as i32;
-            let q1 = plane[off + 1] as i32;
-            let q2 = plane[off + 2] as i32;
+            let p0 = plane[off - 1].to_i32();
+            let p1 = plane[off - 2].to_i32();
+            let p2 = plane[off - 3].to_i32();
+            let q0 = plane[off].to_i32();
+            let q1 = plane[off + 1].to_i32();
+            let q2 = plane[off + 2].to_i32();
 
             if cur_bs < 4 {
                 let tc0 = get_tc0(qp, alpha_offset, cur_bs);
@@ -1143,8 +1148,8 @@ fn filter_mbaff_edge_luma(
                     plane[off + 1] = new_q1;
                 }
             } else {
-                let p3 = plane[off - 4] as i32;
-                let q3 = plane[off + 3] as i32;
+                let p3 = plane[off - 4].to_i32();
+                let q3 = plane[off + 3].to_i32();
                 if let Some((new_p0, new_p1, new_p2, new_q0, new_q1, new_q2)) =
                     filter_strong_luma(p0, p1, p2, p3, q0, q1, q2, q3, alpha, beta)
                 {
@@ -1163,8 +1168,8 @@ fn filter_mbaff_edge_luma(
 
 /// MBAFF chroma edge filter (1 pixel per bS group × 4 groups = 4 pixels per call).
 #[allow(clippy::too_many_arguments)]
-fn filter_mbaff_edge_chroma(
-    plane: &mut [u8],
+fn filter_mbaff_edge_chroma<P: Pixel>(
+    plane: &mut [P],
     pix_offset: usize,
     stride: usize,
     bs: &[u8],
@@ -1184,10 +1189,10 @@ fn filter_mbaff_edge_chroma(
             off += stride;
             continue;
         }
-        let p0 = plane[off - 1] as i32;
-        let p1 = plane[off - 2] as i32;
-        let q0 = plane[off] as i32;
-        let q1 = plane[off + 1] as i32;
+        let p0 = plane[off - 1].to_i32();
+        let p1 = plane[off - 2].to_i32();
+        let q0 = plane[off].to_i32();
+        let q1 = plane[off + 1].to_i32();
 
         if cur_bs < 4 {
             let tc = get_tc0(qp, alpha_offset, cur_bs) + 1;
@@ -1357,9 +1362,20 @@ fn deblock_mbaff_first_vert_edge(
     // The pixel base is always at the pair's position using the current MB's
     // field-aware addressing.
     let (luma_base, luma_stride) = deblock_luma_offset(frame_y_stride, mb_x, mb_y, cur.mb_field);
-    let (chroma_base_u, chroma_stride) =
-        deblock_chroma_offset(frame_uv_stride, mb_x, mb_y, cur.mb_field);
-    let (chroma_base_v, _) = deblock_chroma_offset(frame_uv_stride, mb_x, mb_y, cur.mb_field);
+    let (chroma_base_u, chroma_stride) = deblock_chroma_offset(
+        frame_uv_stride,
+        mb_x,
+        mb_y,
+        cur.mb_field,
+        pic.chroma_format_idc == 2,
+    );
+    let (chroma_base_v, _) = deblock_chroma_offset(
+        frame_uv_stride,
+        mb_x,
+        mb_y,
+        cur.mb_field,
+        pic.chroma_format_idc == 2,
+    );
 
     // --- Luma ---
     // FFmpeg h264_loopfilter.c:794-831
@@ -1527,9 +1543,20 @@ fn deblock_mbaff_horiz_edge0(
     let frame_y_stride = pic.y_stride;
     let frame_uv_stride = pic.uv_stride;
     let (luma_base, luma_stride) = deblock_luma_offset(frame_y_stride, mb_x, mb_y, cur.mb_field);
-    let (chroma_base_u, chroma_stride) =
-        deblock_chroma_offset(frame_uv_stride, mb_x, mb_y, cur.mb_field);
-    let (chroma_base_v, _) = deblock_chroma_offset(frame_uv_stride, mb_x, mb_y, cur.mb_field);
+    let (chroma_base_u, chroma_stride) = deblock_chroma_offset(
+        frame_uv_stride,
+        mb_x,
+        mb_y,
+        cur.mb_field,
+        pic.chroma_format_idc == 2,
+    );
+    let (chroma_base_v, _) = deblock_chroma_offset(
+        frame_uv_stride,
+        mb_x,
+        mb_y,
+        cur.mb_field,
+        pic.chroma_format_idc == 2,
+    );
 
     let double_luma_stride = 2 * luma_stride;
     let double_chroma_stride = 2 * chroma_stride;
@@ -1638,14 +1665,21 @@ fn deblock_luma_offset(y_stride: usize, mb_x: u32, mb_y: u32, mb_field: bool) ->
 
 /// Compute the byte offset and stride for a macroblock's chroma plane.
 #[inline]
-fn deblock_chroma_offset(uv_stride: usize, mb_x: u32, mb_y: u32, mb_field: bool) -> (usize, usize) {
+fn deblock_chroma_offset(
+    uv_stride: usize,
+    mb_x: u32,
+    mb_y: u32,
+    mb_field: bool,
+    chroma422: bool,
+) -> (usize, usize) {
     let x = mb_x as usize * 8;
+    let mb_rows = if chroma422 { 16 } else { 8 };
     if mb_field {
-        let pair_base_y = (mb_y & !1) as usize * 8;
+        let pair_base_y = (mb_y & !1) as usize * mb_rows;
         let field_offset = if mb_y & 1 == 1 { uv_stride } else { 0 };
         (pair_base_y * uv_stride + field_offset + x, uv_stride * 2)
     } else {
-        (mb_y as usize * 8 * uv_stride + x, uv_stride)
+        (mb_y as usize * mb_rows * uv_stride + x, uv_stride)
     }
 }
 
@@ -1666,10 +1700,14 @@ fn deblock_mb(
     // Look up this MB's slice deblock params
     let slice_id = slice_table[mb_idx] as usize;
     let params = &slice_params[slice_id.min(slice_params.len() - 1)];
-    let alpha_c0_offset = params.alpha_c0_offset;
-    let beta_offset = params.beta_offset;
-    let chroma_qp_index_offset = params.chroma_qp_index_offset;
     let bit_depth_luma = params.bit_depth_luma;
+    // FFmpeg h264_loopfilter.c: .
+    // Wedeo's get_thresholds() folds the 52 into the table lookup, so only the
+    // bit-depth correction needs to be applied to the offsets.
+    let qp_bd_offset = 6 * (bit_depth_luma as i32 - 8);
+    let alpha_c0_offset = params.alpha_c0_offset - qp_bd_offset;
+    let beta_offset = params.beta_offset - qp_bd_offset;
+    let chroma_qp_index_offset = params.chroma_qp_index_offset;
 
     // Compute field-aware pixel offsets and strides for this MB.
     trace!(
@@ -1681,9 +1719,20 @@ fn deblock_mb(
         "DEBLOCK_MB_START"
     );
     let (luma_base, luma_stride) = deblock_luma_offset(pic.y_stride, mb_x, mb_y, cur_mb_field);
-    let (chroma_base_u, chroma_stride) =
-        deblock_chroma_offset(pic.uv_stride, mb_x, mb_y, cur_mb_field);
-    let (chroma_base_v, _) = deblock_chroma_offset(pic.uv_stride, mb_x, mb_y, cur_mb_field);
+    let (chroma_base_u, chroma_stride) = deblock_chroma_offset(
+        pic.uv_stride,
+        mb_x,
+        mb_y,
+        cur_mb_field,
+        pic.chroma_format_idc == 2,
+    );
+    let (chroma_base_v, _) = deblock_chroma_offset(
+        pic.uv_stride,
+        mb_x,
+        mb_y,
+        cur_mb_field,
+        pic.chroma_format_idc == 2,
+    );
 
     // For field MBs in MBAFF, the above neighbor is 2*mb_width away (same field
     // of pair above). For frame MBs, it's 1*mb_width (standard).
@@ -1783,24 +1832,40 @@ fn deblock_mb(
             } else {
                 cur_qp
             };
-            filter_mb_edge_luma(
-                is_vertical,
-                &mut pic.y,
-                luma_stride,
-                luma_base,
-                edge,
-                bs_edge,
-                qp,
-                alpha_c0_offset,
-                beta_offset,
-                mb_x,
-                mb_y,
-            );
+            if pic.is_high_depth() {
+                filter_mb_edge_luma::<u16>(
+                    is_vertical,
+                    &mut pic.y16,
+                    luma_stride,
+                    luma_base,
+                    edge,
+                    bs_edge,
+                    qp,
+                    alpha_c0_offset,
+                    beta_offset,
+                    mb_x,
+                    mb_y,
+                );
+            } else {
+                filter_mb_edge_luma::<u8>(
+                    is_vertical,
+                    &mut pic.y,
+                    luma_stride,
+                    luma_base,
+                    edge,
+                    bs_edge,
+                    qp,
+                    alpha_c0_offset,
+                    beta_offset,
+                    mb_x,
+                    mb_y,
+                );
+            }
         }
 
         // --- Chroma edges (4:2:0: 2 edges per direction) ---
         // Cb and Cr use separate chroma_qp_index_offsets (PPS [0] and [1]).
-        let chroma_bs = derive_chroma_bs(&luma_bs);
+        let chroma_bs = derive_chroma_bs(&luma_bs, is_vertical, pic.chroma_format_idc == 2);
         for (edge, &bs_edge) in chroma_bs.iter().enumerate() {
             if bs_edge == [0, 0, 0, 0] {
                 continue;
@@ -1832,22 +1897,59 @@ fn deblock_mb(
                     chroma_qp_cur
                 };
 
-                let (plane, base) = if comp == 0 {
-                    (&mut pic.u, chroma_base_u)
+                let comp_u = comp == 0;
+                let base = if comp_u { chroma_base_u } else { chroma_base_v };
+                if pic.is_high_depth() {
+                    if comp_u {
+                        filter_mb_edge_chroma::<u16>(
+                            is_vertical,
+                            &mut pic.u16,
+                            chroma_stride,
+                            base,
+                            edge,
+                            bs_edge,
+                            qp,
+                            alpha_c0_offset,
+                            beta_offset,
+                        );
+                    } else {
+                        filter_mb_edge_chroma::<u16>(
+                            is_vertical,
+                            &mut pic.v16,
+                            chroma_stride,
+                            base,
+                            edge,
+                            bs_edge,
+                            qp,
+                            alpha_c0_offset,
+                            beta_offset,
+                        );
+                    }
+                } else if comp_u {
+                    filter_mb_edge_chroma::<u8>(
+                        is_vertical,
+                        &mut pic.u,
+                        chroma_stride,
+                        base,
+                        edge,
+                        bs_edge,
+                        qp,
+                        alpha_c0_offset,
+                        beta_offset,
+                    );
                 } else {
-                    (&mut pic.v, chroma_base_v)
-                };
-                filter_mb_edge_chroma(
-                    is_vertical,
-                    plane,
-                    chroma_stride,
-                    base,
-                    edge,
-                    bs_edge,
-                    qp,
-                    alpha_c0_offset,
-                    beta_offset,
-                );
+                    filter_mb_edge_chroma::<u8>(
+                        is_vertical,
+                        &mut pic.v,
+                        chroma_stride,
+                        base,
+                        edge,
+                        bs_edge,
+                        qp,
+                        alpha_c0_offset,
+                        beta_offset,
+                    );
+                }
             }
         }
     }
@@ -2082,8 +2184,8 @@ fn deblock_mb_if_enabled(
     {
         let mb_field = mb_info[mb_idx].mb_field;
         let (y_base, y_stride) = deblock_luma_offset(pic.y_stride, mb_x, mb_y, mb_field);
-        let (u_base, uv_stride) = deblock_chroma_offset(pic.uv_stride, mb_x, mb_y, mb_field);
-        let (v_base, _) = deblock_chroma_offset(pic.uv_stride, mb_x, mb_y, mb_field);
+        let (u_base, uv_stride) = deblock_chroma_offset(pic.uv_stride, mb_x, mb_y, mb_field, false);
+        let (v_base, _) = deblock_chroma_offset(pic.uv_stride, mb_x, mb_y, mb_field, false);
         let y_sum = deblock_plane_sum(&pic.y, y_base, y_stride, 16);
         let u_sum = deblock_plane_sum(&pic.u, u_base, uv_stride, 8);
         let v_sum = deblock_plane_sum(&pic.v, v_base, uv_stride, 8);
@@ -2432,7 +2534,7 @@ mod tests {
         assert_eq!(alpha, 50);
         assert_eq!(beta, 11);
 
-        let result = filter_strong_luma(140, 130, 125, 120, 160, 155, 150, 145, alpha, beta);
+        let result = filter_strong_luma::<u8>(140, 130, 125, 120, 160, 155, 150, 145, alpha, beta);
         assert!(result.is_some());
 
         let (p0, p1, p2, q0, q1, q2) = result.unwrap();
@@ -2464,7 +2566,7 @@ mod tests {
         // |p0-q0| = 3 < (80/4+2) = 22 => small_gap = true
         // |p2-p0| = 4 < 13 => full p-side strong filter
         // |q2-q0| = 4 < 13 => full q-side strong filter
-        let result = filter_strong_luma(132, 130, 128, 125, 135, 137, 139, 141, alpha, beta);
+        let result = filter_strong_luma::<u8>(132, 130, 128, 125, 135, 137, 139, 141, alpha, beta);
         assert!(result.is_some());
         let (p0, p1, p2, q0, q1, q2) = result.unwrap();
 
@@ -2492,7 +2594,7 @@ mod tests {
     #[test]
     fn strong_filter_threshold_not_met() {
         // |p0-q0| >= alpha => no filtering
-        let result = filter_strong_luma(100, 90, 80, 70, 200, 210, 220, 230, 10, 5);
+        let result = filter_strong_luma::<u8>(100, 90, 80, 70, 200, 210, 220, 230, 10, 5);
         assert!(result.is_none());
     }
 
@@ -2509,7 +2611,7 @@ mod tests {
 
         // p2=120, p1=125, p0=130, q0=135, q1=140, q2=145
         // |p0-q0|=5 < 25, |p1-p0|=5 < 8, |q1-q0|=5 < 8 => filter
-        let result = filter_normal_luma(130, 125, 120, 135, 140, 145, alpha, beta, tc0);
+        let result = filter_normal_luma::<u8>(130, 125, 120, 135, 140, 145, alpha, beta, tc0);
         assert!(result.is_some());
 
         let (new_p0, new_p1, new_q0, new_q1) = result.unwrap();
@@ -2537,7 +2639,7 @@ mod tests {
         // |p0-q0|=6 < 80, |p1-p0|=2 < 13, |q1-q0|=2 < 13 => filter
         // |p2-p0|=4 < 13 => filter p1, tc++
         // |q2-q0|=4 < 11 => filter q1, tc++
-        let result = filter_normal_luma(132, 130, 128, 138, 140, 142, alpha, beta, tc0);
+        let result = filter_normal_luma::<u8>(132, 130, 128, 138, 140, 142, alpha, beta, tc0);
         assert!(result.is_some());
 
         let (new_p0, _new_p1, new_q0, _new_q1) = result.unwrap();
@@ -2553,11 +2655,11 @@ mod tests {
     #[test]
     fn normal_filter_threshold_not_met() {
         // |p0-q0| >= alpha => no filtering
-        let result = filter_normal_luma(100, 90, 80, 200, 210, 220, 10, 5, 2);
+        let result = filter_normal_luma::<u8>(100, 90, 80, 200, 210, 220, 10, 5, 2);
         assert!(result.is_none());
 
         // |p1-p0| >= beta => no filtering
-        let result = filter_normal_luma(100, 80, 70, 105, 110, 120, 255, 5, 2);
+        let result = filter_normal_luma::<u8>(100, 80, 70, 105, 110, 120, 255, 5, 2);
         assert!(result.is_none());
     }
 
@@ -2569,7 +2671,7 @@ mod tests {
 
         // p1=125, p0=130, q0=135, q1=140
         // |p0-q0|=5 < alpha, |p1-p0|=5 < beta, |q1-q0|=5 < beta
-        let result = filter_strong_chroma(130, 125, 135, 140, alpha, beta);
+        let result = filter_strong_chroma::<u8>(130, 125, 135, 140, alpha, beta);
         assert!(result.is_some());
         let (new_p0, new_q0) = result.unwrap();
         assert_eq!(new_p0, ((2 * 125 + 130 + 140 + 2) >> 2) as u8);
@@ -2581,7 +2683,7 @@ mod tests {
         let (alpha, beta, _) = get_thresholds(35, 0, 0);
         let tc = get_tc0(35, 0, 2) + 1;
 
-        let result = filter_normal_chroma(130, 125, 135, 140, alpha, beta, tc);
+        let result = filter_normal_chroma::<u8>(130, 125, 135, 140, alpha, beta, tc);
         assert!(result.is_some());
         let (new_p0, new_q0) = result.unwrap();
         // delta = clip3(-tc, tc, ((135-130)*4 + (125-140) + 4) >> 3)
@@ -2608,8 +2710,8 @@ mod tests {
 
         // Instead test that the strong chroma filter IS symmetric
         // since it has no rounding bias term.
-        let r1 = filter_strong_chroma(130, 120, 140, 150, alpha, beta);
-        let r2 = filter_strong_chroma(140, 150, 130, 120, alpha, beta);
+        let r1 = filter_strong_chroma::<u8>(130, 120, 140, 150, alpha, beta);
+        let r2 = filter_strong_chroma::<u8>(140, 150, 130, 120, alpha, beta);
 
         assert!(r1.is_some());
         assert!(r2.is_some());
@@ -2646,7 +2748,7 @@ mod tests {
         let mb_info = vec![MbDeblockInfo {
             is_intra: false,
             qp: 30,
-            non_zero_count: [0; 24],
+            non_zero_count: [0; 40],
             ref_poc: [0; 16],
             mv: [[0, 0]; 16],
             ..Default::default()
@@ -2675,7 +2777,7 @@ mod tests {
         let mb_info = vec![MbDeblockInfo {
             is_intra: true,
             qp: 30,
-            non_zero_count: [1; 24],
+            non_zero_count: [1; 40],
             ref_poc: [0; 16],
             mv: [[0, 0]; 16],
             ..Default::default()
@@ -2714,7 +2816,7 @@ mod tests {
             MbDeblockInfo {
                 is_intra: true,
                 qp: 51,
-                non_zero_count: [0; 24],
+                non_zero_count: [0; 40],
                 ref_poc: [0; 16],
                 mv: [[0, 0]; 16],
                 ..Default::default()
@@ -2722,7 +2824,7 @@ mod tests {
             MbDeblockInfo {
                 is_intra: true,
                 qp: 51,
-                non_zero_count: [0; 24],
+                non_zero_count: [0; 40],
                 ref_poc: [0; 16],
                 mv: [[0, 0]; 16],
                 ..Default::default()
@@ -2782,7 +2884,7 @@ mod tests {
             MbDeblockInfo {
                 is_intra: true,
                 qp: 51,
-                non_zero_count: [0; 24],
+                non_zero_count: [0; 40],
                 ref_poc: [0; 16],
                 mv: [[0, 0]; 16],
                 ..Default::default()
@@ -2790,7 +2892,7 @@ mod tests {
             MbDeblockInfo {
                 is_intra: true,
                 qp: 51,
-                non_zero_count: [0; 24],
+                non_zero_count: [0; 40],
                 ref_poc: [0; 16],
                 mv: [[0, 0]; 16],
                 ..Default::default()
@@ -2879,7 +2981,7 @@ mod tests {
 
         // Small difference at boundary: p0=130, q0=135, p1=128, q1=137, p2=126, q2=139
         // |p0-q0|=5 < 25=alpha, |p1-p0|=2 < 8=beta, |q1-q0|=2 < 8=beta => filter
-        let result = filter_normal_luma(130, 128, 126, 135, 137, 139, alpha, beta, tc0);
+        let result = filter_normal_luma::<u8>(130, 128, 126, 135, 137, 139, alpha, beta, tc0);
         assert!(result.is_some());
 
         let (new_p0, new_p1, new_q0, new_q1) = result.unwrap();
@@ -2951,7 +3053,7 @@ mod tests {
             .map(|_| MbDeblockInfo {
                 qp: 28,
                 is_intra: true,
-                non_zero_count: [16; 24],
+                non_zero_count: [16; 40],
                 ..Default::default()
             })
             .collect();
