@@ -9,6 +9,7 @@
 use wedeo_codec::bitstream_filter::{
     BitstreamFilter, BitstreamFilterDescriptor, BitstreamFilterFactory,
 };
+use wedeo_codec::decoder::CodecParameters;
 use wedeo_core::buffer::Buffer;
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::{Error, Result};
@@ -345,6 +346,16 @@ impl AacAdtstoAsc {
 }
 
 impl BitstreamFilter for AacAdtstoAsc {
+    fn set_parameters(&mut self, params: &CodecParameters) -> Result<()> {
+        // Mirrors FFmpeg's aac_adtstoasc_init(): validate the extradata only
+        // when the stream already carries an AudioSpecificConfig. Plain ADTS
+        // input has no extradata and must still initialize successfully.
+        if params.extradata.is_empty() {
+            return Ok(());
+        }
+        self.init_extradata(&params.extradata)
+    }
+
     fn filter(&mut self, packet: &Packet) -> Result<Vec<Packet>> {
         // Extract the raw payload before any side-data handling. FFmpeg changes
         // pkt->data/pkt->size in place and preserves every other field, so
@@ -460,8 +471,10 @@ impl BitstreamFilterFactory for AacAdtstoAscFactory {
     }
 
     fn create(&self) -> Result<Box<dyn BitstreamFilter>> {
-        // The framework factory carries no init parameters; extradata can be
-        // installed with `AacAdtstoAsc::with_extradata()` directly.
+        // The factory's default init() forwards CodecParameters (including a
+        // possible AudioSpecificConfig) to `BitstreamFilter::set_parameters`.
+        // Callers constructing the filter directly may still use
+        // `AacAdtstoAsc::with_extradata()`.
         Ok(Box::new(AacAdtstoAsc::new()))
     }
 }
@@ -513,6 +526,41 @@ mod tests {
             .flat_map(|p| p.side_data.iter())
             .find(|s| s.data_type == PacketSideDataType::NewExtradata)
             .map(|s| s.data.clone())
+    }
+
+    #[test]
+    fn set_parameters_handles_empty_and_present_extradata() {
+        use wedeo_codec::decoder::CodecParameters;
+        use wedeo_core::media_type::MediaType;
+
+        // ADTS input has no extradata: initialization must still succeed.
+        let mut params = CodecParameters::new(CodecId::Aac, MediaType::Audio);
+        let mut filter = AacAdtstoAsc::new();
+        filter.set_parameters(&params).unwrap();
+        assert!(!filter.extradata_present);
+        let pkt = adts_packet(1, 4, 2, &[0x21, 0x10]);
+        assert_eq!(
+            new_extradata(&filter.filter(&pkt).unwrap()),
+            Some(vec![0x12, 0x10])
+        );
+
+        // A stream that already carries an AudioSpecificConfig is validated
+        // and installed, and non-ADTS packets pass through untouched.
+        params.extradata = vec![0x12, 0x10];
+        let mut filter = AacAdtstoAsc::new();
+        filter.set_parameters(&params).unwrap();
+        assert!(filter.extradata_present);
+        let pkt = Packet::from_slice(&[0x21, 0x10, 0x00, 0x00]);
+        let out = filter.filter(&pkt).unwrap();
+        assert_eq!(out[0].data.data(), &[0x21, 0x10, 0x00, 0x00]);
+        assert!(new_extradata(&out).is_none());
+
+        // Invalid ASC is rejected at parameter setup, like FFmpeg's init.
+        params.extradata = vec![0x12, 0x78];
+        assert_eq!(
+            AacAdtstoAsc::new().set_parameters(&params).err(),
+            Some(Error::InvalidData)
+        );
     }
 
     #[test]

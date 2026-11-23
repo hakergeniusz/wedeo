@@ -9,6 +9,7 @@
 use wedeo_codec::bitstream_filter::{
     BitstreamFilter, BitstreamFilterDescriptor, BitstreamFilterFactory,
 };
+use wedeo_codec::decoder::CodecParameters;
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::{Error, Result};
 use wedeo_core::packet::{Packet, PacketSideDataType};
@@ -397,6 +398,12 @@ impl H264Mp4ToAnnexb {
 }
 
 impl BitstreamFilter for H264Mp4ToAnnexb {
+    fn set_parameters(&mut self, params: &CodecParameters) -> Result<()> {
+        // Mirrors FFmpeg's h264_mp4toannexb_init(): consume par_in->extradata.
+        // init_extradata() keeps pass-through mode for empty / Annex B data.
+        self.init_extradata(&params.extradata)
+    }
+
     fn filter(&mut self, packet: &Packet) -> Result<Vec<Packet>> {
         // Extract the raw payload before any side-data handling.
         let data = packet.data.data().to_vec();
@@ -456,9 +463,10 @@ impl BitstreamFilterFactory for H264Mp4ToAnnexbFactory {
     }
 
     fn create(&self) -> Result<Box<dyn BitstreamFilter>> {
-        // The framework's factory has no init parameters; extradata is
-        // supplied by NEW_EXTRADATA packet side data or by constructing
-        // `H264Mp4ToAnnexb::with_extradata()` directly.
+        // The factory's default init() forwards CodecParameters (including
+        // avcC extradata) to `BitstreamFilter::set_parameters`. Extradata can
+        // also arrive later via NEW_EXTRADATA packet side data. Callers that
+        // construct the filter directly may still use `with_extradata()`.
         Ok(Box::new(H264Mp4ToAnnexb::new()))
     }
 }
@@ -511,6 +519,36 @@ mod tests {
     fn out_data(pkts: Vec<Packet>) -> Vec<u8> {
         assert_eq!(pkts.len(), 1);
         pkts.into_iter().next().unwrap().data.data().to_vec()
+    }
+
+    #[test]
+    fn set_parameters_consumes_avcc_extradata() {
+        let sps = [0x67, 0x42, 0x00, 0x1e];
+        let pps = [0x68, 0xce, 0x3c, 0x80];
+        let ed = avcc_extradata(4, &[&sps], &[&pps]);
+        let mut params = wedeo_codec::decoder::CodecParameters::new(
+            CodecId::H264,
+            wedeo_core::media_type::MediaType::Video,
+        );
+        params.extradata = ed;
+
+        let mut bsf = H264Mp4ToAnnexb::new();
+        bsf.set_parameters(&params).unwrap();
+        assert!(bsf.extradata_parsed);
+        assert_eq!(bsf.length_size, 4);
+
+        let idr = [0x65, 0x00, 0xaa];
+        let out = out_data(bsf.filter(&packet(avcc_packet(4, &[&idr]))).unwrap());
+        let expected = [
+            &NALU_HEADER[..],
+            &sps[..],
+            &NALU_HEADER[..],
+            &pps[..],
+            &SC3[..],
+            &idr[..],
+        ]
+        .concat();
+        assert_eq!(out, expected);
     }
 
     #[test]

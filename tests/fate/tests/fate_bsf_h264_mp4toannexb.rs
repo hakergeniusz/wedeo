@@ -3,8 +3,12 @@
 // Ensure the inventory registration is linked into this test binary.
 use wedeo_bsf_h264_mp4toannexb as _;
 
-use wedeo_codec::bitstream_filter::{bitstream_filters, find_bitstream_filter};
+use wedeo_codec::bitstream_filter::{
+    bitstream_filters, create_initialized_bitstream_filter, find_bitstream_filter,
+};
+use wedeo_codec::decoder::CodecParameters;
 use wedeo_core::codec_id::CodecId;
+use wedeo_core::media_type::MediaType;
 use wedeo_core::packet::Packet;
 
 #[test]
@@ -76,4 +80,43 @@ fn factory_creates_working_filter() {
     );
 
     assert!(filter.flush().unwrap().is_empty());
+}
+
+/// Real FFmpeg fixture (libx264 AVCC packets + the byte stream produced by
+/// `ffmpeg -bsf:v h264_mp4toannexb`), driven entirely through the generic
+/// registry path. This proves `CodecParameters.extradata` is consumed by the
+/// registered filter without needing `with_extradata()`.
+const FIXTURE_EXTRADATA: &[u8] =
+    include_bytes!("../../../codecs/wedeo-bsf-h264-mp4toannexb/tests/data/extradata.bin");
+const FIXTURE_PACKETS: &[u8] =
+    include_bytes!("../../../codecs/wedeo-bsf-h264-mp4toannexb/tests/data/packets.bin");
+const FIXTURE_EXPECTED: &[u8] =
+    include_bytes!("../../../codecs/wedeo-bsf-h264-mp4toannexb/tests/data/expected_annexb.bin");
+
+fn be32(bytes: &[u8]) -> usize {
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
+}
+
+#[test]
+fn initialized_filter_matches_ffmpeg_fixture_byte_for_byte() {
+    let mut params = CodecParameters::new(CodecId::H264, MediaType::Video);
+    params.extradata = FIXTURE_EXTRADATA.to_vec();
+    let mut bsf = create_initialized_bitstream_filter("h264_mp4toannexb", &params).unwrap();
+
+    let count = be32(&FIXTURE_PACKETS[..4]);
+    let mut pos = 4;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let len = be32(&FIXTURE_PACKETS[pos..pos + 4]);
+        pos += 4;
+        let packet = Packet::from_slice(&FIXTURE_PACKETS[pos..pos + len]);
+        pos += len;
+        let filtered = bsf.filter(&packet).unwrap();
+        assert_eq!(filtered.len(), 1);
+        out.extend_from_slice(filtered[0].data.data());
+    }
+    assert_eq!(pos, FIXTURE_PACKETS.len());
+
+    assert_eq!(out.len(), FIXTURE_EXPECTED.len());
+    assert_eq!(out, FIXTURE_EXPECTED);
 }

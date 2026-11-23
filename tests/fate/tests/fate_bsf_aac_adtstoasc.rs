@@ -14,8 +14,12 @@
 use wedeo_bsf_aac_adtstoasc as _;
 use wedeo_bsf_aac_adtstoasc::AacAdtstoAsc;
 
-use wedeo_codec::bitstream_filter::{BitstreamFilter, bitstream_filters, find_bitstream_filter};
+use wedeo_codec::bitstream_filter::{
+    BitstreamFilter, bitstream_filters, create_initialized_bitstream_filter, find_bitstream_filter,
+};
+use wedeo_codec::decoder::CodecParameters;
 use wedeo_core::codec_id::CodecId;
+use wedeo_core::media_type::MediaType;
 use wedeo_core::packet::{Packet, PacketSideDataType};
 
 /// Build a 7-byte ADTS header without CRC from the fields an ADTS parser reads.
@@ -111,6 +115,49 @@ fn asc_matches_ffmpeg_ground_truth() {
             "profile={profile} sr={sr} ch={ch}"
         );
     }
+}
+
+/// Drive the FFmpeg ASC ground-truth vectors through the generic registry path.
+/// ADTS input carries no extradata, so `CodecParameters.extradata` is empty and
+/// the filter must still initialize (matching FFmpeg's `aac_adtstoasc_init`).
+#[test]
+fn initialized_filter_matches_ffmpeg_ground_truth_byte_for_byte() {
+    let cases: &[(u32, u32, u32, [u8; 2])] = &[
+        (1, 4, 2, [0x12, 0x10]), // AAC LC, 44100 Hz, stereo
+        (1, 7, 2, [0x13, 0x90]), // AAC LC, 22050 Hz, stereo
+        (1, 3, 6, [0x11, 0xb0]), // AAC LC, 48000 Hz, 5.1
+        (1, 5, 1, [0x12, 0x88]), // AAC LC, 32000 Hz, mono
+    ];
+
+    let params = CodecParameters::new(CodecId::Aac, MediaType::Audio);
+    for &(profile, sr, ch, expected) in cases {
+        // A fresh instance per vector: each one emits its ASC on the first
+        // packet, exactly like a fresh FFmpeg bsf context.
+        let mut filter = create_initialized_bitstream_filter("aac_adtstoasc", &params).unwrap();
+        let out = filter
+            .filter(&adts_packet(profile, sr, ch, &[0x21, 0x10]))
+            .unwrap();
+        assert_eq!(
+            asc(&out),
+            Some(expected.to_vec()),
+            "profile={profile} sr={sr} ch={ch}"
+        );
+        assert_eq!(out[0].data.data(), &[0x21, 0x10]);
+    }
+}
+
+/// A stream that already carries an AudioSpecificConfig passes its extradata
+/// through `CodecParameters` and skips ADTS conversion for matching packets.
+#[test]
+fn initialized_filter_consumes_existing_asc_from_parameters() {
+    let mut params = CodecParameters::new(CodecId::Aac, MediaType::Audio);
+    params.extradata = vec![0x12, 0x10];
+    let mut filter = create_initialized_bitstream_filter("aac_adtstoasc", &params).unwrap();
+
+    let pkt = Packet::from_slice(&[0x21, 0x10, 0x00, 0x00]);
+    let out = filter.filter(&pkt).unwrap();
+    assert_eq!(out[0].data.data(), &[0x21, 0x10, 0x00, 0x00]);
+    assert_eq!(asc(&out), None);
 }
 
 #[test]
