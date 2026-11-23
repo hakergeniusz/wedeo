@@ -4,10 +4,10 @@
 //! * checks bitexact framecrc parity on a deterministic, frame-picture
 //!   MPEG-2 elementary stream (I and P frames, no B frames);
 //! * decodes the available FATE MPEG-2 samples and reports per-sample
-//!   conformance counts. Complementary field pictures are paired into one
-//!   output frame and 4:2:2 chroma is bitexact; B frames still show small
-//!   (+/-1-3) prediction differences, so those samples are sanity-checked
-//!   rather than asserted bitexact.
+//!   conformance counts. Frame-picture streams (I/P and B), complementary
+//!   field pictures and 4:2:2 chroma are all bitexact. The field-encoding
+//!   sample still shows small residual differences on inter macroblocks, so
+//!   only its frame count is asserted.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -226,6 +226,8 @@ fn test_frame_picture_bitexact_framecrc() {
 #[test]
 fn test_fate_mpeg2_sample_conformance() {
     let mut checked = 0usize;
+    let mut t_mpg_bitexact = None;
+    let mut field_frame_counts = None;
     for &relative in MPEG2_SAMPLES {
         let Some(path) = wedeo_fate::fate_sample(relative) else {
             eprintln!("Skipping missing FATE sample: {relative}");
@@ -248,6 +250,16 @@ fn test_fate_mpeg2_sample_conformance() {
             wedeo.len(),
             ffmpeg.len()
         );
+        if relative == "mpeg2/t.mpg" {
+            // B frames must predict exactly: skipped B macroblocks reuse the
+            // previous vectors, and a repeated sequence header at a GOP
+            // boundary must keep the previous GOP's forward reference.
+            t_mpg_bitexact = Some((wedeo.len(), ffmpeg.len(), matching));
+        } else if relative == "mpeg2/mpeg2_field_encoding.ts" {
+            // A truncated final slice must not strand frames in the reorder
+            // buffer at EOS.
+            field_frame_counts = Some((wedeo.len(), ffmpeg.len()));
+        }
         assert!(!frames.is_empty(), "{relative}: decoded no frames");
         checked += 1;
     }
@@ -255,4 +267,14 @@ fn test_fate_mpeg2_sample_conformance() {
         checked > 0,
         "no FATE MPEG-2 samples available; set FATE_SUITE"
     );
+    if let Some((wedeo_len, ffmpeg_len, matching)) = t_mpg_bitexact {
+        assert_eq!(wedeo_len, ffmpeg_len, "t.mpg: frame count mismatch");
+        assert_eq!(matching, ffmpeg_len, "t.mpg: every frame must be bitexact");
+    }
+    if let Some((wedeo_len, ffmpeg_len)) = field_frame_counts {
+        assert_eq!(
+            wedeo_len, ffmpeg_len,
+            "field-encoding sample: frame count mismatch"
+        );
+    }
 }

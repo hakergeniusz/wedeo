@@ -321,9 +321,12 @@ impl Mpeg12Decoder {
         if let Some(pc) = self.pending_code.take() {
             let end = self.buf.len();
             let payload = self.buf[self.pending_start..end].to_vec();
-            self.process_start_code(pc, &payload)?;
+            // A stream may end in the middle of the final slice. FFmpeg keeps
+            // whatever macroblocks were decoded and still emits the frame;
+            // do not let a truncated tail strand the reorder buffer.
+            let _ = self.process_start_code(pc, &payload);
         }
-        self.finalize_picture()?;
+        let _ = self.finalize_picture();
         // A stream that ends after a single field must still emit that
         // field (FFmpeg emits it as an interlaced frame with one field
         // present). At this point finalize_picture() has already consumed
@@ -405,8 +408,15 @@ impl Mpeg12Decoder {
         self.codec_id = CodecId::Mpeg1video;
         self.sequence_seen = true;
 
-        self.last_pic = None;
-        self.next_pic = None;
+        // FFmpeg only reinitialises (and thereby drops reference pictures)
+        // when the sequence geometry actually changes (mpeg12dec.c:925-932).
+        // A repeated sequence header at a GOP boundary must keep last_pic and
+        // next_pic: the B frames preceding the new I frame still need the old
+        // GOP's P frame as their forward reference.
+        if self.sequence_seen && (self.width != width || self.height != height) {
+            self.last_pic = None;
+            self.next_pic = None;
+        }
 
         Ok(())
     }
@@ -804,17 +814,29 @@ impl Mpeg12Decoder {
 
         if *mb_skip_run != 0 {
             *mb_skip_run -= 1;
+            /* A skipped macroblock: mpeg12dec.c:1620-1644. */
             self.mb.intra = false;
             self.mb.blocks = [[0; 64]; 12];
+            self.last_dc = [128 << self.intra_dc_precision; 3];
+            self.mb.mv_type = if self.picture_structure == PICT_FRAME {
+                0
+            } else {
+                3
+            };
             self.mb.mv = [[[0; 2]; 4]; 2];
             if self.pict_type == 2 {
+                /* if P type, zero motion vector is implied */
                 self.mb.mv_dir = MV_DIR_FORWARD;
-                self.mb.mv_type = if self.picture_structure == PICT_FRAME {
-                    0
-                } else {
-                    3
-                };
                 self.last_mv = [[[0; 2]; 2]; 2];
+            } else {
+                /* if B type, reuse previous vectors and directions */
+                self.mb.mv[0][0] = self.last_mv[0][0];
+                self.mb.mv[1][0] = self.last_mv[1][0];
+            }
+            if self.picture_structure != PICT_FRAME {
+                let fs = usize::from(self.picture_structure - 1);
+                self.mb.field_select[0][0] = fs;
+                self.mb.field_select[1][0] = fs;
             }
             return Ok(());
         }
