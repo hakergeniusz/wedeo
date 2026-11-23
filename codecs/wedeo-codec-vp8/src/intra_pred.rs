@@ -279,25 +279,19 @@ pub fn pred4x4(plane: &mut [u8], base: usize, stride: usize, mode: u8, n: &Neigh
                 tr[2] as i32,
                 tr[3] as i32,
             ];
-            let mut d = [[0u8; 4]; 4];
             let h = |i: usize| ((tt[i] + tt[i + 1] + 1) >> 1) as u8;
             let q = |i: usize| ((tt[i] + 2 * tt[i + 1] + tt[i + 2] + 2) >> 2) as u8;
-            d[0][0] = h(0);
-            d[0][1] = h(1);
-            d[2][0] = h(1);
-            d[0][2] = h(2);
-            d[2][1] = h(2);
-            d[0][3] = h(3);
-            d[2][2] = h(3);
-            d[2][3] = h(4);
-            d[1][0] = q(0);
-            d[1][1] = q(1);
-            d[3][0] = q(1);
-            d[1][2] = q(2);
-            d[3][1] = q(2);
-            d[1][3] = q(3);
-            d[3][2] = q(3);
-            d[3][3] = q(4);
+            // FFmpeg pred4x4_vertical_left_vp8_c fills the grid as:
+            //   row0: h0 h1 h2 h3
+            //   row1: q0 q1 q2 q3
+            //   row2: h1 h2 h3 q4
+            //   row3: q1 q2 q3 q5
+            let d = [
+                [h(0), h(1), h(2), h(3)],
+                [q(0), q(1), q(2), q(3)],
+                [h(1), h(2), h(3), q(4)],
+                [q(1), q(2), q(3), q(5)],
+            ];
             for y in 0..4 {
                 write_row(plane, base, stride, y, d[y]);
             }
@@ -316,10 +310,13 @@ pub fn pred4x4(plane: &mut [u8], base: usize, stride: usize, mode: u8, n: &Neigh
             d[2][0] = d[1][2];
             d[1][3] = ((l2 + 2 * l3 + l3 + 2) >> 2) as u8;
             d[2][1] = d[1][3];
-            for y in 2..4 {
-                for x in 0..4 {
-                    d[y][x] = l3 as u8;
-                }
+            // FFmpeg pred4x4_horizontal_up_c: only row 3 (and row 2 cols 2-3)
+            // are filled with l3. Row 2 cols 0-1 were just computed above.
+            for x in 2..4 {
+                d[2][x] = l3 as u8;
+            }
+            for x in 0..4 {
+                d[3][x] = l3 as u8;
             }
             for y in 0..4 {
                 write_row(plane, base, stride, y, d[y]);
@@ -529,7 +526,8 @@ pub fn pred_block(
                         fill(plane, base, stride, 8, ((sum + 4) >> 3) as u8);
                     }
                     _ => {
-                        // pred8x8_dc_rv40
+                        // FFmpeg's H264_PRED macro installs pred8x8_dc_rv40
+                        // as the default DC predictor for VP8 as well.
                         for i in 0..4 {
                             sum += plane[base + i * stride - 1] as i32;
                             sum += plane[base + i - stride] as i32;

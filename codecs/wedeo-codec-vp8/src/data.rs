@@ -637,5 +637,12 @@ pub const PRED8X8C_TREE: [[i8; 2]; 3] = [
     [-1, -3], // '110', '111'
 ];
 
-/// `vp8_pred4x4_mode`: map a 16x16 luma mode to a representative 4x4 mode.
-pub const PRED4X4_MODE: [u8; 4] = [2, 0, 1, 9]; // DC_PRED, VERT_PRED, HOR_PRED, TM_VP8_PRED
+/// `vp8_pred4x4_mode` (FFmpeg vp8data.h): map a 16x16 luma mode to a
+/// representative 4x4 mode. Indexed by DC_PRED8x8/HOR_PRED8x8/
+/// VERT_PRED8x8/PLANE_PRED8x8, in that order.
+pub const PRED4X4_MODE: [u8; 4] = [
+    2, // [DC_PRED8x8]    = DC_PRED
+    1, // [HOR_PRED8x8]   = HOR_PRED
+    0, // [VERT_PRED8x8]  = VERT_PRED
+    9, // [PLANE_PRED8x8] = TM_VP8_PRED
+];

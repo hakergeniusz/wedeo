@@ -26,7 +26,7 @@ fn absdiff(a: u8, b: u8) -> i32 {
 }
 
 /// Which kind of loop-filter edge is being processed.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EdgeKind {
     /// Normal macroblock edge: uses `filter_mbedge` for low variance.
     MbEdge,
@@ -187,8 +187,10 @@ fn filter_line(
                 }
             }
             EdgeKind::Inner => {
+                // FFmpeg: high edge variance selects the 4-tap filter,
+                // low variance uses the 6-tap filter.
                 let hev = high_edge_variance(p1, p0, q0, q1, hev_thresh);
-                filter_common(plane, idx as usize, step, !hev);
+                filter_common(plane, idx as usize, step, hev);
             }
         }
     }
@@ -277,15 +279,21 @@ pub fn filter_mb(
     let u_base = base_uv + mb_y * 8 * uv_stride + mb_x * 8;
     let v_base = u_base;
 
+    // FFmpeg's `vp8_h_loop_filter*` (vertical edges) walks rows: `step` is
+    // the pixel step within one edge (1 for luma/chroma byte planes),
+    // `line_step` moves to the next row. FFmpeg's `vp8_v_loop_filter*`
+    // (horizontal edges) walks columns: `step` is the plane stride and
+    // `line_step` is 1.
     if simple {
         let bedge_lim = 2 * filter_level + inner_limit;
         let mbedge_lim = bedge_lim + 4;
+        // Left macroblock edge (vertical): filter along x.
         if mb_x != 0 {
             filter_line(
                 y,
                 y_base,
-                y_stride,
                 1,
+                y_stride,
                 16,
                 mbedge_lim,
                 0,
@@ -298,8 +306,8 @@ pub fn filter_mb(
                 filter_line(
                     y,
                     y_base + off,
-                    y_stride,
                     1,
+                    y_stride,
                     16,
                     bedge_lim,
                     0,
@@ -308,12 +316,13 @@ pub fn filter_mb(
                 );
             }
         }
+        // Top macroblock edge (horizontal): filter along y.
         if mb_y != 0 {
             filter_line(
                 y,
                 y_base,
-                1,
                 y_stride,
+                1,
                 16,
                 mbedge_lim,
                 0,
@@ -326,8 +335,8 @@ pub fn filter_mb(
                 filter_line(
                     y,
                     y_base + off * y_stride,
-                    1,
                     y_stride,
+                    1,
                     16,
                     bedge_lim,
                     0,
@@ -343,13 +352,13 @@ pub fn filter_mb(
     let mbedge_lim = bedge_lim + 4;
     let hev_thresh = HEV_THRESH_LUT[usize::from(keyframe)][filter_level as usize] as i32;
 
-    // Luma: vertical (left) macroblock edge.
+    // Left macroblock edge (vertical): filter along x, walk rows.
     if mb_x != 0 {
         filter_line(
             y,
             y_base,
-            y_stride,
             1,
+            y_stride,
             16,
             mbedge_lim,
             inner_limit,
@@ -359,8 +368,8 @@ pub fn filter_mb(
         filter_line(
             u,
             u_base,
-            uv_stride,
             1,
+            uv_stride,
             8,
             mbedge_lim,
             inner_limit,
@@ -370,8 +379,8 @@ pub fn filter_mb(
         filter_line(
             v,
             v_base,
-            uv_stride,
             1,
+            uv_stride,
             8,
             mbedge_lim,
             inner_limit,
@@ -379,14 +388,14 @@ pub fn filter_mb(
             EdgeKind::MbEdge,
         );
     }
-    // Luma inner vertical edges (always inner_filter for VP8).
+    // Inner vertical edges: filter along x, walk rows.
     if inner_filter {
         for off in [4, 8, 12] {
             filter_line(
                 y,
                 y_base + off,
-                y_stride,
                 1,
+                y_stride,
                 16,
                 bedge_lim,
                 inner_limit,
@@ -397,8 +406,8 @@ pub fn filter_mb(
         filter_line(
             u,
             u_base + 4,
-            uv_stride,
             1,
+            uv_stride,
             8,
             bedge_lim,
             inner_limit,
@@ -408,8 +417,8 @@ pub fn filter_mb(
         filter_line(
             v,
             v_base + 4,
-            uv_stride,
             1,
+            uv_stride,
             8,
             bedge_lim,
             inner_limit,
@@ -417,13 +426,13 @@ pub fn filter_mb(
             EdgeKind::Inner,
         );
     }
-    // Luma: horizontal (top) macroblock edge.
+    // Top macroblock edge (horizontal): filter along y, walk columns.
     if mb_y != 0 {
         filter_line(
             y,
             y_base,
-            1,
             y_stride,
+            1,
             16,
             mbedge_lim,
             inner_limit,
@@ -433,8 +442,8 @@ pub fn filter_mb(
         filter_line(
             u,
             u_base,
-            1,
             uv_stride,
+            1,
             8,
             mbedge_lim,
             inner_limit,
@@ -444,8 +453,8 @@ pub fn filter_mb(
         filter_line(
             v,
             v_base,
-            1,
             uv_stride,
+            1,
             8,
             mbedge_lim,
             inner_limit,
@@ -453,14 +462,14 @@ pub fn filter_mb(
             EdgeKind::MbEdge,
         );
     }
-    // Inner horizontal edges (always inner_filter for VP8).
+    // Inner horizontal edges: filter along y, walk columns.
     if inner_filter {
         for off in [4, 8, 12] {
             filter_line(
                 y,
                 y_base + off * y_stride,
-                1,
                 y_stride,
+                1,
                 16,
                 bedge_lim,
                 inner_limit,
@@ -471,8 +480,8 @@ pub fn filter_mb(
         filter_line(
             u,
             u_base + 4 * uv_stride,
-            1,
             uv_stride,
+            1,
             8,
             bedge_lim,
             inner_limit,
@@ -482,8 +491,8 @@ pub fn filter_mb(
         filter_line(
             v,
             v_base + 4 * uv_stride,
-            1,
             uv_stride,
+            1,
             8,
             bedge_lim,
             inner_limit,

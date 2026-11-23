@@ -39,6 +39,8 @@ pub struct Vp8Decoder {
     codec_descriptor: CodecDescriptor,
     /// Probabilities from the previous frame (for interframe header updates).
     probs: Probabilities,
+    /// Loop-filter deltas persist across frames when `update` is not signalled.
+    lf_delta: LfDelta,
     refs: References,
     width: u32,
     height: u32,
@@ -60,6 +62,7 @@ impl Vp8Decoder {
                 profiles: &[],
             },
             probs: crate::header::initial_probabilities(),
+            lf_delta: LfDelta::default(),
             refs: References::new(),
             width: 0,
             height: 0,
@@ -73,7 +76,7 @@ impl Vp8Decoder {
             info,
             coder,
             coeff_partitions,
-        } = decode_frame_header(data, &self.probs, self.width, self.height)?;
+        } = decode_frame_header(data, &self.probs, &self.lf_delta, self.width, self.height)?;
 
         debug!(
             keyframe = info.keyframe,
@@ -271,6 +274,7 @@ impl Vp8Decoder {
         if info.update_probabilities {
             self.probs = info.probs.clone();
         }
+        self.lf_delta = info.lf_delta;
 
         if !info.invisible {
             let frame = cur.to_frame(pts, self.params.time_base);
@@ -594,6 +598,7 @@ impl Decoder for Vp8Decoder {
         self.draining = false;
         self.refs.clear();
         self.probs = crate::header::initial_probabilities();
+        self.lf_delta = LfDelta::default();
         self.width = 0;
         self.height = 0;
     }

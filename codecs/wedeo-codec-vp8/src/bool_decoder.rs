@@ -51,7 +51,18 @@ impl<'a> BoolDecoder<'a> {
     /// Mirrors `ff_vpx_init_range_decoder`: high=255, bits=-16, code_word=BE24.
     pub fn new(data: &'a [u8]) -> Option<Self> {
         if data.is_empty() {
-            return None;
+            // FFmpeg's ff_vpx_init_range_decoder accepts zero-length
+            // coefficient partitions (it reads past the pointer but the
+            // first EOB check terminates immediately). Mirror that with a
+            // neutral empty decoder instead of rejecting the frame.
+            return Some(Self {
+                high: 255,
+                bits: -16,
+                buffer: data,
+                pos: 0,
+                code_word: 0,
+                end_reached: 0,
+            });
         }
         let (code_word, pos) = if data.len() >= 3 {
             (
@@ -191,8 +202,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_data_returns_none() {
-        assert!(BoolDecoder::new(&[]).is_none());
+    fn empty_data_returns_neutral_decoder() {
+        let bd = BoolDecoder::new(&[]).unwrap();
+        assert_eq!(bd.high, 255);
+        assert_eq!(bd.code_word, 0);
     }
 
     #[test]
