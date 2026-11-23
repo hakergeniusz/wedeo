@@ -29,6 +29,14 @@ pub fn filter_picture(
         for ry in 0..sps.ctb_height as i32 {
             for rx in 0..sps.ctb_width as i32 {
                 let ctb = (ry * sps.ctb_width as i32 + rx) as usize;
+                // FFmpeg's deblocking_filter_CTB() uses the *left* CTB's
+                // offsets for the horizontal edges in the first eight columns
+                // of a CTB (filter.c:528-534, 586-587 and 651).
+                let (left_beta, left_tc) = if rx > 0 {
+                    (pic.deblock_beta[ctb - 1], pic.deblock_tc[ctb - 1])
+                } else {
+                    (0, 0)
+                };
                 deblock_ctb(
                     pic,
                     sps,
@@ -37,6 +45,8 @@ pub fn filter_picture(
                     ry * ctb_size,
                     pic.deblock_beta[ctb],
                     pic.deblock_tc[ctb],
+                    left_beta,
+                    left_tc,
                 )?;
             }
         }
@@ -63,6 +73,7 @@ pub fn filter_picture(
 }
 
 /// Deblock one CTB (FFmpeg's `deblocking_filter_CTB`).
+#[allow(clippy::too_many_arguments)] // mirrors FFmpeg's deblocking_filter_CTB inputs
 fn deblock_ctb(
     pic: &mut Picture,
     sps: &Sps,
@@ -71,6 +82,8 @@ fn deblock_ctb(
     y0: i32,
     beta_offset: i32,
     tc_offset: i32,
+    left_beta_offset: i32,
+    left_tc_offset: i32,
 ) -> Result<()> {
     let ctb_size = 1i32 << sps.log2_ctb_size;
     let width = sps.width as i32;
@@ -131,6 +144,11 @@ fn deblock_ctb(
             let bs1 = pic.bs_h_at((x + 4) as usize, y as usize);
             if bs0 != 0 || bs1 != 0 {
                 let qp = (qp_at(pic, sps, x, y - 1) + qp_at(pic, sps, x, y) + 1) >> 1;
+                let (beta_offset, tc_offset) = if x >= x0 {
+                    (beta_offset, tc_offset)
+                } else {
+                    (left_beta_offset, left_tc_offset)
+                };
                 let beta = dsp::deblock::beta_from_qp(qp, beta_offset);
                 let tc = [
                     if bs0 != 0 {
@@ -237,6 +255,7 @@ fn deblock_ctb(
                     let bs0 = pic.bs_h_at(x as usize, y as usize);
                     let bs1 = pic.bs_h_at((x + 4 * h) as usize, y as usize);
                     if bs0 == 2 || bs1 == 2 {
+                        let off = if x >= x0 { tc_offset } else { left_tc_offset };
                         let qp0 = if bs0 == 2 {
                             (qp_at(pic, sps, x, y - 1) + qp_at(pic, sps, x, y) + 1) >> 1
                         } else {
@@ -255,7 +274,7 @@ fn deblock_ctb(
                                     c,
                                     pps.cb_qp_offset,
                                     pps.cr_qp_offset,
-                                    tc_offset,
+                                    off,
                                     sps.chroma_format_idc as u8,
                                 )
                             } else {
@@ -267,7 +286,7 @@ fn deblock_ctb(
                                     c,
                                     pps.cb_qp_offset,
                                     pps.cr_qp_offset,
-                                    tc_offset,
+                                    off,
                                     sps.chroma_format_idc as u8,
                                 )
                             } else {
@@ -310,10 +329,11 @@ fn qp_at(pic: &Picture, sps: &Sps, x: i32, y: i32) -> i32 {
 }
 
 /// SAO-filter one CTB (FFmpeg's `sao_filter_CTB`).
+#[allow(clippy::too_many_arguments)] // mirrors FFmpeg's sao_filter_CTB inputs
 fn sao_ctb(
     pic: &mut Picture,
     sps: &Sps,
-    _pps: &Pps,
+    pps: &Pps,
     sao_h: &mut [u16],
     sao_v: &mut [u16],
     x: i32,
@@ -331,6 +351,73 @@ fn sao_ctb(
         x_ctb + 1 == sps.ctb_width as usize,
         y_ctb + 1 == sps.ctb_height as usize,
     ];
+
+    // FFmpeg's sao_filter_CTB() (filter.c:286-329): unfilterable edges at
+    // slice/tile boundaries, used by sao_edge_restore to copy the original
+    // samples back instead of applying an EO offset across the boundary.
+    let lfase = pic.filter_slice_edges[ctb_addr_rs];
+    let no_tile_filter = pps.tiles_enabled_flag && !pps.loop_filter_across_tiles_enabled_flag;
+    let restore = no_tile_filter || !lfase;
+    let slice_addr = pic.tab_slice_address[ctb_addr_rs];
+    // FFmpeg indexes tile_id by CTB *tile-scan* address.
+    let tile_addr = |ctb: usize| {
+        pps.tile
+            .ctb_addr_rs_to_ts
+            .get(ctb)
+            .and_then(|&ts| pps.tile.tile_id.get(usize::try_from(ts).unwrap_or(0)))
+            .copied()
+            .unwrap_or(0)
+    };
+    let mut vert_edge = [false; 2];
+    let mut horiz_edge = [false; 2];
+    let mut diag_edge = [false; 4];
+    if restore {
+        let mut tile_edge = [false; 4]; // left, right, up, bottom
+        if !edges[0] {
+            tile_edge[0] = no_tile_filter && tile_addr(ctb_addr_rs - 1) != tile_addr(ctb_addr_rs);
+            vert_edge[0] =
+                (!lfase && slice_addr != pic.tab_slice_address[ctb_addr_rs - 1]) || tile_edge[0];
+        }
+        if !edges[2] {
+            tile_edge[1] = no_tile_filter && tile_addr(ctb_addr_rs + 1) != tile_addr(ctb_addr_rs);
+            vert_edge[1] =
+                (!lfase && slice_addr != pic.tab_slice_address[ctb_addr_rs + 1]) || tile_edge[1];
+        }
+        if !edges[1] {
+            let up = ctb_addr_rs - sps.ctb_width as usize;
+            tile_edge[2] = no_tile_filter && tile_addr(up) != tile_addr(ctb_addr_rs);
+            horiz_edge[0] = (!lfase && slice_addr != pic.tab_slice_address[up]) || tile_edge[2];
+        }
+        if !edges[3] {
+            let down = ctb_addr_rs + sps.ctb_width as usize;
+            tile_edge[3] = no_tile_filter && tile_addr(down) != tile_addr(ctb_addr_rs);
+            horiz_edge[1] = (!lfase && slice_addr != pic.tab_slice_address[down]) || tile_edge[3];
+        }
+        if !edges[0] && !edges[1] {
+            diag_edge[0] = (!lfase
+                && slice_addr != pic.tab_slice_address[ctb_addr_rs - sps.ctb_width as usize - 1])
+                || tile_edge[0]
+                || tile_edge[2];
+        }
+        if !edges[1] && !edges[2] {
+            diag_edge[1] = (!lfase
+                && slice_addr != pic.tab_slice_address[ctb_addr_rs - sps.ctb_width as usize + 1])
+                || tile_edge[1]
+                || tile_edge[2];
+        }
+        if !edges[2] && !edges[3] {
+            diag_edge[2] = (!lfase
+                && slice_addr != pic.tab_slice_address[ctb_addr_rs + sps.ctb_width as usize + 1])
+                || tile_edge[1]
+                || tile_edge[3];
+        }
+        if !edges[0] && !edges[3] {
+            diag_edge[3] = (!lfase
+                && slice_addr != pic.tab_slice_address[ctb_addr_rs + sps.ctb_width as usize - 1])
+                || tile_edge[0]
+                || tile_edge[3];
+        }
+    }
 
     for c_idx in 0..if sps.chroma_format_idc != 0 { 3 } else { 1 } {
         if c_idx == 2 {
@@ -449,9 +536,9 @@ fn sao_ctb(
                 )
                 .map_err(|e| wedeo_core::Error::Other(e.to_string()))?;
                 let restore = SaoEdgeFlags {
-                    vert: [false; 2],
-                    horiz: [false; 2],
-                    diag: [false; 4],
+                    vert: vert_edge,
+                    horiz: horiz_edge,
+                    diag: diag_edge,
                 };
                 // `sao_edge_restore` writes to its first argument (the filtered
                 // picture) and reads unfiltered samples from its second.
