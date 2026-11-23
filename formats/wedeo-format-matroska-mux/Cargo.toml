@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Work unit for libavformat/matroskaenc.c (scaffolding, not yet implemented)"
+description = "Matroska / WebM muxer (libavformat/matroskaenc.c)"
 repository.workspace = true
 publish = false
 
@@ -12,6 +12,10 @@ publish = false
 wedeo-core = { workspace = true }
 wedeo-format = { workspace = true }
 inventory = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+wedeo-codec = { workspace = true }
 
 [lints]
 workspace = true
