@@ -1,14 +1,12 @@
-//! Work unit: `wedeo-codec-mpeg12`.
+//! MPEG-1 / MPEG-2 video decoder.
 //!
-//! FFmpeg reference: `libavcodec/mpeg12dec.c`.
-//!
-//! This crate is scaffolding created by the Phase 0 factory. A single subagent
-//! owns this directory. The implementer replaces this stub with the full Decoder
-//! implementation, registers it via `inventory::submit!`, and adds conformance
-//! tests in `tests/fate/tests/fate_codec_mpeg12.rs`.
-//!
-//! Do not implement this work unit in any other crate.
+//! FFmpeg reference: `libavcodec/mpeg12dec.c` (with `mpegvideo_dec.c`,
+//! `mpegvideo_motion.c`, `mpegvideo_unquantize.c`, `mpeg12data.c` and
+//! `simple_idct_template.c`).
 
-use inventory as _;
-use wedeo_codec as _;
-use wedeo_core as _;
+pub mod bitreader;
+pub mod decoder;
+pub mod idct;
+pub mod tables;
+
+pub use decoder::Mpeg12Decoder;
