@@ -7,7 +7,10 @@ use wedeo_codec::bitstream::{BitRead, BitReadBE, get_se_golomb, get_ue_golomb};
 use wedeo_core::error::{Error, Result};
 
 use crate::sps::Sps;
-use crate::tables::{DEFAULT_SCALING4, DEFAULT_SCALING8, ZIGZAG_SCAN_4X4, ZIGZAG_SCAN_8X8};
+use crate::tables::{
+    CHROMA_QP_TABLES, DEFAULT_SCALING4, DEFAULT_SCALING8, QP_MAX_NUM, ZIGZAG_SCAN_4X4,
+    ZIGZAG_SCAN_8X8,
+};
 
 /// Maximum PPS count (H.264 spec allows pps_id 0..255).
 pub const MAX_PPS_COUNT: usize = 256;
@@ -24,6 +27,9 @@ pub struct Pps {
     pub pps_id: u32,
     /// SPS identifier this PPS references (0..31).
     pub sps_id: u32,
+    /// Luma bit depth inherited from the active SPS. Determines the extended
+    /// QP range (`51 + 6 * (bit_depth_luma - 8)`) used by MB QP delta decoding.
+    pub bit_depth_luma: u8,
     /// Entropy coding mode: false = CAVLC, true = CABAC.
     pub entropy_coding_mode_flag: bool,
     /// bottom_field_pic_order_in_frame_present_flag.
@@ -45,6 +51,10 @@ pub struct Pps {
     /// chroma_qp_index_offset[0] from PPS, [1] = second_chroma_qp_index_offset
     /// or copy of [0] if not high profile.
     pub chroma_qp_index_offset: [i32; 2],
+    /// Pre-scaled chroma QP tables for Cb (0) and Cr (1), indexed by full-range
+    /// luma QP (0..=51+qp_bd_offset). Equivalent to FFmpeg's
+    /// `pps->chroma_qp_table[2][QP_MAX_NUM+1]`, built by `build_qp_table`.
+    pub chroma_qp_table: [[u8; QP_MAX_NUM + 1]; 2],
     /// deblocking_filter_parameters_present_flag.
     pub deblocking_filter_parameters_present: bool,
     /// constrained_intra_pred_flag.
@@ -73,6 +83,21 @@ fn more_rbsp_data_in_pps(sps: &Sps) -> bool {
         | (u8::from(sps.constraint_set1_flag) << 1)
         | (u8::from(sps.constraint_set2_flag) << 2);
     !((profile == 66 || profile == 77 || profile == 88) && constraint_flags_low3 != 0)
+}
+
+/// Build the pre-scaled chroma QP table for one chroma component.
+///
+/// FFmpeg `build_qp_table` (h264_ps.c:668-675):
+/// `chroma_qp_table[t][i] = ff_h264_chroma_qp[depth-8][clip(i + index, 0, max_qp)]`.
+fn build_qp_table(index: i32, depth: u8) -> [u8; QP_MAX_NUM + 1] {
+    let max_qp = 51 + 6 * (depth as i32 - 8);
+    let source = &CHROMA_QP_TABLES[(depth as usize) - 8];
+    let mut table = [0u8; QP_MAX_NUM + 1];
+    for (i, entry) in table.iter_mut().enumerate() {
+        let qp = (i as i32 + index).clamp(0, max_qp) as usize;
+        *entry = source[qp];
+    }
+    table
 }
 
 /// Decode a single scaling list from the bitstream.
@@ -299,12 +324,11 @@ pub fn parse_pps(data: &[u8], sps_list: &[Option<Sps>; 32]) -> Result<Pps> {
         .as_ref()
         .ok_or(Error::InvalidData)?;
 
-    // Validate bit depth
-    if sps.bit_depth_luma > 14 {
+    // Validate bit depth. H.264 allows 8..14; FFmpeg's chroma QP and
+    // dequantization tables cover every supported depth (including the
+    // non-byte-aligned 11 and 13 bit cases).
+    if !(8..=14).contains(&sps.bit_depth_luma) {
         return Err(Error::InvalidData);
-    }
-    if sps.bit_depth_luma == 11 || sps.bit_depth_luma == 13 {
-        return Err(Error::PatchwelcomeNotImplemented);
     }
 
     let entropy_coding_mode_flag = br.get_bit();
@@ -399,6 +423,7 @@ pub fn parse_pps(data: &[u8], sps_list: &[Option<Sps>; 32]) -> Result<Pps> {
     Ok(Pps {
         pps_id,
         sps_id,
+        bit_depth_luma: sps.bit_depth_luma,
         entropy_coding_mode_flag,
         bottom_field_pic_order_in_frame_present,
         num_slice_groups,
@@ -409,6 +434,10 @@ pub fn parse_pps(data: &[u8], sps_list: &[Option<Sps>; 32]) -> Result<Pps> {
         pic_init_qp,
         pic_init_qs,
         chroma_qp_index_offset: [chroma_qp_index_offset_0, chroma_qp_index_offset_1],
+        chroma_qp_table: [
+            build_qp_table(chroma_qp_index_offset_0, sps.bit_depth_luma),
+            build_qp_table(chroma_qp_index_offset_1, sps.bit_depth_luma),
+        ],
         deblocking_filter_parameters_present,
         constrained_intra_pred,
         redundant_pic_cnt_present,
@@ -417,6 +446,18 @@ pub fn parse_pps(data: &[u8], sps_list: &[Option<Sps>; 32]) -> Result<Pps> {
         scaling_matrix8,
         scaling_matrix_present,
     })
+}
+
+impl Pps {
+    /// Full-range chroma QP for component `t` (0 = Cb, 1 = Cr).
+    ///
+    /// Matches FFmpeg `get_chroma_qp(pps, t, qscale)` in h264dec.h: the
+    /// `chroma_qp_index_offset` and the bit-depth-dependent QP mapping have
+    /// already been folded into the table by `build_qp_table`.
+    #[inline]
+    pub fn chroma_qp(&self, t: usize, qp: i32) -> u8 {
+        self.chroma_qp_table[t][qp.clamp(0, QP_MAX_NUM as i32) as usize]
+    }
 }
 
 #[cfg(test)]

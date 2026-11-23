@@ -747,6 +747,7 @@ mod tests {
         let pps = Pps {
             pps_id: 0,
             sps_id: 0,
+            bit_depth_luma: 8,
             entropy_coding_mode_flag: false, // CAVLC
             bottom_field_pic_order_in_frame_present: false,
             num_slice_groups: 1,
@@ -757,6 +758,11 @@ mod tests {
             pic_init_qp: 26,
             pic_init_qs: 26,
             chroma_qp_index_offset: [0, 0],
+            chroma_qp_table: [crate::tables::CHROMA_QP_TABLE; 2].map(|row| {
+                let mut table = [0u8; crate::tables::QP_MAX_NUM + 1];
+                table[..row.len()].copy_from_slice(&row);
+                table
+            }),
             deblocking_filter_parameters_present: true,
             constrained_intra_pred: false,
             redundant_pic_cnt_present: false,

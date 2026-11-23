@@ -655,6 +655,7 @@ mod deblock {
             height,
             mb_width,
             mb_height,
+            ..PictureBuffer::empty()
         };
 
         let total_mbs = (mb_width * mb_height) as usize;
@@ -676,6 +677,7 @@ mod deblock {
             beta_offset: 0,
             disable_deblocking_filter_idc: 0,
             chroma_qp_index_offset: [0, 0],
+            bit_depth_luma: 8,
         }];
 
         (pic, mb_info, slice_table, slice_params)

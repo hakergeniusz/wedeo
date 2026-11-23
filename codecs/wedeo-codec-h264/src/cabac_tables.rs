@@ -1202,9 +1202,19 @@ pub const CABAC_CONTEXT_INIT_PB: [&[[i8; 2]; 1024]; 3] = [
 /// `cabac_init_idc`.
 ///
 /// Port of FFmpeg `ff_h264_init_cabac_states` (h264_cabac.c:1262-1280).
-/// Assumes `bit_depth_luma == 8` (so `slice_qp == qp.clamp(0, 51)`).
-pub fn init_cabac_states(qp: i32, is_intra: bool, cabac_init_idc: u32) -> [u8; 1024] {
-    let slice_qp = qp.clamp(0, 51);
+///
+/// The context initialization tables are indexed by the *8-bit-equivalent*
+/// QP: FFmpeg computes `slice_qp = av_clip(sl->qscale - qp_bd_offset, 0, 51)`
+/// with `qp_bd_offset = 6 * (bit_depth_luma - 8)`. For 8-bit content this is
+/// the full-range QP clamped to 51, preserving the existing behavior.
+pub fn init_cabac_states(
+    qp: i32,
+    bit_depth_luma: u8,
+    is_intra: bool,
+    cabac_init_idc: u32,
+) -> [u8; 1024] {
+    let qp_bd_offset = 6 * (bit_depth_luma as i32 - 8);
+    let slice_qp = (qp - qp_bd_offset).clamp(0, 51);
     let tab: &[[i8; 2]; 1024] = if is_intra {
         &CABAC_CONTEXT_INIT_I
     } else {
