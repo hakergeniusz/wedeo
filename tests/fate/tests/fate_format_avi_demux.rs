@@ -7,7 +7,7 @@
 
 use wedeo_format_avi_demux as _;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use adler2::Adler32;
@@ -38,7 +38,7 @@ struct Pkt {
     crc: u32,
 }
 
-fn wedeo_packets(path: &PathBuf) -> Vec<Pkt> {
+fn wedeo_packets(path: &Path) -> Vec<Pkt> {
     let mut input = InputContext::open(path.to_str().unwrap())
         .unwrap_or_else(|e| panic!("opening {}: {e}", path.display()));
     let mut packets = Vec::new();
@@ -56,7 +56,7 @@ fn wedeo_packets(path: &PathBuf) -> Vec<Pkt> {
     packets
 }
 
-fn ffmpeg_packets(path: &PathBuf) -> Vec<Pkt> {
+fn ffmpeg_packets(path: &Path) -> Vec<Pkt> {
     let output = Command::new("ffmpeg")
         .args([
             "-v",

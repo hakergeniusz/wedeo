@@ -862,9 +862,7 @@ impl OggStream {
         let gpshift = gb.bits(5);
         let gpmask = (1u64 << gpshift) - 1;
 
-        // wedeo-core has no CodecId::Theora yet (reported as an interface need);
-        // the Theora demuxing logic and extradata are still fully implemented.
-        self.params.codec_id = CodecId::None;
+        self.params.codec_id = CodecId::Theora;
         self.params.media_type = MediaType::Video;
         self.params.width = width.max(0) as u32;
         self.params.height = height.max(0) as u32;

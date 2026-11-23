@@ -4195,6 +4195,8 @@ name = "wedeo-format-matroska-mux"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
 ]
@@ -4214,6 +4216,8 @@ name = "wedeo-format-mpegts-demux"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
 ]
@@ -4234,6 +4238,8 @@ name = "wedeo-format-ogg"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
 ]

@@ -18,11 +18,13 @@ fn fate_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+// (file, coded w, coded h, cropped w, cropped h, chroma_format_idc,
+//  bit_depth, profile_idc) -- ground truth from `ffmpeg -debug bitstream`.
+type FateCase = (&'static str, u32, u32, u32, u32, u32, u32, u32);
+
 #[test]
 fn fate_hevc_parameter_sets() {
-    // (file, coded w, coded h, cropped w, cropped h, chroma_format_idc,
-    //  bit_depth, profile_idc) -- ground truth from `ffmpeg -debug bitstream`.
-    let cases: &[(&str, u32, u32, u32, u32, u32, u32, u32)] = &[
+    let cases: &[FateCase] = &[
         ("food.hevc", 3840, 2160, 3840, 2160, 2, 10, 4),
         ("hevc-monochrome.hevc", 384, 256, 384, 240, 0, 8, 4),
         ("12bit-444-qp74.hevc", 128, 64, 128, 64, 3, 12, 4),
@@ -109,19 +111,19 @@ fn fate_hevc_parameter_sets() {
                 continue;
             }
             let _ = sets.decode_nal(nal);
-            if let Ok((h, ebsp)) = parse_nal_header(nal) {
-                if h.nal_unit_type.is_irap() {
-                    let rbsp = ebsp_to_rbsp(ebsp);
-                    let ctx = sets
-                        .slice_context(0, h, 0, false, false)
-                        .unwrap_or_else(|e| panic!("slice context failed for {name}: {e}"));
-                    let sh = parse_slice_header(&rbsp, &ctx)
-                        .unwrap_or_else(|e| panic!("slice header parse failed for {name}: {e}"));
-                    assert_eq!(sh.slice_type, wedeo_codec_hevc_ps::SliceType::I, "{name}");
-                    assert!(sh.data_offset > 0, "{name}");
-                    slice_headers_checked += 1;
-                    break;
-                }
+            if let Ok((h, ebsp)) = parse_nal_header(nal)
+                && h.nal_unit_type.is_irap()
+            {
+                let rbsp = ebsp_to_rbsp(ebsp);
+                let ctx = sets
+                    .slice_context(0, h, 0, false, false)
+                    .unwrap_or_else(|e| panic!("slice context failed for {name}: {e}"));
+                let sh = parse_slice_header(&rbsp, &ctx)
+                    .unwrap_or_else(|e| panic!("slice header parse failed for {name}: {e}"));
+                assert_eq!(sh.slice_type, wedeo_codec_hevc_ps::SliceType::I, "{name}");
+                assert!(sh.data_offset > 0, "{name}");
+                slice_headers_checked += 1;
+                break;
             }
         }
         checked += 1;
