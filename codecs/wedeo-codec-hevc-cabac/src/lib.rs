@@ -204,15 +204,16 @@ fn decode_bin(low: &mut i32, range: &mut i32, state: &mut u8, data: &[u8], pos: 
 /// FFmpeg `get_cabac_bypass`: decode one equiprobable (bypass) bin.
 #[inline]
 fn decode_bypass(low: &mut i32, range: &mut i32, data: &[u8], pos: &mut usize) -> u8 {
-    *low += *low;
+    // FFmpeg relies on C i32 wraparound here; debug builds must not panic.
+    *low = low.wrapping_add(*low);
     if *low & CABAC_MASK == 0 {
         refill(low, data, pos);
     }
-    let r = *range << (CABAC_BITS + 1);
+    let r = range.wrapping_shl(CABAC_BITS + 1);
     if *low < r {
         0
     } else {
-        *low -= r;
+        *low = low.wrapping_sub(r);
         1
     }
 }
