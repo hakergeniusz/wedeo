@@ -593,6 +593,27 @@ impl Default for CabacDecodeCache {
     }
 }
 
+/// Map a neighbor's ref index and MVD from frame to field domain (or back).
+///
+/// FFmpeg's `MAP_MVS` macro in h264_mvpred.h: when the current MB is
+/// field-coded and the neighbor is frame-coded, ref indices double and
+/// vertical MVDs halve; when the current MB is frame-coded and the neighbor
+/// is field-coded, the inverse applies. Without this, CABAC MVD contexts
+/// diverge immediately on the first field MB of an MBAFF pair.
+#[inline]
+fn map_mbaff_neighbor(ref_idx: &mut i8, mvd: &mut [u8; 2], curr_field: bool, neighbor_field: bool) {
+    if *ref_idx < 0 {
+        return;
+    }
+    if curr_field && !neighbor_field {
+        *ref_idx = ref_idx.wrapping_mul(2);
+        mvd[1] >>= 1;
+    } else if !curr_field && neighbor_field {
+        *ref_idx = ref_idx.wrapping_div(2);
+        mvd[1] = mvd[1].wrapping_shl(1);
+    }
+}
+
 impl CabacDecodeCache {
     /// Create a cache initialized with unavailable defaults.
     pub fn new() -> Self {
@@ -605,13 +626,28 @@ impl CabacDecodeCache {
     /// from the neighboring MBs' stored values. Internal positions (rows 1-4,
     /// cols 4-7) are filled by `fill_rectangle` during decode.
     ///
-    /// Reference: FFmpeg h264_mvpred.h:576-929 (fill_decode_caches).
+    /// For MBAFF field/frame mismatches with the left pair, FFmpeg selects
+    /// one of four `left_block_options` remappings: the top two cache rows
+    /// come from `left_idx` and the bottom two from `left_idx_bot`, using
+    /// block rows other than the rightmost column. Reproduce that mapping
+    /// here, otherwise CABAC mvd/ref contexts diverge from FFmpeg.
+    ///
+    /// Reference: FFmpeg h264_mvpred.h:491-496 (left_block_options),
+    ///            h264_mvpred.h:764-796 (fill_decode_caches MVD/ref fill).
     pub fn fill(
         &mut self,
         cabac_nb: &CabacNeighborCtx,
-        left_idx: Option<usize>,
-        top_idx: Option<usize>,
+        nb: &crate::mb::MbaffNeighbors,
+        curr_field: bool,
     ) {
+        // left_block_options[option][0..4]: 4x4 block rows of the left MB
+        // that feed the four rows of the scan8 left MVD/ref cache.
+        const LEFT_BLOCK_ROWS: [[usize; 4]; 4] =
+            [[0, 1, 2, 3], [2, 2, 3, 3], [0, 0, 1, 1], [0, 2, 0, 2]];
+        let rows = LEFT_BLOCK_ROWS[(nb.left_block_option as usize) & 3];
+        let left_idx = [nb.left_idx, nb.left_idx_bot.or(nb.left_idx)];
+        let top_idx = nb.top_idx;
+
         for list in 0..2 {
             let ref_store = if list == 0 {
                 &cabac_nb.ref_cache_l0
@@ -639,25 +675,43 @@ impl CabacDecodeCache {
                 for col in 0..4 {
                     self.mvd_cache[list][4 + col] = mvd_store[ti * 16 + 12 + col];
                 }
+                // MBAFF field/frame mapping (FFmpeg h264_mvpred.h MAP_MVS):
+                // a field MB treats frame neighbors as half-pel vertical refs.
+                let top_is_field = cabac_nb.mb_field_flag[ti];
+                for col in 0..4 {
+                    let idx = 4 + col;
+                    map_mbaff_neighbor(
+                        &mut self.ref_cache[list][idx],
+                        &mut self.mvd_cache[list][idx],
+                        curr_field,
+                        top_is_field,
+                    );
+                }
                 // else: intra → ref stays LIST_NOT_USED, mvd stays [0,0]
             }
 
-            // Left neighbor: right column of left MB
-            if let Some(li) = left_idx
-                && !cabac_nb.mb_intra[li]
-            {
-                // ref: top-right (part 1) → rows 1-2, bottom-right (part 3) → rows 3-4
-                let r1 = ref_store[li * 4 + 1];
-                let r3 = ref_store[li * 4 + 3];
-                self.ref_cache[list][SCAN8[0] - 1] = r1; // col 3, row 1
-                self.ref_cache[list][SCAN8[2] - 1] = r1; // col 3, row 2
-                self.ref_cache[list][SCAN8[8] - 1] = r3; // col 3, row 3
-                self.ref_cache[list][SCAN8[10] - 1] = r3; // col 3, row 4
-                // mvd: right column = raster indices 3,7,11,15
-                self.mvd_cache[list][SCAN8[0] - 1] = mvd_store[li * 16 + 3];
-                self.mvd_cache[list][SCAN8[2] - 1] = mvd_store[li * 16 + 7];
-                self.mvd_cache[list][SCAN8[8] - 1] = mvd_store[li * 16 + 11];
-                self.mvd_cache[list][SCAN8[10] - 1] = mvd_store[li * 16 + 15];
+            // Left neighbor: cache rows 1-2 come from left_idx (LTOP),
+            // cache rows 3-4 come from left_idx_bot (LBOT). The block rows
+            // are selected by left_block_option for MBAFF mixed pairs.
+            for half in 0..2usize {
+                let Some(li) = left_idx[half] else { continue };
+                if cabac_nb.mb_intra[li] {
+                    continue;
+                }
+                for row in 0..2usize {
+                    let block_row = rows[half * 2 + row];
+                    let cache_pos = (SCAN8[0] - 1) + (half * 2 + row) * 8;
+                    // ref: b8_xy = 4*mb_xy + 1, then + (block_row & ~1)
+                    self.ref_cache[list][cache_pos] = ref_store[li * 4 + 1 + (block_row & !1)];
+                    // mvd: right-column block of the selected row
+                    self.mvd_cache[list][cache_pos] = mvd_store[li * 16 + 3 + block_row * 4];
+                    map_mbaff_neighbor(
+                        &mut self.ref_cache[list][cache_pos],
+                        &mut self.mvd_cache[list][cache_pos],
+                        curr_field,
+                        cabac_nb.mb_field_flag[li],
+                    );
+                }
             }
         }
     }
@@ -1096,6 +1150,7 @@ fn decode_cabac_mb_ref(
     list: usize,
     cache_pos: usize,
     is_b_slice: bool,
+    mb_field: bool,
 ) -> i32 {
     let ref_a = cache.ref_cache[list][cache_pos - 1] as i32;
     let ref_b = cache.ref_cache[list][cache_pos - 8] as i32;
@@ -1131,7 +1186,10 @@ fn decode_cabac_mb_ref(
             return -1;
         }
     }
-    ref_idx
+    // Field-coded MBAFF MBs select a field reference (index *2 + parity).
+    // Wedeo stores frame references in `ref_pics`, so reduce to the frame
+    // index here; field parity is applied by motion compensation.
+    if mb_field { ref_idx >> 1 } else { ref_idx }
 }
 
 /// Check if a cache position refers to a direct-mode neighbor MB.
@@ -1932,6 +1990,12 @@ pub fn decode_mb_cabac(
     nb: &crate::mb::MbaffNeighbors,
 ) -> Result<Macroblock> {
     let mut mb = Macroblock::default();
+    // FFmpeg h264_cabac.c: `unsigned rc = sl->ref_count[list] << MB_MBAFF(sl)`.
+    // Field-coded MBAFF MBs address top/bottom field references separately,
+    // so the effective ref count doubles and a ref_idx bin must be decoded
+    // even when the slice has a single frame reference.
+    let ref_count_l0 = num_ref_idx_l0_active << u32::from(mb_field);
+    let ref_count_l1 = num_ref_idx_l1_active << u32::from(mb_field);
     let _mb_idx = (mb_y * mb_width + mb_x) as usize;
     let nb_left = nb.left_idx;
     let nb_left_bot = nb.left_idx_bot;
@@ -2246,16 +2310,17 @@ pub fn decode_mb_cabac(
     // 5. Inter prediction — fill scan8 cache and decode ref/mvd.
     // The cache handles both cross-MB and intra-MB neighbor lookups via scan8.
     if !is_intra {
-        cache.fill(cabac_nb, nb_left, nb_top);
+        cache.fill(cabac_nb, nb, mb_field);
     }
 
     if !is_intra && (slice_type == SliceType::P || slice_type == SliceType::SP) {
         match mb.mb_type {
             0 => {
                 // P_L0_16x16: one ref, one mvd
-                if num_ref_idx_l0_active > 1 {
+                if ref_count_l0 > 1 {
                     mb.ref_idx_l0[0] = decode_cabac_mb_ref(
                         reader, state, cache, cabac_nb, nb_left, nb_top, 0, SCAN8[0], false,
+                        mb_field,
                     ) as i8;
                 } else {
                     mb.ref_idx_l0[0] = 0;
@@ -2269,9 +2334,10 @@ pub fn decode_mb_cabac(
                 // P_L0_L0_16x8
                 for part in 0..2u32 {
                     let scan8_n = SCAN8[part as usize * 8];
-                    if num_ref_idx_l0_active > 1 {
+                    if ref_count_l0 > 1 {
                         mb.ref_idx_l0[part as usize] = decode_cabac_mb_ref(
                             reader, state, cache, cabac_nb, nb_left, nb_top, 0, scan8_n, false,
+                            mb_field,
                         ) as i8;
                     } else {
                         mb.ref_idx_l0[part as usize] = 0;
@@ -2296,9 +2362,10 @@ pub fn decode_mb_cabac(
                 // P_L0_L0_8x16
                 for part in 0..2u32 {
                     let scan8_n = SCAN8[part as usize * 4];
-                    if num_ref_idx_l0_active > 1 {
+                    if ref_count_l0 > 1 {
                         mb.ref_idx_l0[part as usize] = decode_cabac_mb_ref(
                             reader, state, cache, cabac_nb, nb_left, nb_top, 0, scan8_n, false,
+                            mb_field,
                         ) as i8;
                     } else {
                         mb.ref_idx_l0[part as usize] = 0;
@@ -2329,11 +2396,7 @@ pub fn decode_mb_cabac(
                 if dct8x8_allowed {
                     dct8x8_allowed = mb.sub_mb_type.iter().all(|&t| t == 0);
                 }
-                let ref_count = if mb.mb_type == 4 {
-                    1
-                } else {
-                    num_ref_idx_l0_active
-                };
+                let ref_count = if mb.mb_type == 4 { 1 } else { ref_count_l0 };
                 for i in 0..4 {
                     if ref_count > 1 {
                         mb.ref_idx_l0[i] = decode_cabac_mb_ref(
@@ -2346,6 +2409,7 @@ pub fn decode_mb_cabac(
                             0,
                             SCAN8[i * 4],
                             false,
+                            mb_field,
                         ) as i8;
                     } else {
                         mb.ref_idx_l0[i] = 0;
@@ -2410,7 +2474,7 @@ pub fn decode_mb_cabac(
                     continue;
                 }
                 let info = &B_SUB_MB_TYPE_INFO[mb.sub_mb_type[i] as usize];
-                if info.2 && num_ref_idx_l0_active > 1 {
+                if info.2 && ref_count_l0 > 1 {
                     mb.ref_idx_l0[i] = decode_cabac_mb_ref(
                         reader,
                         state,
@@ -2421,6 +2485,7 @@ pub fn decode_mb_cabac(
                         0,
                         SCAN8[i * 4],
                         true,
+                        mb_field,
                     ) as i8;
                 } else if info.2 {
                     mb.ref_idx_l0[i] = 0;
@@ -2440,7 +2505,7 @@ pub fn decode_mb_cabac(
                     continue;
                 }
                 let info = &B_SUB_MB_TYPE_INFO[mb.sub_mb_type[i] as usize];
-                if info.3 && num_ref_idx_l1_active > 1 {
+                if info.3 && ref_count_l1 > 1 {
                     mb.ref_idx_l1[i] = decode_cabac_mb_ref(
                         reader,
                         state,
@@ -2451,6 +2516,7 @@ pub fn decode_mb_cabac(
                         1,
                         SCAN8[i * 4],
                         true,
+                        mb_field,
                     ) as i8;
                 } else if info.3 {
                     mb.ref_idx_l1[i] = 0;
@@ -2549,9 +2615,10 @@ pub fn decode_mb_cabac(
             for p in 0..part_count {
                 if mb.b_list_flags[p][0] {
                     let scan8_n = ref_scan8(p);
-                    if num_ref_idx_l0_active > 1 {
+                    if ref_count_l0 > 1 {
                         mb.ref_idx_l0[p] = decode_cabac_mb_ref(
                             reader, state, cache, cabac_nb, nb_left, nb_top, 0, scan8_n, true,
+                            mb_field,
                         ) as i8;
                     } else {
                         mb.ref_idx_l0[p] = 0;
@@ -2564,9 +2631,10 @@ pub fn decode_mb_cabac(
             for p in 0..part_count {
                 if mb.b_list_flags[p][1] {
                     let scan8_n = ref_scan8(p);
-                    if num_ref_idx_l1_active > 1 {
+                    if ref_count_l1 > 1 {
                         mb.ref_idx_l1[p] = decode_cabac_mb_ref(
                             reader, state, cache, cabac_nb, nb_left, nb_top, 1, scan8_n, true,
+                            mb_field,
                         ) as i8;
                     } else {
                         mb.ref_idx_l1[p] = 0;
