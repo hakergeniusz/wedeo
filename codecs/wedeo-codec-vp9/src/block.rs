@@ -137,8 +137,12 @@ impl<'a> TileDecodeContext<'a> {
     ) -> Self {
         let width = header.width as usize;
         let height = header.height as usize;
-        let cols_4x4 = width.div_ceil(4);
-        let rows_4x4 = height.div_ceil(4);
+        // FFmpeg's frame dimensions are 8x8-grid based: cols = (w+7)>>3,
+        // rows = (h+7)>>3. Express the grid in 4x4 units (x2) so that
+        // partition checks, MV clamping and coefficient end_x/end_y all
+        // agree with FFmpeg for widths/heights not divisible by 8.
+        let cols_4x4 = width.div_ceil(8) * 2;
+        let rows_4x4 = height.div_ceil(8) * 2;
         let sb_cols = cols_4x4.div_ceil(16);
         let sb_rows = rows_4x4.div_ceil(16);
         Self {

@@ -633,12 +633,13 @@ pub fn reconstruct_intra_block(
                     .saturating_mul(uv_stride)
                     .saturating_add(px)
                     .saturating_add(uv_tx_px);
-                let uv_buf_ok = |buf: &[u8]| {
-                    dst_end <= buf.len()
-                        && px + uv_tx_px <= uv_frame_w
-                        && py + uv_tx_px <= uv_frame_h
-                };
-                if !uv_buf_ok(&fb.u) || !uv_buf_ok(&fb.v) {
+                // The frame buffer is padded to superblock boundaries, so a
+                // transform block may extend past the visible frame. FFmpeg's
+                // intra_recon still predicts such edge blocks, replicating the
+                // last available neighbor pixel (prepare_intra_edges does this
+                // via n_px_have). Only guard against writing outside the
+                // allocated buffer; never skip a valid edge block.
+                if dst_end > fb.u.len() || dst_end > fb.v.len() {
                     coef_idx += coef_per_uv_tx;
                     continue;
                 }
@@ -719,12 +720,9 @@ pub fn reconstruct_intra_block(
                     .saturating_mul(uv_stride)
                     .saturating_add(px)
                     .saturating_add(uv_tx_px);
-                let uv_buf_ok = |buf: &[u8]| {
-                    dst_end <= buf.len()
-                        && px + uv_tx_px <= uv_frame_w
-                        && py + uv_tx_px <= uv_frame_h
-                };
-                if !uv_buf_ok(&fb.u) || !uv_buf_ok(&fb.v) {
+                // See the U-plane loop: edge blocks are predicted with
+                // replicated pixels instead of skipped.
+                if dst_end > fb.u.len() || dst_end > fb.v.len() {
                     coef_idx += coef_per_uv_tx;
                     continue;
                 }
