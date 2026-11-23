@@ -106,6 +106,9 @@ impl YuvGeometry {
             PixelFormat::Yuv411p => (2, 0, 1),
             // FFmpeg rawvideo writes >8-bit planar samples in 16-bit containers.
             PixelFormat::Yuv420p10le | PixelFormat::Yuv420p10be => (1, 1, 2),
+            // H.264 FRext High 4:2:2 / 4:4:4, 10-bit.
+            PixelFormat::Yuv422p10le | PixelFormat::Yuv422p10be => (1, 0, 2),
+            PixelFormat::Yuv444p10le | PixelFormat::Yuv444p10be => (0, 0, 2),
             PixelFormat::Yuv420p16le | PixelFormat::Yuv420p16be => (1, 1, 2),
             // Newly added planar variants (e.g. yuv422p12le) are derived from
             // the FFmpeg-style format name below.

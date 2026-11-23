@@ -110,6 +110,13 @@ fn format_info(format: PixelFormat) -> FormatInfo {
         | PixelFormat::Yuv420p10be
         | PixelFormat::Yuv420p16le
         | PixelFormat::Yuv420p16be => FormatInfo::new(1, 1, [2, 2, 2, 0], false),
+        // 10-bit 4:2:2/4:4:4 (H.264 FRext).
+        PixelFormat::Yuv422p10le | PixelFormat::Yuv422p10be => {
+            FormatInfo::new(1, 0, [2, 2, 2, 0], false)
+        }
+        PixelFormat::Yuv444p10le | PixelFormat::Yuv444p10be => {
+            FormatInfo::new(0, 0, [2, 2, 2, 0], false)
+        }
         PixelFormat::None => FormatInfo::new(0, 0, [0, 0, 0, 0], false),
     }
 }

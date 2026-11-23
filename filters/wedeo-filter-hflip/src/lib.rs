@@ -108,6 +108,9 @@ fn format_info(format: PixelFormat) -> FormatInfo {
         PixelFormat::Gray16be | PixelFormat::Gray16le => FormatInfo::new([2, 0, 0, 0], 0, 0),
         // Planar 4:2:0, 10-bit stored in 16 bits (step 2).
         PixelFormat::Yuv420p10le | PixelFormat::Yuv420p10be => FormatInfo::new([2, 2, 2, 0], 1, 1),
+        // Planar 4:2:2 / 4:4:4, 10-bit (H.264 FRext).
+        PixelFormat::Yuv422p10le | PixelFormat::Yuv422p10be => FormatInfo::new([2, 2, 2, 0], 1, 0),
+        PixelFormat::Yuv444p10le | PixelFormat::Yuv444p10be => FormatInfo::new([2, 2, 2, 0], 0, 0),
         // Planar 4:2:0, 16-bit (step 2).
         PixelFormat::Yuv420p16le | PixelFormat::Yuv420p16be => FormatInfo::new([2, 2, 2, 0], 1, 1),
         // Packed 4:2:2 8-bit formats are rejected by FFmpeg's query_formats
