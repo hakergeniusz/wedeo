@@ -8,11 +8,16 @@
 //!   pts 0..29
 //! - Dropping: 10 fps input, 10 frames (0s..0.9s), `fps=5` -> 5 frames,
 //!   pts 0..4
+//! - EOF tail: frames at 0s and 1.5s (tb 1/2), `fps=2` -> pts 0,1,2 plus the
+//!   tail frame at pts 3
 
 use wedeo_core::frame::Frame;
 use wedeo_core::pixel_format::PixelFormat;
 use wedeo_core::rational::Rational;
-use wedeo_filter_fps::{FilterFlags, FilterTrait, FpsFilter, find_filter_by_name, is_registered};
+use wedeo_filter_fps::{
+    FilterFlags, FilterTrait, FpsFilter, create_filter_with_options, find_filter_by_name,
+    is_registered,
+};
 
 fn video_frame(pts: i64, tb: Rational, duration: i64) -> Frame {
     let mut f = Frame::new_video(16, 16, PixelFormat::Yuv420p);
@@ -32,7 +37,8 @@ fn output_pts(in_tb: Rational, rate: Rational, frames: &[(i64, i64)]) -> Vec<i64
                 .unwrap(),
         );
     }
-    out.extend(filter.finish());
+    // The graph drains delayed frames through Filter::flush().
+    out.extend(filter.flush().unwrap());
     out.into_iter().map(|f| f.pts).collect()
 }
 
@@ -90,7 +96,7 @@ fn fps_output_format_and_metadata() {
 
     let mut out = filter.filter_frame(a).unwrap();
     out.extend(filter.filter_frame(b).unwrap());
-    out.extend(filter.finish());
+    out.extend(filter.flush().unwrap());
 
     assert!(!out.is_empty());
     for frame in &out {
@@ -98,4 +104,63 @@ fn fps_output_format_and_metadata() {
         assert_eq!(frame.duration, 1);
         assert_eq!(frame.metadata.get("title"), Some("fps-test"));
     }
+}
+
+#[test]
+fn fps_flush_emits_eof_tail_once() {
+    let mut filter = FpsFilter::with_fps(2, 1).unwrap();
+    let mut out = filter
+        .filter_frame(video_frame(0, Rational::new(1, 2), 1))
+        .unwrap();
+    out.extend(
+        filter
+            .filter_frame(video_frame(3, Rational::new(1, 2), 1))
+            .unwrap(),
+    );
+    assert_eq!(out.iter().map(|f| f.pts).collect::<Vec<_>>(), vec![0, 1, 2]);
+
+    let tail = filter.flush().unwrap();
+    assert_eq!(tail.iter().map(|f| f.pts).collect::<Vec<_>>(), vec![3]);
+    assert!(
+        filter.flush().unwrap().is_empty(),
+        "flush must not repeat the tail"
+    );
+}
+
+#[test]
+fn fps_flush_outputs_frame_when_eof_is_at_its_pts() {
+    // FFmpeg's first_output_due: EOF exactly on the first frame's output
+    // timestamp still emits that frame.
+    let mut filter = FpsFilter::with_fps(25, 1).unwrap();
+    let frame = video_frame(0, Rational::new(1, 25), 0);
+    assert!(filter.filter_frame(frame).unwrap().is_empty());
+    let tail = filter.flush().unwrap();
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].pts, 0);
+}
+
+#[test]
+fn fps_options_reach_the_registered_factory() {
+    let mut filter =
+        create_filter_with_options("fps", &[("fps", "10"), ("eof_action", "pass")]).unwrap();
+    let mut out = Vec::new();
+    for pts in 0..3 {
+        out.extend(
+            filter
+                .filter_frame(video_frame(pts, Rational::new(1, 1), 1))
+                .unwrap(),
+        );
+    }
+    out.extend(filter.flush().unwrap());
+    assert_eq!(
+        out.iter().map(|f| f.pts).collect::<Vec<_>>(),
+        (0..30).collect::<Vec<_>>()
+    );
+
+    // The registered factory ignores unknown options only when they are not
+    // passed; passing a bogus option must fail like FFmpeg's av_opt_set().
+    assert!(create_filter_with_options("fps", &[("fps", "0")]).is_err());
+    assert!(create_filter_with_options("fps", &[("round", "sideways")]).is_err());
+    assert!(create_filter_with_options("fps", &[("eof_action", "jump")]).is_err());
+    assert!(create_filter_with_options("fps", &[("bogus", "1")]).is_err());
 }
