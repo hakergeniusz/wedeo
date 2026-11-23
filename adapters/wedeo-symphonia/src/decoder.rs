@@ -131,11 +131,12 @@ impl SymphoniaDecoderWrapper {
             sp.with_bits_per_sample(params.bits_per_raw_sample);
         }
 
-        // PCM and ADPCM codecs require max_frames_per_packet to be set.
-        // Use 1152 which matches symphonia's internal MAX_FRAMES_PER_PACKET
-        // for WAV/AIFF PCM streams.
+        // PCM and ADPCM codecs require max_frames_per_packet to be set. It must
+        // be at least the demuxer's packet size: FFmpeg's ff_pcm_default_packet_size
+        // emits up to 8192 samples for common PCM rates, and a native demuxer can
+        // deliver those whole. 1152 silently dropped the tail of such packets.
         if is_pcm_or_adpcm(params.codec_id) {
-            sp.with_max_frames_per_packet(1152);
+            sp.with_max_frames_per_packet(1 << 16);
         }
 
         let opts = SymphoniaDecoderOptions::default();

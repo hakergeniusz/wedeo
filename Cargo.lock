@@ -4146,6 +4146,8 @@ name = "wedeo-format-flv-mux"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
 ]
@@ -4217,6 +4219,8 @@ name = "wedeo-format-mpegts-mux"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
 ]
@@ -4235,6 +4239,8 @@ name = "wedeo-format-wav"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
+ "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
 ]
