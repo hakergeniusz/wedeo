@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Work unit for libavcodec/hevc/pred_template.c (scaffolding, not yet implemented)"
+description = "Pure-Rust HEVC DSP: intra/inter prediction, transforms, deblocking and SAO"
 repository.workspace = true
 publish = false
 
