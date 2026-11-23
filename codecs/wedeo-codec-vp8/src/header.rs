@@ -74,6 +74,7 @@ pub fn initial_probabilities() -> Probabilities {
 pub fn decode_frame_header<'a>(
     data: &'a [u8],
     prev_probs: &Probabilities,
+    prev_lf_delta: &LfDelta,
     width: u32,
     height: u32,
 ) -> Result<ParsedHeader<'a>> {
@@ -105,7 +106,9 @@ pub fn decode_frame_header<'a>(
     let mut colorspace = false;
     let mut fullrange = false;
     let mut segmentation = Segmentation::default();
-    let mut lf_delta = LfDelta::default();
+    // FFmpeg keeps lf_delta in VP8Context across frames; when `update` is not
+    // set the previous frame's deltas remain in effect.
+    let mut lf_delta = *prev_lf_delta;
     let mut update_golden = FRAME_NONE;
     let mut update_altref = FRAME_NONE;
     let mut sign_bias = [0i8; 4];
@@ -396,6 +399,15 @@ mod tests {
 
     #[test]
     fn short_packet_rejected() {
-        assert!(decode_frame_header(&[0u8; 2], &initial_probabilities(), 0, 0).is_err());
+        assert!(
+            decode_frame_header(
+                &[0u8; 2],
+                &initial_probabilities(),
+                &LfDelta::default(),
+                0,
+                0
+            )
+            .is_err()
+        );
     }
 }
