@@ -207,7 +207,11 @@ impl Dequant8Table {
 /// same result as `dequant_4x4_flat`: `level * INIT << (qp/6)`.
 pub fn dequant_4x4(coeffs: &mut [i16; 16], dequant: &[u32; 16]) {
     for i in 0..16 {
-        coeffs[i] = ((coeffs[i] as i32 * dequant[i] as i32 + 32) >> 6) as i16;
+        // FFmpeg relies on C i32 wraparound here; debug builds must not panic.
+        coeffs[i] = ((coeffs[i] as i32)
+            .wrapping_mul(dequant[i] as i32)
+            .wrapping_add(32)
+            >> 6) as i16;
     }
 }
 
@@ -224,7 +228,11 @@ pub fn dequant_4x4(coeffs: &mut [i16; 16], dequant: &[u32; 16]) {
 /// massive overflow in the IDCT and garbled output.
 pub fn dequant_8x8(coeffs: &mut [i16; 64], dequant: &[u32; 64]) {
     for i in 0..64 {
-        coeffs[i] = ((coeffs[i] as i32 * dequant[i] as i32 + 32) >> 6) as i16;
+        // FFmpeg relies on C i32 wraparound here; debug builds must not panic.
+        coeffs[i] = ((coeffs[i] as i32)
+            .wrapping_mul(dequant[i] as i32)
+            .wrapping_add(32)
+            >> 6) as i16;
     }
 }
 
@@ -258,7 +266,9 @@ pub fn dequant_4x4_flat(coeffs: &mut [i16; 16], qp: u8) {
     let scale = &DEQUANT4_COEFF_INIT[qp_rem];
     for i in 0..16 {
         let s = scale[POS_CLASS[i]] as i32;
-        coeffs[i] = ((coeffs[i] as i32 * s) << qp_per) as i16;
+        coeffs[i] = ((coeffs[i] as i32)
+            .wrapping_mul(s)
+            .wrapping_shl(qp_per as u32)) as i16;
     }
 }
 
