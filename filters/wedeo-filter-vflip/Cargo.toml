@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Work unit for libavfilter/vf_vflip.c (scaffolding, not yet implemented)"
+description = "Video vertical flip filter (port of libavfilter/vf_vflip.c)"
 repository.workspace = true
 publish = false
 
