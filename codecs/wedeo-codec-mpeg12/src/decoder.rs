@@ -1233,15 +1233,19 @@ impl Mpeg12Decoder {
         // frame* as the reference for a second-field P prediction whose
         // field_select points at the opposite parity. cur_pic is both source
         // and destination there, so take a snapshot before any writes.
-        // (mpegvideo_motion.c:748-756 and 800-808.)
+        // (mpegvideo_motion.c:748-756 and 800-808.) For MT_DMV the reference
+        // is switched to cur_pic unconditionally after the first prediction
+        // (mpegvideo_motion.c:811-814), and DMV never reads field_select from
+        // the bitstream, so the field_select scan alone cannot detect it.
         let opposite_field = |fs: usize| {
             field_pic
                 && self.pict_type != 3
                 && !self.first_field
                 && self.picture_structure != fs as u8 + 1
         };
-        let needs_snapshot =
-            (0..2).any(|d| (0..2).any(|i| opposite_field(self.mb.field_select[d][i])));
+        let needs_snapshot = (0..2)
+            .any(|d| (0..2).any(|i| opposite_field(self.mb.field_select[d][i])))
+            || (field_pic && self.pict_type != 3 && !self.first_field && self.mb.mv_type == 4);
         let cur_snap = if needs_snapshot {
             Some(pic.clone())
         } else {

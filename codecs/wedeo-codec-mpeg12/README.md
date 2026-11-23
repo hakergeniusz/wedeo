@@ -7,7 +7,11 @@
 - Owner: one subagent, this crate directory only
 - Status: implemented. Frame pictures (MPEG-1/2), B frames, complementary
   field pictures and 4:2:2 chroma are bitexact. The `mpeg2_field_encoding.ts`
-  FATE sample still shows small residual differences on inter macroblocks,
-  but its field pairs are all emitted (frame count matches FFmpeg).
+  FATE sample is 30/31 bitexact: second-field DMV macroblocks now perform both
+  field predictions (the reference switches to the current frame's opposite
+  field after the first one, per `mpegvideo_motion.c`). The one remaining
+  frame has its final slices truncated in the sample itself, so FFmpeg's error
+  concealment fills regions that are absent from the bitstream; all field
+  pairs are still emitted (frame count matches FFmpeg).
 
 Conformance tests belong in `tests/fate/tests/fate_codec_mpeg12.rs`.
