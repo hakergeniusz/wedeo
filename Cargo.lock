@@ -3883,7 +3883,9 @@ name = "wedeo-codec-hevc-cabac"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "tracing",
  "wedeo-codec",
+ "wedeo-codec-hevc-ps",
  "wedeo-core",
 ]
 
@@ -3911,6 +3913,7 @@ version = "0.2.0"
 dependencies = [
  "inventory",
  "wedeo-codec",
+ "wedeo-codec-hevc-ps",
  "wedeo-core",
 ]
 
