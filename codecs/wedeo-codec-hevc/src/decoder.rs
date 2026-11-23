@@ -31,6 +31,13 @@ use crate::filter::{boundary_strengths, filter_picture};
 use crate::intra::{IntraState, intra_defaults, intra_predict_tu, intra_prediction_unit};
 use crate::picture::{Picture, PictureStore};
 
+/// Snapshot of CABAC context models shared between WPP rows (FFmpeg's
+/// `common_cabac_state`).
+type CabacStates = (
+    [u8; wedeo_codec_hevc_cabac::HEVC_CONTEXTS],
+    [u8; wedeo_codec_hevc_cabac::HEVC_STAT_COEFFS],
+);
+
 /// The native HEVC decoder.
 pub struct HevcDecoder {
     params: CodecParameters,
@@ -418,6 +425,7 @@ impl HevcDecoder {
                 cabac: &mut cabac,
                 slice_data,
                 sub_offsets: &sub_offsets,
+                wpp_states: None,
                 dpb: &self.dpb,
                 pictures: &self.pictures,
                 rpl,
@@ -465,9 +473,12 @@ impl HevcDecoder {
         if sh.num_entry_point_offsets == 0 {
             return Vec::new();
         }
+        // FFmpeg's sh.offset[] values are relative to the whole NAL, but the
+        // caller indexes `slice_data`, which already starts at data_offset.
+        // Adding data_offset here shifts every substream by that amount.
         let mut offsets = Vec::with_capacity(sh.num_entry_point_offsets + 1);
-        offsets.push(sh.data_offset);
-        let mut sum = sh.data_offset;
+        offsets.push(0);
+        let mut sum = 0usize;
         for &v in sh
             .entry_point_offset
             .iter()
@@ -491,6 +502,8 @@ struct CtuDecoder<'a, 'b> {
     cabac: &'a mut Cabac<'b>,
     slice_data: &'b [u8],
     sub_offsets: &'a [usize],
+    /// Context models published by the second CTB of the previous WPP row.
+    wpp_states: Option<CabacStates>,
     dpb: &'a Dpb,
     pictures: &'a PictureStore,
     rpl: [RefPicList; 2],
@@ -547,9 +560,29 @@ impl CtuDecoder<'_, '_> {
             {
                 let row = ts / ctb_width;
                 if let Some(&off) = self.sub_offsets.get(row) {
+                    // FFmpeg ends the previous row with a terminate bin, then
+                    // opens this row's substream and inherits the context
+                    // models saved after the previous row's second CTB
+                    // (`ff_hevc_cabac_init` -> substream_continue + load_states).
                     let _ = self.cabac.get_cabac_terminate();
-                    let mut next = Cabac::new(&self.slice_data[off.min(self.slice_data.len())..])?;
-                    next.init_state_from_slice(self.sh);
+                    let data = &self.slice_data[off.min(self.slice_data.len())..];
+                    // With a single CTB per row FFmpeg re-initialises the
+                    // contexts instead of loading the neighbour row's states.
+                    let restored = if ctb_width == 1 {
+                        None
+                    } else {
+                        self.wpp_states.take()
+                    };
+                    let next = match restored {
+                        Some((states, stat_coeff)) => {
+                            Cabac::new_with_states(data, states, stat_coeff)?
+                        }
+                        None => {
+                            let mut c = Cabac::new(data)?;
+                            c.init_state_from_slice(self.sh);
+                            c
+                        }
+                    };
                     *self.cabac = next;
                     self.first_qp_group = true;
                 }
@@ -557,6 +590,12 @@ impl CtuDecoder<'_, '_> {
 
             let more = self.decode_ctb(rs, x, y, ts)?;
             ts += 1;
+            // FFmpeg's ff_hevc_save_states(): publish the contexts after the
+            // second CTB of a row (or every CTB when the row is two wide) so
+            // the next WPP row can inherit them.
+            if ts % ctb_width == 2 || (ctb_width == 2 && ts.is_multiple_of(ctb_width)) {
+                self.wpp_states = Some(self.cabac.save_states());
+            }
             // FFmpeg's decode_slice_data stops at the end-of-slice flag. With
             // WPP substreams the flag also fires at row ends; in that case the
             // next row is decoded from the next substream by the loop above.
@@ -1410,156 +1449,200 @@ impl CtuDecoder<'_, '_> {
                     scan_idx_c = ScanType::Horiz;
                 }
             }
-        }
 
-        let mut coeffs = vec![0i32; (1usize << (2 * log2_trafo_size.max(2))).max(1024)];
-        let ctx = crate::residual::ResidualCtx {
-            sps: self.sps,
-            pps: self.pps,
-            slice_cb_qp_offset: self.sh.slice_cb_qp_offset,
-            slice_cr_qp_offset: self.sh.slice_cr_qp_offset,
-            cu_qp_offset_cb: self.cu_qp_offset_cb,
-            cu_qp_offset_cr: self.cu_qp_offset_cr,
-            cu_transquant_bypass: self.cu_transquant_bypass,
-            qp_y: self.qp_y,
-            is_intra: self.pred_mode_intra,
-            intra_pred_mode: self.intra.mode,
-            intra_pred_mode_c: self.intra.mode_c,
-        };
-        if cbf_luma != 0 {
-            crate::residual::decode_residual(
-                self.cabac,
-                &ctx,
-                self.pic,
-                x0 as usize,
-                y0 as usize,
-                log2_trafo_size,
-                scan_idx,
-                0,
-                &mut coeffs,
-            )?;
-        }
-        if self.sps.chroma_format_idc != 0
-            && (log2_trafo_size > 2 || self.sps.chroma_format_idc == 3)
-        {
-            for i in 0..usize::from(self.sps.chroma_format_idc == 2) + 1 {
-                let cy = y0 + (i as i32) * size_c;
-                if self.pred_mode_intra {
-                    let na = wedeo_codec_hevc_refs::set_neighbour_available(
-                        x0,
-                        cy,
-                        size << self.sps.hshift[1],
-                        size_c << self.sps.vshift[1],
-                        self.sps.log2_ctb_size,
-                        self.ctb_flags,
-                    );
-                    intra_predict_tu(
-                        self.pic,
-                        self.sps,
-                        self.pps,
-                        self.geo,
-                        na,
-                        x0,
-                        cy,
-                        log2_c,
-                        1,
-                        self.intra.mode_c,
-                    )?;
-                }
-                if cbf_cb[i] != 0 {
-                    crate::residual::decode_residual(
-                        self.cabac,
-                        &ctx,
-                        self.pic,
-                        x0 as usize,
-                        cy as usize,
-                        log2_c,
-                        scan_idx_c,
-                        1,
-                        &mut coeffs,
-                    )?;
-                }
+            let mut coeffs = vec![0i32; (1usize << (2 * log2_trafo_size.max(2))).max(1024)];
+            let ctx = crate::residual::ResidualCtx {
+                sps: self.sps,
+                pps: self.pps,
+                slice_cb_qp_offset: self.sh.slice_cb_qp_offset,
+                slice_cr_qp_offset: self.sh.slice_cr_qp_offset,
+                cu_qp_offset_cb: self.cu_qp_offset_cb,
+                cu_qp_offset_cr: self.cu_qp_offset_cr,
+                cu_transquant_bypass: self.cu_transquant_bypass,
+                qp_y: self.qp_y,
+                is_intra: self.pred_mode_intra,
+                intra_pred_mode: self.intra.mode,
+                intra_pred_mode_c: self.intra.mode_c,
+            };
+            if cbf_luma != 0 {
+                crate::residual::decode_residual(
+                    self.cabac,
+                    &ctx,
+                    self.pic,
+                    x0 as usize,
+                    y0 as usize,
+                    log2_trafo_size,
+                    scan_idx,
+                    0,
+                    &mut coeffs,
+                )?;
             }
-            for i in 0..usize::from(self.sps.chroma_format_idc == 2) + 1 {
-                let cy = y0 + (i as i32) * size_c;
-                if self.pred_mode_intra {
-                    let na = wedeo_codec_hevc_refs::set_neighbour_available(
-                        x0,
-                        cy,
-                        size << self.sps.hshift[1],
-                        size_c << self.sps.vshift[1],
-                        self.sps.log2_ctb_size,
-                        self.ctb_flags,
-                    );
-                    intra_predict_tu(
-                        self.pic,
-                        self.sps,
-                        self.pps,
-                        self.geo,
-                        na,
-                        x0,
-                        cy,
-                        log2_c,
-                        2,
-                        self.intra.mode_c,
-                    )?;
-                }
-                if cbf_cr[i] != 0 {
-                    crate::residual::decode_residual(
-                        self.cabac,
-                        &ctx,
-                        self.pic,
-                        x0 as usize,
-                        cy as usize,
-                        log2_c,
-                        scan_idx_c,
-                        2,
-                        &mut coeffs,
-                    )?;
-                }
-            }
-        } else if self.sps.chroma_format_idc != 0 && self.pred_mode_intra && blk_idx == 3 {
-            for comp in 1..=2 {
+            if self.sps.chroma_format_idc != 0
+                && (log2_trafo_size > 2 || self.sps.chroma_format_idc == 3)
+            {
                 for i in 0..usize::from(self.sps.chroma_format_idc == 2) + 1 {
-                    let cy = y_base + (i as i32) * size;
-                    let na = wedeo_codec_hevc_refs::set_neighbour_available(
-                        x_base,
-                        cy,
-                        size << 1,
-                        size << self.sps.vshift[1],
-                        self.sps.log2_ctb_size,
-                        self.ctb_flags,
-                    );
-                    intra_predict_tu(
-                        self.pic,
-                        self.sps,
-                        self.pps,
-                        self.geo,
-                        na,
-                        x_base,
-                        cy,
-                        log2_trafo_size,
-                        comp,
-                        self.intra.mode_c,
-                    )?;
-                    let cbf = if comp == 1 { cbf_cb[i] } else { cbf_cr[i] };
-                    if cbf != 0 {
+                    let cy = y0 + (i as i32) * size_c;
+                    if self.pred_mode_intra {
+                        self.predict_chroma_tu(
+                            x0,
+                            cy,
+                            size << self.sps.hshift[1],
+                            size_c << self.sps.vshift[1],
+                            log2_c,
+                            1,
+                        )?;
+                    }
+                    if cbf_cb[i] != 0 {
                         crate::residual::decode_residual(
                             self.cabac,
                             &ctx,
                             self.pic,
-                            x_base as usize,
+                            x0 as usize,
                             cy as usize,
-                            log2_trafo_size,
+                            log2_c,
                             scan_idx_c,
-                            comp,
+                            1,
                             &mut coeffs,
                         )?;
                     }
                 }
+                for i in 0..usize::from(self.sps.chroma_format_idc == 2) + 1 {
+                    let cy = y0 + (i as i32) * size_c;
+                    if self.pred_mode_intra {
+                        self.predict_chroma_tu(
+                            x0,
+                            cy,
+                            size << self.sps.hshift[1],
+                            size_c << self.sps.vshift[1],
+                            log2_c,
+                            2,
+                        )?;
+                    }
+                    if cbf_cr[i] != 0 {
+                        crate::residual::decode_residual(
+                            self.cabac,
+                            &ctx,
+                            self.pic,
+                            x0 as usize,
+                            cy as usize,
+                            log2_c,
+                            scan_idx_c,
+                            2,
+                            &mut coeffs,
+                        )?;
+                    }
+                }
+            } else if self.sps.chroma_format_idc != 0 && blk_idx == 3 {
+                for comp in 1..=2 {
+                    for i in 0..usize::from(self.sps.chroma_format_idc == 2) + 1 {
+                        let cy = y_base + (i as i32) * size;
+                        if self.pred_mode_intra {
+                            self.predict_chroma_tu(
+                                x_base,
+                                cy,
+                                size << 1,
+                                size << self.sps.vshift[1],
+                                log2_trafo_size,
+                                comp,
+                            )?;
+                        }
+                        let cbf = if comp == 1 { cbf_cb[i] } else { cbf_cr[i] };
+                        if cbf != 0 {
+                            crate::residual::decode_residual(
+                                self.cabac,
+                                &ctx,
+                                self.pic,
+                                x_base as usize,
+                                cy as usize,
+                                log2_trafo_size,
+                                scan_idx_c,
+                                comp,
+                                &mut coeffs,
+                            )?;
+                        }
+                    }
+                }
+            }
+        } else if self.sps.chroma_format_idc != 0 && self.pred_mode_intra {
+            // FFmpeg's hls_transform_unit() still predicts both chroma planes
+            // when every CBF of the TU is zero (hevcdec.c:1506-1533); no
+            // residual coding, QP delta or scan selection happens in this path.
+            if log2_trafo_size > 2 || self.sps.chroma_format_idc == 3 {
+                for i in 0..usize::from(self.sps.chroma_format_idc == 2) + 1 {
+                    let cy = y0 + (i as i32) * size_c;
+                    self.predict_chroma_tu(
+                        x0,
+                        cy,
+                        size << self.sps.hshift[1],
+                        size_c << self.sps.vshift[1],
+                        log2_c,
+                        1,
+                    )?;
+                    self.predict_chroma_tu(
+                        x0,
+                        cy,
+                        size << self.sps.hshift[1],
+                        size_c << self.sps.vshift[1],
+                        log2_c,
+                        2,
+                    )?;
+                }
+            } else if blk_idx == 3 {
+                for i in 0..usize::from(self.sps.chroma_format_idc == 2) + 1 {
+                    let cy = y_base + (i as i32) * size;
+                    self.predict_chroma_tu(
+                        x_base,
+                        cy,
+                        size << 1,
+                        size << self.sps.vshift[1],
+                        log2_trafo_size,
+                        1,
+                    )?;
+                    self.predict_chroma_tu(
+                        x_base,
+                        cy,
+                        size << 1,
+                        size << self.sps.vshift[1],
+                        log2_trafo_size,
+                        2,
+                    )?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Predict one chroma transform block (`s->hpc.intra_pred[...]`).
+    #[allow(clippy::too_many_arguments)] // mirrors the hls_transform_unit call sites
+    fn predict_chroma_tu(
+        &mut self,
+        x: i32,
+        y: i32,
+        horiz_size: i32,
+        vert_size: i32,
+        log2_size: u32,
+        c_idx: usize,
+    ) -> Result<()> {
+        let na = wedeo_codec_hevc_refs::set_neighbour_available(
+            x,
+            y,
+            horiz_size,
+            vert_size,
+            self.sps.log2_ctb_size,
+            self.ctb_flags,
+        );
+        intra_predict_tu(
+            self.pic,
+            self.sps,
+            self.pps,
+            self.geo,
+            na,
+            x,
+            y,
+            log2_size,
+            c_idx,
+            self.intra.mode_c,
+        )
     }
 
     /// Decode one prediction unit (FFmpeg's `hls_prediction_unit`).

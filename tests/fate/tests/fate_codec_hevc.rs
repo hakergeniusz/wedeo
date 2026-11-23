@@ -118,6 +118,51 @@ fn hevc_bitexact_frame_packing_persistence() {
     assert_eq!(frames, 8, "expected eight bitexact frames");
 }
 
+/// A 4:4:4 intra vector whose TUs have all-zero CBFs on many blocks. FFmpeg
+/// still runs chroma intra prediction in that case (hevcdec.c:1506-1533), so
+/// the chroma planes must not collapse to the neutral 128 fill value.
+#[test]
+fn hevc_chroma_predicted_when_all_cbf_zero() {
+    let data = match std::fs::read(fate_path("cbf_cr_cb_TUDepth_4_circle.h265")) {
+        Ok(d) => d,
+        Err(_) => return, // sample not installed in this shard
+    };
+    let mut decoder = match DecoderBuilder::new(codec_params(data.clone())).open() {
+        Ok(d) => d,
+        Err(e) => panic!("failed to open HEVC decoder: {e}"),
+    };
+    let mut packet = Packet::from_slice(&data);
+    packet.pts = 0;
+    let _ = decoder.send_packet(Some(&packet));
+    let _ = decoder.send_packet(None);
+    let mut saw_chroma_content = false;
+    loop {
+        match decoder.receive_frame() {
+            Ok(frame) => {
+                if let Some(video) = frame.video() {
+                    assert_eq!(video.planes.len(), 3, "expected Y/U/V for 4:4:4");
+                    for plane in video.planes.iter().skip(1) {
+                        let start = plane.offset;
+                        let end = start + (video.height as usize) * plane.linesize;
+                        if plane.buffer.data()[start..end]
+                            .iter()
+                            .any(|&sample| sample != 128)
+                        {
+                            saw_chroma_content = true;
+                        }
+                    }
+                }
+            }
+            Err(wedeo_core::Error::Again) | Err(wedeo_core::Error::Eof) => break,
+            Err(_) => break,
+        }
+    }
+    assert!(
+        saw_chroma_content,
+        "chroma planes stayed at the neutral fill value"
+    );
+}
+
 #[test]
 fn hevc_decoder_decodes_fate_vectors() {
     let cases = ["pir.hevc", "flush-reuse.hevc", "atc-sei-reset.hevc"];
