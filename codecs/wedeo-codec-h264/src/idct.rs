@@ -5,6 +5,81 @@
 //
 // Reference: ITU-T H.264 Section 8.5.12, FFmpeg libavcodec/h264idct_template.c
 
+use crate::pixel::Pixel;
+
+/// Per-bit-depth dispatch for the IDCT kernels.
+///
+/// 8-bit keeps the FFmpeg NEON fast paths (when compiled with `has_asm`);
+/// 10-bit uses the pure-Rust butterfly, which is identical to FFmpeg's
+/// `ff_h264_idct_add_10_c` modulo the wider sample type.
+pub trait IdctPixel: Pixel {
+    fn idct4_add(dst: &mut [Self], stride: usize, coeffs: &mut [i16; 16]);
+    fn idct4_dc_add(dst: &mut [Self], stride: usize, dc: &mut i16);
+    fn idct8_add(dst: &mut [Self], stride: usize, coeffs: &mut [i16; 64]);
+    fn idct8_dc_add(dst: &mut [Self], stride: usize, dc: &mut i16);
+}
+
+impl IdctPixel for u8 {
+    #[inline]
+    fn idct4_add(dst: &mut [Self], stride: usize, coeffs: &mut [i16; 16]) {
+        #[cfg(has_asm)]
+        {
+            crate::asm_dispatch::idct4x4_add_asm(dst, stride, coeffs);
+            return;
+        }
+        idct4x4_add_impl(dst, stride, coeffs);
+    }
+
+    #[inline]
+    fn idct4_dc_add(dst: &mut [Self], stride: usize, dc: &mut i16) {
+        #[cfg(has_asm)]
+        {
+            crate::asm_dispatch::idct4x4_dc_add_asm(dst, stride, dc);
+            return;
+        }
+        idct4x4_dc_add_impl(dst, stride, dc);
+    }
+
+    #[inline]
+    fn idct8_add(dst: &mut [Self], stride: usize, coeffs: &mut [i16; 64]) {
+        #[cfg(has_asm)]
+        {
+            crate::asm_dispatch::idct8x8_add_asm(dst, stride, coeffs);
+            return;
+        }
+        idct8x8_add_impl(dst, stride, coeffs);
+    }
+
+    #[inline]
+    fn idct8_dc_add(dst: &mut [Self], stride: usize, dc: &mut i16) {
+        #[cfg(has_asm)]
+        {
+            crate::asm_dispatch::idct8x8_dc_add_asm(dst, stride, dc);
+            return;
+        }
+        idct8x8_dc_add_impl(dst, stride, dc);
+    }
+}
+
+impl IdctPixel for u16 {
+    #[inline]
+    fn idct4_add(dst: &mut [Self], stride: usize, coeffs: &mut [i16; 16]) {
+        idct4x4_add_impl(dst, stride, coeffs);
+    }
+    #[inline]
+    fn idct4_dc_add(dst: &mut [Self], stride: usize, dc: &mut i16) {
+        idct4x4_dc_add_impl(dst, stride, dc);
+    }
+    #[inline]
+    fn idct8_add(dst: &mut [Self], stride: usize, coeffs: &mut [i16; 64]) {
+        idct8x8_add_impl(dst, stride, coeffs);
+    }
+    #[inline]
+    fn idct8_dc_add(dst: &mut [Self], stride: usize, dc: &mut i16) {
+        idct8x8_dc_add_impl(dst, stride, dc);
+    }
+}
+
 /// 4x4 integer IDCT: transform coefficients and add to destination.
 ///
 /// Applies the H.264 4x4 integer inverse transform to `coeffs` and adds the
@@ -19,14 +94,11 @@
 /// Coefficients are stored in row-major order: `coeffs[y*4+x]`.
 ///
 /// Reference: FFmpeg `ff_h264_idct_add` in h264idct_template.c
-#[allow(unreachable_code)]
-pub fn idct4x4_add(dst: &mut [u8], stride: usize, coeffs: &mut [i16; 16]) {
-    #[cfg(has_asm)]
-    {
-        crate::asm_dispatch::idct4x4_add_asm(dst, stride, coeffs);
-        return;
-    }
+pub fn idct4x4_add<P: IdctPixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 16]) {
+    P::idct4_add(dst, stride, coeffs)
+}
 
+fn idct4x4_add_impl<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 16]) {
     // Add rounding bias to DC coefficient (same as FFmpeg's block[0] += 1 << 5)
     coeffs[0] = coeffs[0].wrapping_add(32);
 
@@ -67,12 +139,12 @@ pub fn idct4x4_add(dst: &mut [u8], stride: usize, coeffs: &mut [i16; 16]) {
         // SAFETY: 3*stride+3 < dst.len() proven by the assert above; i<4, stride>=4.
         unsafe {
             let p = dst.as_mut_ptr();
-            *p.add(i) = (*p.add(i) as i32 + ((z0 + z3) >> 6)).clamp(0, 255) as u8;
-            *p.add(stride + i) = (*p.add(stride + i) as i32 + ((z1 + z2) >> 6)).clamp(0, 255) as u8;
+            *p.add(i) = P::from_i32((*p.add(i)).to_i32() + ((z0 + z3) >> 6));
+            *p.add(stride + i) = P::from_i32((*p.add(stride + i)).to_i32() + ((z1 + z2) >> 6));
             *p.add(2 * stride + i) =
-                (*p.add(2 * stride + i) as i32 + ((z1 - z2) >> 6)).clamp(0, 255) as u8;
+                P::from_i32((*p.add(2 * stride + i)).to_i32() + ((z1 - z2) >> 6));
             *p.add(3 * stride + i) =
-                (*p.add(3 * stride + i) as i32 + ((z0 - z3) >> 6)).clamp(0, 255) as u8;
+                P::from_i32((*p.add(3 * stride + i)).to_i32() + ((z0 - z3) >> 6));
         }
     }
 
@@ -87,14 +159,11 @@ pub fn idct4x4_add(dst: &mut [u8], stride: usize, coeffs: &mut [i16; 16]) {
 /// the full butterfly computation.
 ///
 /// Reference: FFmpeg `ff_h264_idct_dc_add` in h264idct_template.c
-#[allow(unreachable_code)]
-pub fn idct4x4_dc_add(dst: &mut [u8], stride: usize, dc: &mut i16) {
-    #[cfg(has_asm)]
-    {
-        crate::asm_dispatch::idct4x4_dc_add_asm(dst, stride, dc);
-        return;
-    }
+pub fn idct4x4_dc_add<P: IdctPixel>(dst: &mut [P], stride: usize, dc: &mut i16) {
+    P::idct4_dc_add(dst, stride, dc)
+}
 
+fn idct4x4_dc_add_impl<P: Pixel>(dst: &mut [P], stride: usize, dc: &mut i16) {
     let val = (*dc as i32 + 32) >> 6;
     *dc = 0;
 
@@ -105,7 +174,7 @@ pub fn idct4x4_dc_add(dst: &mut [u8], stride: usize, dc: &mut i16) {
             // SAFETY: 3*stride+3 < dst.len() proven by the assert above.
             unsafe {
                 let p = dst.as_mut_ptr().add(j * stride + i);
-                *p = (*p as i32 + val).clamp(0, 255) as u8;
+                *p = P::from_i32((*p).to_i32() + val);
             }
         }
     }
@@ -124,14 +193,11 @@ pub fn idct4x4_dc_add(dst: &mut [u8], stride: usize, dc: &mut i16) {
 /// swap is required (same approach as the 4x4 IDCT).
 ///
 /// Reference: FFmpeg `ff_h264_idct8_add` in h264idct_template.c
-#[allow(unreachable_code)]
-pub fn idct8x8_add(dst: &mut [u8], stride: usize, coeffs: &mut [i16; 64]) {
-    #[cfg(has_asm)]
-    {
-        crate::asm_dispatch::idct8x8_add_asm(dst, stride, coeffs);
-        return;
-    }
+pub fn idct8x8_add<P: IdctPixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 64]) {
+    P::idct8_add(dst, stride, coeffs)
+}
 
+fn idct8x8_add_impl<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 64]) {
     // Add rounding bias
     coeffs[0] = coeffs[0].wrapping_add(32);
 
@@ -226,20 +292,20 @@ pub fn idct8x8_add(dst: &mut [u8], stride: usize, coeffs: &mut [i16; 64]) {
         // SAFETY: 7*stride+7 < dst.len() proven by the assert above; i<8.
         unsafe {
             let p = dst.as_mut_ptr();
-            *p.add(i) = (*p.add(i) as i32 + ((b0 + b7) >> 6)).clamp(0, 255) as u8;
-            *p.add(stride + i) = (*p.add(stride + i) as i32 + ((b2 + b5) >> 6)).clamp(0, 255) as u8;
+            *p.add(i) = P::from_i32((*p.add(i)).to_i32() + ((b0 + b7) >> 6));
+            *p.add(stride + i) = P::from_i32((*p.add(stride + i)).to_i32() + ((b2 + b5) >> 6));
             *p.add(2 * stride + i) =
-                (*p.add(2 * stride + i) as i32 + ((b4 + b3) >> 6)).clamp(0, 255) as u8;
+                P::from_i32((*p.add(2 * stride + i)).to_i32() + ((b4 + b3) >> 6));
             *p.add(3 * stride + i) =
-                (*p.add(3 * stride + i) as i32 + ((b6 + b1) >> 6)).clamp(0, 255) as u8;
+                P::from_i32((*p.add(3 * stride + i)).to_i32() + ((b6 + b1) >> 6));
             *p.add(4 * stride + i) =
-                (*p.add(4 * stride + i) as i32 + ((b6 - b1) >> 6)).clamp(0, 255) as u8;
+                P::from_i32((*p.add(4 * stride + i)).to_i32() + ((b6 - b1) >> 6));
             *p.add(5 * stride + i) =
-                (*p.add(5 * stride + i) as i32 + ((b4 - b3) >> 6)).clamp(0, 255) as u8;
+                P::from_i32((*p.add(5 * stride + i)).to_i32() + ((b4 - b3) >> 6));
             *p.add(6 * stride + i) =
-                (*p.add(6 * stride + i) as i32 + ((b2 - b5) >> 6)).clamp(0, 255) as u8;
+                P::from_i32((*p.add(6 * stride + i)).to_i32() + ((b2 - b5) >> 6));
             *p.add(7 * stride + i) =
-                (*p.add(7 * stride + i) as i32 + ((b0 - b7) >> 6)).clamp(0, 255) as u8;
+                P::from_i32((*p.add(7 * stride + i)).to_i32() + ((b0 - b7) >> 6));
         }
     }
 
@@ -249,14 +315,11 @@ pub fn idct8x8_add(dst: &mut [u8], stride: usize, coeffs: &mut [i16; 64]) {
 /// DC-only 8x8 IDCT shortcut: add `(dc + 32) >> 6` to all 64 pixels.
 ///
 /// Reference: FFmpeg `ff_h264_idct8_dc_add` in h264idct_template.c
-#[allow(unreachable_code)]
-pub fn idct8x8_dc_add(dst: &mut [u8], stride: usize, dc: &mut i16) {
-    #[cfg(has_asm)]
-    {
-        crate::asm_dispatch::idct8x8_dc_add_asm(dst, stride, dc);
-        return;
-    }
+pub fn idct8x8_dc_add<P: IdctPixel>(dst: &mut [P], stride: usize, dc: &mut i16) {
+    P::idct8_dc_add(dst, stride, dc)
+}
 
+fn idct8x8_dc_add_impl<P: Pixel>(dst: &mut [P], stride: usize, dc: &mut i16) {
     let val = (*dc as i32 + 32) >> 6;
     *dc = 0;
 
@@ -267,7 +330,7 @@ pub fn idct8x8_dc_add(dst: &mut [u8], stride: usize, dc: &mut i16) {
             // SAFETY: 7*stride+7 < dst.len() proven by the assert above.
             unsafe {
                 let p = dst.as_mut_ptr().add(j * stride + i);
-                *p = (*p as i32 + val).clamp(0, 255) as u8;
+                *p = P::from_i32((*p).to_i32() + val);
             }
         }
     }
