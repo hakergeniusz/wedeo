@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Work unit for libavcodec/bsf/aac_adtstoasc.c (scaffolding, not yet implemented)"
+description = "MPEG-2/4 AAC ADTS to MPEG-4 Audio Specific Configuration bitstream filter"
 repository.workspace = true
 publish = false
 
