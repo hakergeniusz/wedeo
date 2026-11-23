@@ -129,7 +129,12 @@ impl Vp8Decoder {
         for mb_y in 0..mb_h {
             intra4x4_left = [DC_PRED; 4];
             left_nnz = [0u8; 9];
-            let bounds = MvBounds {
+            // FFmpeg tightens the MV x-bounds by 64 after every macroblock
+            // column (vp8.c decode_mb_row_no_filter, mv_min.x/mv_max.x -= 64).
+            // Keeping them fixed per row makes large MVs escape the clamp,
+            // corrupting the MV-neighbour predictors for later MBs and
+            // eventually exhausting the header range coder.
+            let mut bounds = MvBounds {
                 min_x: -MARGIN,
                 max_x: ((mb_w as i32 - 1) << 6) + MARGIN,
                 min_y,
@@ -138,6 +143,13 @@ impl Vp8Decoder {
 
             for mb_x in 0..mb_w {
                 if header_coder.is_end() {
+                    debug!(
+                        frame = self.frame_count,
+                        mb_x,
+                        mb_y,
+                        msg = "VP8 header coder exhausted",
+                        state = format!("{:?}", header_coder.state_snapshot()),
+                    );
                     return Err(Error::InvalidData);
                 }
                 let mb_xy = mb_y * mb_w + mb_x;
@@ -179,6 +191,14 @@ impl Vp8Decoder {
                 if !mb.skip {
                     let part = mb_y & (info.num_coeff_partitions - 1);
                     if coeff_coders[part].is_end() {
+                        debug!(
+                            frame = self.frame_count,
+                            mb_x,
+                            mb_y,
+                            part,
+                            msg = "VP8 coeff coder exhausted",
+                            state = format!("{:?}", coeff_coders[part].state_snapshot()),
+                        );
                         return Err(Error::InvalidData);
                     }
                     decode_mb_coeffs(
@@ -218,6 +238,10 @@ impl Vp8Decoder {
                 }
 
                 mb_grid[mb_xy] = mb;
+
+                // FFmpeg: td->mv_bounds.mv_min.x -= 64; td->mv_bounds.mv_max.x -= 64;
+                bounds.min_x -= 64;
+                bounds.max_x -= 64;
             }
             min_y -= 64;
             max_y -= 64;

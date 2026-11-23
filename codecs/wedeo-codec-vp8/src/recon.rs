@@ -87,6 +87,12 @@ impl FrameBuffer {
 
         let w = self.width;
         let h = self.height;
+        // FFmpeg's yuv420p chroma planes use AV_CEIL_RSHIFT(dim, 1), not a
+        // truncating /2. For odd dimensions (e.g. 175x143) the chroma planes
+        // are 88x72, not 87x71; the reconstructed buffer is padded to the MB
+        // grid (176x144) so the extra row/column is present and valid.
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
         let planes = vec![
             FramePlane {
                 buffer: extract(&self.y, self.stride_y, self.base_y(), w, h),
@@ -94,14 +100,14 @@ impl FrameBuffer {
                 linesize: w,
             },
             FramePlane {
-                buffer: extract(&self.u, self.stride_uv, self.base_uv(), w / 2, h / 2),
+                buffer: extract(&self.u, self.stride_uv, self.base_uv(), cw, ch),
                 offset: 0,
-                linesize: w / 2,
+                linesize: cw,
             },
             FramePlane {
-                buffer: extract(&self.v, self.stride_uv, self.base_uv(), w / 2, h / 2),
+                buffer: extract(&self.v, self.stride_uv, self.base_uv(), cw, ch),
                 offset: 0,
-                linesize: w / 2,
+                linesize: cw,
             },
         ];
 
