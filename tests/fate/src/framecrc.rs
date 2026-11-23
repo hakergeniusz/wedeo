@@ -39,6 +39,7 @@ use wedeo_format_avi_demux as _;
 use wedeo_format_flv_demux as _;
 use wedeo_format_flv_mux as _;
 use wedeo_format_h264 as _;
+use wedeo_format_hevc as _;
 use wedeo_format_ivf as _;
 use wedeo_format_ivf_mux as _;
 use wedeo_format_matroska_mux as _;
@@ -50,7 +51,6 @@ use wedeo_format_wav as _;
 use wedeo_format_webm as _;
 use wedeo_rav1d as _;
 use wedeo_symphonia as _;
-use wedeo_format_hevc as _;
 
 use wedeo_codec::decoder::{Decoder, DecoderBuilder};
 use wedeo_core::error::Error;
