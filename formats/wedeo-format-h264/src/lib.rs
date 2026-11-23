@@ -814,6 +814,12 @@ impl DemuxerFactory for H264DemuxerFactory {
     fn probe(&self, data: &ProbeData<'_>) -> i32 {
         let buf = data.buf;
 
+        // EBML/Matroska/WebM is a different container; random start-code-like
+        // byte patterns inside its compressed payload must not win the probe.
+        if buf.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            return 0;
+        }
+
         // Check file extension for a baseline score
         let ext_score = {
             let filename = data.filename.to_lowercase();
