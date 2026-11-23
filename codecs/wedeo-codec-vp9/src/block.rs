@@ -1479,11 +1479,20 @@ fn update_mv_ctx(
         }
     }
 
-    // MV grid update: write MvRefPair to cur_mv_grid for each 4×4 in the block.
-    // Use BWH_TAB[0] (luma dimensions in 4×4 units) since our grid has 4×4
-    // granularity, unlike the above/left context arrays which use BWH_TAB[1].
-    let grid_w4 = BWH_TAB[0][bs as usize][0] as usize;
-    let grid_h4 = BWH_TAB[0][bs as usize][1] as usize;
+    // MV grid update: write MvRefPair to cur_mv_grid for each 4×4 cell in the
+    // block's footprint.  FFmpeg indexes its MV grid in 8×8 MI units and
+    // stores b->mv[3] once per MI; our grid has 4×4 granularity, so a
+    // sub-8×8 partition (one 8×8 MI) must fill all four 4×4 cells with the
+    // same mv[3] value.  Writing only BWH_TAB[0][bs] cells (e.g. [1,1] for
+    // BS_4x4) leaves stale neighbour MVs that corrupt later MV prediction.
+    let (grid_w4, grid_h4) = if is_sub8x8 {
+        (2, 2)
+    } else {
+        (
+            BWH_TAB[0][bs as usize][0] as usize,
+            BWH_TAB[0][bs as usize][1] as usize,
+        )
+    };
     for y in 0..grid_h4 {
         let grid_row = row + y;
         for x in 0..grid_w4 {
