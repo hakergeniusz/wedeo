@@ -84,6 +84,18 @@ impl<'a> BoolDecoder<'a> {
         })
     }
 
+    /// Diagnostic snapshot of the range-coder state (for conformance tracing).
+    #[inline]
+    pub fn state_snapshot(&self) -> (u32, i32, u32, usize, u32) {
+        (
+            self.high,
+            self.bits,
+            self.code_word,
+            self.pos,
+            self.end_reached,
+        )
+    }
+
     /// `vpx_rac_is_end`: true once the stream end has been reached repeatedly.
     #[inline]
     pub fn is_end(&mut self) -> bool {
