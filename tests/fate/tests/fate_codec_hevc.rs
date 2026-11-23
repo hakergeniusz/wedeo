@@ -53,6 +53,71 @@ fn hevc_decoder_is_registered_and_opens() {
     assert_eq!(desc.media_type, MediaType::Video);
 }
 
+/// FFmpeg's non-standard Adler-32 (initial checksum 0, i.e. s1 = s2 = 0).
+fn framecrc_adler32(data: &[u8]) -> u32 {
+    let mut s1 = 0u32;
+    let mut s2 = 0u32;
+    for chunk in data.chunks(5552) {
+        for &b in chunk {
+            s1 = s1.wrapping_add(u32::from(b));
+            s2 = s2.wrapping_add(s1);
+        }
+        s1 %= 65521;
+        s2 %= 65521;
+    }
+    (s2 << 16) | s1
+}
+
+/// Bitexec parity on a real FATE HEVC vector (16x16, 8-bit 4:2:0). FFmpeg's
+/// `ffmpeg -bitexact -i frame-packing-persistence.hevc -f framecrc -` reports
+/// `0x29e05000` for each of its eight frames.
+#[test]
+fn hevc_bitexact_frame_packing_persistence() {
+    let data = match std::fs::read(fate_path("frame-packing-persistence.hevc")) {
+        Ok(d) => d,
+        Err(_) => return, // sample not installed in this shard
+    };
+    let mut decoder = match DecoderBuilder::new(codec_params(data.clone())).open() {
+        Ok(d) => d,
+        Err(e) => panic!("failed to open HEVC decoder: {e}"),
+    };
+    let mut packet = Packet::from_slice(&data);
+    packet.pts = 0;
+    let _ = decoder.send_packet(Some(&packet));
+    let _ = decoder.send_packet(None);
+    let mut frames = 0usize;
+    loop {
+        match decoder.receive_frame() {
+            Ok(frame) => {
+                if let Some(video) = frame.video() {
+                    let w = video.width as usize;
+                    let h = video.height as usize;
+                    let mut raw = Vec::new();
+                    for (plane, pw, ph) in [
+                        (&video.planes[0], w, h),
+                        (&video.planes[1], w / 2, h / 2),
+                        (&video.planes[2], w / 2, h / 2),
+                    ] {
+                        for y in 0..ph {
+                            let start = plane.offset + y * plane.linesize;
+                            raw.extend_from_slice(&plane.buffer.data()[start..start + pw]);
+                        }
+                    }
+                    assert_eq!(
+                        framecrc_adler32(&raw),
+                        0x29e0_5000,
+                        "frame {frames} does not match FFmpeg framecrc"
+                    );
+                }
+                frames += 1;
+            }
+            Err(wedeo_core::Error::Again) | Err(wedeo_core::Error::Eof) => break,
+            Err(_) => break,
+        }
+    }
+    assert_eq!(frames, 8, "expected eight bitexact frames");
+}
+
 #[test]
 fn hevc_decoder_decodes_fate_vectors() {
     let cases = ["pir.hevc", "flush-reuse.hevc", "atc-sei-reset.hevc"];

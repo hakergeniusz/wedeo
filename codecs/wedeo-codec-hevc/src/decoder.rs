@@ -555,14 +555,22 @@ impl CtuDecoder<'_, '_> {
                 }
             }
 
-            self.decode_ctb(rs, x, y, ts)?;
+            let more = self.decode_ctb(rs, x, y, ts)?;
             ts += 1;
+            // FFmpeg's decode_slice_data stops at the end-of-slice flag. With
+            // WPP substreams the flag also fires at row ends; in that case the
+            // next row is decoded from the next substream by the loop above.
+            if !more
+                && !(self.sub_offsets.len() > 1 && ts.is_multiple_of(ctb_width) && ts < ctb_count)
+            {
+                break;
+            }
         }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn decode_ctb(&mut self, rs: usize, x_ctb: i32, y_ctb: i32, ctb_ts: usize) -> Result<()> {
+    fn decode_ctb(&mut self, rs: usize, x_ctb: i32, y_ctb: i32, ctb_ts: usize) -> Result<bool> {
         let sps = self.sps;
         let ctb_size = 1i32 << sps.log2_ctb_size;
         let ctb_addr_in_slice = rs as i32 - self.sh.slice_addr as i32;
@@ -597,10 +605,8 @@ impl CtuDecoder<'_, '_> {
             *v = self.sh.slice_loop_filter_across_slices_enabled_flag;
         }
 
-        let _more = self.hls_coding_quadtree(x_ctb, y_ctb, sps.log2_ctb_size, 0, flags)?;
-        // Continue decoding remaining CTBs in this slice segment even when the
-        // end-of-slice flag fires; FFmpeg stops at the CTB row boundary.
-        Ok(())
+        let more = self.hls_coding_quadtree(x_ctb, y_ctb, sps.log2_ctb_size, 0, flags)?;
+        Ok(more)
     }
 
     /// `hls_sao_param()` from hevcdec.c.
@@ -714,8 +720,20 @@ impl CtuDecoder<'_, '_> {
             && y0 + cb_size <= self.sps.height as i32
             && log2_cb_size > self.sps.log2_min_cb_size
         {
-            let left_depth = self.ct_depth_at(x0 - 1, y0);
-            let above_depth = self.ct_depth_at(x0, y0 - 1);
+            // FFmpeg gates the tab_ct_depth lookups on CTB/boundary flags;
+            // a slice boundary must not expose the previous slice's depths.
+            let x0b = (x0 as u32) & ((1u32 << self.sps.log2_ctb_size) - 1);
+            let y0b = (y0 as u32) & ((1u32 << self.sps.log2_ctb_size) - 1);
+            let left_depth = if flags.ctb_left_flag || x0b != 0 {
+                self.ct_depth_at(x0 - 1, y0)
+            } else {
+                0
+            };
+            let above_depth = if flags.ctb_up_flag || y0b != 0 {
+                self.ct_depth_at(x0, y0 - 1)
+            } else {
+                0
+            };
             self.cabac.decode_split_coding_unit_flag(
                 left_depth > cb_depth as usize,
                 above_depth > cb_depth as usize,
@@ -831,7 +849,9 @@ impl CtuDecoder<'_, '_> {
         let min_cb_width = self.pic.min_cb_width;
         let x0b = x0 & ((1 << self.sps.log2_ctb_size) - 1);
         let y0b = y0 & ((1 << self.sps.log2_ctb_size) - 1);
-        let ct_depth = self.ct_depth_at(x0, y0) as u32;
+        // FFmpeg's hls_coding_unit uses `lc->ct_depth`, set by the quadtree
+        // caller, not the neighbour table (which is still zero at this point).
+        let ct_depth = self.ct_depth;
 
         self.clear_skip(x_cb, y_cb, length as usize);
         self.intra.modes = [1; 4];

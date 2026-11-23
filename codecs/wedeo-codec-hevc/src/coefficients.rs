@@ -274,7 +274,10 @@ pub fn decode_coefficients(
             let flag = cabac.decode_coeff_abs_level_greater1_flag(c_idx, inc);
             greater1_flag[m] = flag;
             gt1_mask |= (flag as u32) << m;
-            greater1_ctx = (greater1_ctx + i32::from(greater1_ctx - 1 < 2)) & (flag as i32 - 1);
+            // FFmpeg: `greater1_ctx + (greater1_ctx - 1U < 2)`. The comparison
+            // is unsigned, so 0 - 1U wraps to UINT_MAX (no increment).
+            let bump = i32::from((greater1_ctx as u32).wrapping_sub(1) < 2);
+            greater1_ctx = (greater1_ctx + bump) & (flag as i32 - 1);
         }
         if gt1_mask != 0 {
             first_greater1 = gt1_mask.trailing_zeros() as i32;
@@ -393,12 +396,18 @@ fn coeff_level_remaining(cabac: &mut Cabac<'_>, rice: usize) -> i32 {
         (((prefix as usize) << rice) | (suffix as usize)) as i32
     } else {
         let pm3 = (prefix - 3) as usize;
+        // FFmpeg: CABAC_MAX_BIN / overlong suffix is an error, return 0.
+        if prefix >= 31 || pm3 + rice > 16 + 6 {
+            return 0;
+        }
         let k = pm3 + rice;
         let mut suffix = 0i32;
         for _ in 0..k {
-            suffix = (suffix << 1) | cabac.get_cabac_bypass() as i32;
+            suffix = suffix.wrapping_shl(1) | cabac.get_cabac_bypass() as i32;
         }
-        (((1usize << pm3) + 3 - 1) << rice) as i32 + suffix
+        ((1i32 << pm3) + 3 - 1)
+            .wrapping_shl(rice as u32)
+            .wrapping_add(suffix)
     }
 }
 
