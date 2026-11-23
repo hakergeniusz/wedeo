@@ -6,6 +6,7 @@
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::media_type::MediaType;
 
+use crate::hvcc;
 use crate::muxer::TrackState;
 
 // ---------------------------------------------------------------------------
@@ -329,6 +330,7 @@ fn write_stbl(track: &TrackState) -> Vec<u8> {
 fn write_stsd(track: &TrackState) -> Vec<u8> {
     let entry = match track.codec_id {
         CodecId::H264 => write_avc1_entry(track),
+        CodecId::Hevc => write_hvc1_entry(track),
         CodecId::Av1 => write_av01_entry(track),
         CodecId::Aac => write_mp4a_entry(track),
         _ => write_generic_audio_entry(track),
@@ -369,14 +371,67 @@ fn write_ctts(track: &TrackState) -> Vec<u8> {
     full_box(b"ctts", version, 0, &c)
 }
 
-/// stsc — sample-to-chunk mapping.
-/// We use one sample per chunk, so there's a single entry: (1, 1, 1).
-fn write_stsc(_track: &TrackState) -> Vec<u8> {
-    let mut c = Vec::with_capacity(16);
-    c.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-    c.extend_from_slice(&1u32.to_be_bytes()); // first_chunk (1-indexed)
-    c.extend_from_slice(&1u32.to_be_bytes()); // samples_per_chunk
-    c.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index
+/// A chunk: contiguous samples sharing a single file offset, as produced by
+/// FFmpeg's `build_chunks()` in `movenc.c`.
+struct Chunk {
+    offset: u64,
+    samples: u32,
+}
+
+/// Group consecutive samples into chunks. FFmpeg merges samples into a chunk
+/// while they are contiguous in the file, use the same sample description, and
+/// the running chunk size stays below 1 MiB. We have a single sample
+/// description, so the stsd index is always 1.
+fn build_chunks(track: &TrackState) -> Vec<Chunk> {
+    let mut chunks = Vec::new();
+    let mut i = 0usize;
+    while i < track.chunk_offsets.len() {
+        let offset = track.chunk_offsets[i];
+        let first_size = track.sample_sizes.get(i).copied().unwrap_or(0) as u64;
+        let mut size = first_size;
+        let mut samples = 1u32;
+
+        while i + (samples as usize) < track.chunk_offsets.len() {
+            let next_offset = track.chunk_offsets[i + (samples as usize)];
+            let next_size = track
+                .sample_sizes
+                .get(i + (samples as usize))
+                .copied()
+                .unwrap_or(0) as u64;
+            if next_offset == offset + size && size + next_size < (1 << 20) {
+                size += next_size;
+                samples += 1;
+            } else {
+                break;
+            }
+        }
+
+        chunks.push(Chunk { offset, samples });
+        i += samples as usize;
+    }
+    chunks
+}
+
+/// stsc — sample-to-chunk mapping. One entry per distinct samples-per-chunk
+/// value, matching FFmpeg's `mov_write_stsc_tag()`.
+fn write_stsc(track: &TrackState) -> Vec<u8> {
+    let chunks = build_chunks(track);
+    let mut entries: Vec<(u32, u32)> = Vec::new();
+    for (idx, chunk) in chunks.iter().enumerate() {
+        if entries
+            .last()
+            .is_none_or(|&(_, samples)| samples != chunk.samples)
+        {
+            entries.push((idx as u32 + 1, chunk.samples));
+        }
+    }
+    let mut c = Vec::with_capacity(4 + entries.len() * 12);
+    c.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for &(first_chunk, samples_per_chunk) in &entries {
+        c.extend_from_slice(&first_chunk.to_be_bytes());
+        c.extend_from_slice(&samples_per_chunk.to_be_bytes());
+        c.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index
+    }
     full_box(b"stsc", 0, 0, &c)
 }
 
@@ -391,21 +446,22 @@ fn write_stsz(track: &TrackState) -> Vec<u8> {
     full_box(b"stsz", 0, 0, &c)
 }
 
-/// stco or co64 — chunk offsets.
+/// stco or co64 — chunk offsets (one per chunk, after FFmpeg-style grouping).
 fn write_chunk_offsets(track: &TrackState) -> Vec<u8> {
-    let needs_64bit = track.chunk_offsets.iter().any(|&o| o > u32::MAX as u64);
+    let chunks = build_chunks(track);
+    let needs_64bit = chunks.iter().any(|chunk| chunk.offset > u32::MAX as u64);
     if needs_64bit {
-        let mut c = Vec::with_capacity(4 + track.chunk_offsets.len() * 8);
-        c.extend_from_slice(&(track.chunk_offsets.len() as u32).to_be_bytes());
-        for &offset in &track.chunk_offsets {
-            c.extend_from_slice(&offset.to_be_bytes());
+        let mut c = Vec::with_capacity(4 + chunks.len() * 8);
+        c.extend_from_slice(&(chunks.len() as u32).to_be_bytes());
+        for chunk in &chunks {
+            c.extend_from_slice(&chunk.offset.to_be_bytes());
         }
         full_box(b"co64", 0, 0, &c)
     } else {
-        let mut c = Vec::with_capacity(4 + track.chunk_offsets.len() * 4);
-        c.extend_from_slice(&(track.chunk_offsets.len() as u32).to_be_bytes());
-        for &offset in &track.chunk_offsets {
-            c.extend_from_slice(&(offset as u32).to_be_bytes());
+        let mut c = Vec::with_capacity(4 + chunks.len() * 4);
+        c.extend_from_slice(&(chunks.len() as u32).to_be_bytes());
+        for chunk in &chunks {
+            c.extend_from_slice(&(chunk.offset as u32).to_be_bytes());
         }
         full_box(b"stco", 0, 0, &c)
     }
@@ -449,6 +505,34 @@ fn write_avc1_entry(track: &TrackState) -> Vec<u8> {
     }
 
     mp4_box(b"avc1", &c)
+}
+
+/// hvc1 sample entry for HEVC.
+fn write_hvc1_entry(track: &TrackState) -> Vec<u8> {
+    let mut c = Vec::with_capacity(86 + track.extradata.len());
+    c.extend_from_slice(&[0u8; 6]); // reserved
+    c.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
+    c.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
+    c.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    c.extend_from_slice(&[0u8; 12]); // pre_defined
+    c.extend_from_slice(&(track.width as u16).to_be_bytes());
+    c.extend_from_slice(&(track.height as u16).to_be_bytes());
+    c.extend_from_slice(&0x0048_0000u32.to_be_bytes()); // horiz resolution 72 dpi
+    c.extend_from_slice(&0x0048_0000u32.to_be_bytes()); // vert resolution 72 dpi
+    c.extend_from_slice(&0u32.to_be_bytes()); // reserved
+    c.extend_from_slice(&1u16.to_be_bytes()); // frame_count
+    c.extend_from_slice(&[0u8; 32]); // compressorname
+    c.extend_from_slice(&0x0018u16.to_be_bytes()); // depth = 24
+    c.extend_from_slice(&(-1i16).to_be_bytes()); // pre_defined = -1
+
+    // hvcC box: extradata may already be hvcC, or Annex B VPS/SPS/PPS.
+    if !track.extradata.is_empty()
+        && let Ok(record) = hvcc::build_hvcc(&track.extradata)
+    {
+        c.extend_from_slice(&mp4_box(b"hvcC", &record));
+    }
+
+    mp4_box(b"hvc1", &c)
 }
 
 /// av01 sample entry for AV1.

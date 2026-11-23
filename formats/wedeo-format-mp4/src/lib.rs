@@ -1,6 +1,7 @@
 mod atoms;
 mod boxes;
 pub mod demuxer;
+mod hvcc;
 pub mod muxer;
 
 use wedeo_core::codec_id::CodecId;
