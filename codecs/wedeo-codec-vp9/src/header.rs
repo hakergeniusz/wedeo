@@ -1285,7 +1285,11 @@ pub fn decode_frame_header(
         refresh_ctx,
         parallel_mode,
         frame_ctx_id,
-        use_last_frame_mvs: !error_resilient && show_frame,
+        // FFmpeg vp9.c:568-571 derives this from the *previous* frame's
+        // `invisible` flag (last_invisible), not from this frame's show_frame.
+        // At header-parse time that state is not known, so leave it false;
+        // Vp9Decoder::decode_frame computes the real value after parsing.
+        use_last_frame_mvs: false,
         size_from_ref,
     };
 
