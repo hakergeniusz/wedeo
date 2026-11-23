@@ -103,6 +103,26 @@ impl Default for MbState {
     }
 }
 
+/// Byte geometry for one motion-compensated block. `sy`/`dy` are byte
+/// offsets; `y_stride`/`uv_stride` are the row strides (doubled for field
+/// prediction, matching FFmpeg's `cur_pic.linesize << field_based`).
+struct McGeom {
+    dy: usize,
+    sy: usize,
+    y_stride: usize,
+    /// Source x pixel and row index before the MV is applied. The row is in
+    /// units of `y_stride` (field rows for field prediction). The byte offset
+    /// `sy` also contains the field-parity row, so x cannot be derived from
+    /// it with a simple modulo.
+    sx0: i32,
+    sy0: i32,
+    duv: usize,
+    suv: usize,
+    uv_stride: usize,
+    h: usize,
+    field_based: bool,
+}
+
 pub struct Mpeg12Decoder {
     codec_id: CodecId,
     descriptor: CodecDescriptor,
@@ -158,10 +178,25 @@ pub struct Mpeg12Decoder {
     pending_start: usize,
     scan_pos: usize,
 
-    // Output
+    // Output. FFmpeg emits I/P frames one frame late and B frames
+    // immediately, yielding display (temporal_ref) order. We reproduce that
+    // by buffering decoded frames and releasing those older than the
+    // highest temporal_ref seen so far.
     frames: VecDeque<Frame>,
+    reorder: Vec<(i64, Frame)>,
+    max_temporal: i64,
+    /// temporal_ref wraps at 1024; unwrap it for display-order sorting.
+    temporal_offset: i64,
+    last_temporal: i32,
     draining: bool,
     packet_pts: i64,
+    /// PTS of the access unit that started the current field pair. FFmpeg
+    /// keeps the frame associated with the first field's AVFrame.
+    pair_pts: i64,
+    /// Picture type of the field pair (both fields carry the same type).
+    pair_pict_type: u8,
+    /// temporal_ref of the access unit that started the field pair.
+    pair_temporal: u16,
 }
 
 impl Mpeg12Decoder {
@@ -232,8 +267,15 @@ impl Mpeg12Decoder {
             pending_start: 0,
             scan_pos: 0,
             frames: VecDeque::new(),
+            reorder: Vec::new(),
+            max_temporal: -1,
+            temporal_offset: 0,
+            last_temporal: -1,
             draining: false,
             packet_pts: wedeo_core::timestamp::NOPTS_VALUE,
+            pair_pts: wedeo_core::timestamp::NOPTS_VALUE,
+            pair_pict_type: 0,
+            pair_temporal: 0,
         })
     }
 
@@ -281,7 +323,21 @@ impl Mpeg12Decoder {
             let payload = self.buf[self.pending_start..end].to_vec();
             self.process_start_code(pc, &payload)?;
         }
-        self.finalize_picture()
+        self.finalize_picture()?;
+        // A stream that ends after a single field must still emit that
+        // field (FFmpeg emits it as an interlaced frame with one field
+        // present). At this point finalize_picture() has already consumed
+        // the completed pair or frame; only a lone first field remains.
+        if self.picture_structure != PICT_FRAME
+            && self.first_field
+            && let Some(pic) = self.cur_pic.take()
+        {
+            let frame = self.picture_to_frame(&pic, self.pair_pts, self.pair_pict_type);
+            self.enqueue_frame(self.pair_temporal, self.pair_pict_type, frame);
+            self.first_field = false;
+        }
+        self.flush_reorder();
+        Ok(())
     }
 
     fn process_start_code(&mut self, code: u8, payload: &[u8]) -> Result<()> {
@@ -498,7 +554,10 @@ impl Mpeg12Decoder {
 
     fn decode_picture(&mut self, payload: &[u8]) -> Result<()> {
         if !self.sequence_seen || self.width == 0 || self.height == 0 {
-            return fail!();
+            // A TS can start in the middle of a GOP: FFmpeg ignores picture
+            // headers until a sequence header has been seen (mpeg12dec.c
+            // skips slices when the context is not initialised).
+            return Ok(());
         }
         let mut gb = BitReader::new(payload);
         self.temporal_ref = gb.read_bits(10)? as u16;
@@ -545,16 +604,25 @@ impl Mpeg12Decoder {
             return Ok(());
         }
         self.picture_in_progress = false;
+        let field_pic = self.picture_structure != PICT_FRAME;
+        if field_pic && self.first_field {
+            // First field of a pair: keep the frame buffer so the second
+            // field can be written into the other set of lines. FFmpeg's
+            // slice_end() only emits a frame once !first_field.
+            return Ok(());
+        }
         let Some(pic) = self.cur_pic.take() else {
             return Ok(());
         };
         // `next_pic` was installed as a blank placeholder at frame start;
         // replace it with the fully decoded picture (they alias in FFmpeg).
+        // This is required for field pairs too: without it the next field
+        // pair would predict from the blank placeholder.
         if pic.pict_type != 3 {
             self.next_pic = Some(pic.clone());
         }
-        let frame = self.picture_to_frame(&pic);
-        self.frames.push_back(frame);
+        let frame = self.picture_to_frame(&pic, self.pair_pts, self.pair_pict_type);
+        self.enqueue_frame(self.pair_temporal, self.pair_pict_type, frame);
         Ok(())
     }
 
@@ -566,17 +634,39 @@ impl Mpeg12Decoder {
         if self.picture_in_progress {
             return Ok(());
         }
-        let coded_w = self.mb_width * 16;
-        let coded_h = self.mb_height * 16;
-        let pic = Picture::new(coded_w, coded_h, self.chroma_format, self.pict_type);
-        // FFmpeg's ff_mpv_frame_start(): for I/P frames the previous future
-        // reference becomes the past reference, and the new picture becomes
-        // the future reference for subsequent B frames.
-        if self.pict_type != 3 {
-            self.last_pic = self.next_pic.take();
-            self.next_pic = Some(pic.clone());
+        let field_pic = self.picture_structure != PICT_FRAME;
+        // FFmpeg toggles `first_field` on the first slice of every field
+        // picture (mpeg12dec.c:2435) and clears it for frame pictures.
+        if field_pic {
+            self.first_field = !self.first_field;
+        } else {
+            self.first_field = false;
         }
-        self.cur_pic = Some(pic);
+
+        if self.first_field || !field_pic {
+            let coded_w = self.mb_width * 16;
+            let coded_h = self.mb_height * 16;
+            let pic = Picture::new(coded_w, coded_h, self.chroma_format, self.pict_type);
+            // FFmpeg's ff_mpv_frame_start(): for I/P frames the previous
+            // future reference becomes the past reference, and the new
+            // picture becomes the future reference for subsequent B frames.
+            // This happens once per frame, not once per field.
+            if self.pict_type != 3 {
+                self.last_pic = self.next_pic.take();
+                self.next_pic = Some(pic.clone());
+            }
+            self.cur_pic = Some(pic);
+            self.pair_pts = self.packet_pts;
+            self.pair_pict_type = self.pict_type;
+            self.pair_temporal = self.temporal_ref;
+        } else {
+            // Second field: reuse the frame allocated for the first field.
+            // `mpeg_field_start()'s "second field" branch in FFmpeg repoints
+            // cur_pic at the other field of the same AVFrame.
+            if self.cur_pic.is_none() {
+                return fail!(); // first field missing
+            }
+        }
         self.picture_in_progress = true;
         self.qscale = 1;
         self.last_dc = [128 << self.intra_dc_precision; 3];
@@ -689,6 +779,13 @@ impl Mpeg12Decoder {
                         self.mb.mv[0][0] = self.last_mv[0][0];
                         self.mb.mv[1][0] = self.last_mv[1][0];
                     }
+                    // FFmpeg's skipped-MB path (mpeg12dec.c:1618-1621):
+                    // reuse the field of the current picture.
+                    if self.picture_structure != PICT_FRAME {
+                        let fs = usize::from(self.picture_structure - 1);
+                        self.mb.field_select[0][0] = fs;
+                        self.mb.field_select[1][0] = fs;
+                    }
                 }
             }
         }
@@ -712,7 +809,11 @@ impl Mpeg12Decoder {
             self.mb.mv = [[[0; 2]; 4]; 2];
             if self.pict_type == 2 {
                 self.mb.mv_dir = MV_DIR_FORWARD;
-                self.mb.mv_type = 0;
+                self.mb.mv_type = if self.picture_structure == PICT_FRAME {
+                    0
+                } else {
+                    3
+                };
                 self.last_mv = [[[0; 2]; 2]; 2];
             }
             return Ok(());
@@ -1023,12 +1124,30 @@ impl Mpeg12Decoder {
     fn reconstruct_mb(&mut self, mb_x: usize, mb_y: usize) -> Result<()> {
         let mut pic = self.cur_pic.take().ok_or(Error::InvalidData)?;
         let px = mb_x * 16;
-        let py = mb_y * 16;
+        let field_pic = self.picture_structure != PICT_FRAME;
+        let parity = usize::from(self.picture_structure.saturating_sub(1));
+        let field_row = mb_y >> 1;
         let stride = pic.width;
         let uv_stride = pic.chroma_w;
+        // FFmpeg doubles cur_pic.linesize for field pictures; rows are
+        // therefore spaced two frame rows apart and the bottom field starts
+        // one (frame) row into the buffer.
+        let y_stride = stride << usize::from(field_pic);
+        let uv_row_stride = uv_stride << usize::from(field_pic);
+        let y_base = if field_pic {
+            parity * stride + field_row * 16 * y_stride
+        } else {
+            mb_y * 16 * stride
+        };
+        let chroma_mb_rows = if self.chroma_format == 1 { 8 } else { 16 };
+        let uv_base = if field_pic {
+            parity * uv_stride + field_row * chroma_mb_rows * uv_row_stride
+        } else {
+            ((mb_y * 16) >> usize::from(self.chroma_format == 1)) * uv_stride
+        };
 
         if !self.mb.intra {
-            self.motion_compensate(&mut pic, px, py)?;
+            self.motion_compensate(&mut pic, mb_x, mb_y)?;
         }
 
         let blocks = self.mb.blocks;
@@ -1037,21 +1156,13 @@ impl Mpeg12Decoder {
         let uv_size = uv_stride * pic.chroma_h;
         for (i, b) in blocks.iter().enumerate().take(mb_block_count) {
             if i < 4 {
-                let bx = px + (i % 2) * 8;
-                let by = py + (i / 2) * 8;
-                let start = by * stride + bx;
-                if start + 7 * stride + 8 <= y_size {
-                    let dest = &mut pic.y[start..start + 8 * stride];
+                let start = y_base + px + (i / 2) * 8 * y_stride + (i % 2) * 8;
+                if start + 7 * y_stride + 8 <= y_size {
+                    let dest = &mut pic.y[start..start + 8 * y_stride];
                     if self.mb.intra {
-                        idct::idct_put(b, dest, stride);
+                        idct::idct_put(b, dest, y_stride);
                     } else {
-                        idct::idct_add(b, dest, stride);
-                    }
-                    if mb_x == 4 && mb_y == 1 && i == 3 {
-                        let mut rows = Vec::new();
-                        for r in 0..8 {
-                            rows.push(dest[r * stride..r * stride + 8].to_vec());
-                        }
+                        idct::idct_add(b, dest, y_stride);
                     }
                 }
             } else {
@@ -1061,123 +1172,388 @@ impl Mpeg12Decoder {
                 // they are stacked/tiled.
                 let bi = i - 4;
                 let (plane_is_cb, bx, by) = match self.chroma_format {
-                    1 => (bi == 0, px / 2, py / 2),
-                    2 => (bi % 2 == 0, px / 2, py + (bi / 2) * 8),
-                    _ => (bi % 2 == 0, px + (bi / 2 % 2) * 8, py + (bi / 4) * 8),
+                    1 => (bi == 0, 0, 0),
+                    2 => (bi % 2 == 0, 0, (bi / 2) * 8),
+                    _ => (bi % 2 == 0, (bi / 2 % 2) * 8, (bi / 4) * 8),
                 };
-                let start = by * uv_stride + bx;
-                if start + 7 * uv_stride + 8 <= uv_size {
+                let uv_x = if self.chroma_format == 3 { px } else { px / 2 };
+                let start = uv_base + by * uv_row_stride + bx + uv_x;
+                if start + 7 * uv_row_stride + 8 <= uv_size {
                     let plane = if plane_is_cb { &mut pic.u } else { &mut pic.v };
-                    let dest = &mut plane[start..start + 8 * uv_stride];
+                    let dest = &mut plane[start..start + 8 * uv_row_stride];
                     if self.mb.intra {
-                        idct::idct_put(b, dest, uv_stride);
+                        idct::idct_put(b, dest, uv_row_stride);
                     } else {
-                        idct::idct_add(b, dest, uv_stride);
+                        idct::idct_add(b, dest, uv_row_stride);
                     }
                 }
             }
-            if mb_x == 4 && mb_y == 1 {}
         }
         self.cur_pic = Some(pic);
         Ok(())
     }
 
-    fn motion_compensate(&self, pic: &mut Picture, px: usize, py: usize) -> Result<()> {
-        let (have_forward, have_backward) = match self.pict_type {
-            2 => (true, false),
-            3 => (
-                self.mb.mv_dir & MV_DIR_FORWARD != 0,
-                self.mb.mv_dir & MV_DIR_BACKWARD != 0,
-            ),
-            _ => (false, false),
+    /// Dispatch one direction of motion compensation. Mirrors FFmpeg's
+    /// `mpv_motion_internal()` switch on `s->mv_type`, including the
+    /// field/frame addressing used for MPEG-2 field pictures.
+    fn motion_compensate(&self, pic: &mut Picture, mb_x: usize, mb_y: usize) -> Result<()> {
+        let field_pic = self.picture_structure != PICT_FRAME;
+        let parity = usize::from(self.picture_structure.saturating_sub(1));
+        let field_row = mb_y >> 1;
+        let have_forward = match self.pict_type {
+            2 => true,
+            3 => self.mb.mv_dir & MV_DIR_FORWARD != 0,
+            _ => false,
+        };
+        let have_backward = self.pict_type == 3 && self.mb.mv_dir & MV_DIR_BACKWARD != 0;
+
+        // FFmpeg's mpv_motion_internal() uses the *other field of the current
+        // frame* as the reference for a second-field P prediction whose
+        // field_select points at the opposite parity. cur_pic is both source
+        // and destination there, so take a snapshot before any writes.
+        // (mpegvideo_motion.c:748-756 and 800-808.)
+        let opposite_field = |fs: usize| {
+            field_pic
+                && self.pict_type != 3
+                && !self.first_field
+                && self.picture_structure != fs as u8 + 1
+        };
+        let needs_snapshot =
+            (0..2).any(|d| (0..2).any(|i| opposite_field(self.mb.field_select[d][i])));
+        let cur_snap = if needs_snapshot {
+            Some(pic.clone())
+        } else {
+            None
+        };
+        let get_ref = |dir: usize, fs: usize| -> Option<&Picture> {
+            if opposite_field(fs) {
+                cur_snap.as_ref()
+            } else if dir == 0 {
+                self.last_pic.as_ref().or(self.next_pic.as_ref())
+            } else {
+                self.next_pic.as_ref()
+            }
         };
 
-        if have_forward {
-            let Some(r) = self.last_pic.as_ref().or(self.next_pic.as_ref()) else {
-                return Ok(());
+        for dir in 0..2 {
+            let have = if dir == 0 {
+                have_forward
+            } else {
+                have_backward
             };
-            self.do_motion(pic, r, px, py, 0, false)?;
-        }
-        if have_backward {
-            let Some(r) = self.next_pic.as_ref() else {
-                return Ok(());
-            };
+            if !have {
+                continue;
+            }
             // FFmpeg switches to avg_pixels only after a forward prediction
             // has written the destination; backward-only MBs use put_pixels.
-            self.do_motion(pic, r, px, py, 1, have_forward)?;
+            let avg = dir == 1 && have_forward;
+            match self.mb.mv_type {
+                0 => {
+                    if let Some(r) = get_ref(dir, 0) {
+                        let geom = self.geom_frame_frame(mb_x, mb_y);
+                        let mv = self.mb.mv[dir][0];
+                        self.apply_mc(pic, r, geom, mv[0], mv[1], avg);
+                    }
+                }
+                3 => {
+                    // Field prediction (MT_FIELD).
+                    if field_pic {
+                        let fs = self.mb.field_select[dir][0];
+                        if let Some(r) = get_ref(dir, fs) {
+                            let geom = self.geom_field_field(mb_x, field_row, parity, fs);
+                            let mv = self.mb.mv[dir][0];
+                            self.apply_mc(pic, r, geom, mv[0], mv[1], avg);
+                        }
+                    } else {
+                        for i in 0..2 {
+                            let fs = self.mb.field_select[dir][i];
+                            if let Some(r) = get_ref(dir, fs) {
+                                let geom = self.geom_frame_field(mb_x, mb_y, i, fs);
+                                let mv = self.mb.mv[dir][i];
+                                self.apply_mc(pic, r, geom, mv[0], mv[1], avg);
+                            }
+                        }
+                    }
+                }
+                2 => {
+                    // Frame prediction in a field picture (MT_FRAME ->
+                    // MV_TYPE_16X8): two frame MVs, one per field half.
+                    for i in 0..2 {
+                        let fs = self.mb.field_select[dir][i];
+                        if let Some(r) = get_ref(dir, fs) {
+                            let geom = self.geom_field_frame(mb_x, field_row, parity, i, fs);
+                            let mv = self.mb.mv[dir][i];
+                            self.apply_mc(pic, r, geom, mv[0], mv[1], avg);
+                        }
+                    }
+                }
+                4 => {
+                    // DMV: two field predictions; the second averages with
+                    // what the first wrote (mpegvideo_motion.c:785-812).
+                    if field_pic {
+                        for i in 0..2 {
+                            let fs = usize::from(self.picture_structure != i as u8 + 1);
+                            // For the second DMV half FFmpeg always switches
+                            // to cur_pic when decoding the second field.
+                            let r = if i > 0 && !self.first_field {
+                                cur_snap.as_ref().or_else(|| get_ref(dir, fs))
+                            } else {
+                                get_ref(dir, fs)
+                            };
+                            if let Some(r) = r {
+                                let geom = self.geom_field_field(mb_x, field_row, parity, fs);
+                                let mv = self.mb.mv[dir][2 * i];
+                                self.apply_mc(pic, r, geom, mv[0], mv[1], avg || i > 0);
+                            }
+                        }
+                    } else {
+                        for i in 0..2 {
+                            for j in 0..2 {
+                                let fs = j ^ i;
+                                if let Some(r) = get_ref(dir, fs) {
+                                    let geom = self.geom_frame_field(mb_x, mb_y, j, fs);
+                                    let mv = self.mb.mv[dir][2 * i + j];
+                                    self.apply_mc(pic, r, geom, mv[0], mv[1], avg || i > 0);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
 
-    fn do_motion(
-        &self,
-        pic: &mut Picture,
-        r: &Picture,
-        px: usize,
-        py: usize,
-        dir: usize,
-        avg: bool,
-    ) -> Result<()> {
-        let stride = pic.width;
-        let uv_stride = pic.chroma_w;
-        let ref_stride = r.width;
-        let ref_uv_stride = r.chroma_w;
+    // Geometry helpers mirroring mpegvideo_motion.c:mpeg_motion_internal().
+    // `sx0`/`sy0` are the MC source position before the MV is applied;
+    // `sy0` is in units of `y_stride` (field rows when field_based).
 
-        let (mx, my) = (self.mb.mv[dir][0][0], self.mb.mv[dir][0][1]);
-        let sx_base = px as i32 + (mx >> 1);
-        let sy_base = py as i32 + (my >> 1);
-        if (sx_base as u32) >= (r.width as i32 - (mx & 1) - 15).max(0) as u32
-            || (sy_base as u32) >= (r.height as i32 - (my & 1) - 15).max(0) as u32
+    fn geom_frame_frame(&self, mb_x: usize, mb_y: usize) -> McGeom {
+        let stride = self.mb_width * 16;
+        let uv_stride = match self.chroma_format {
+            3 => stride,
+            _ => stride / 2,
+        };
+        let px = mb_x * 16;
+        let py = mb_y * 16;
+        let uv_x = if self.chroma_format == 3 { px } else { px / 2 };
+        let uv_y = if self.chroma_format == 1 { py / 2 } else { py };
+        McGeom {
+            dy: py * stride + px,
+            sy: py * stride + px,
+            y_stride: stride,
+            duv: uv_y * uv_stride + uv_x,
+            suv: uv_y * uv_stride + uv_x,
+            uv_stride,
+            sx0: px as i32,
+            sy0: py as i32,
+            h: 16,
+            field_based: false,
+        }
+    }
+
+    fn geom_frame_field(&self, mb_x: usize, mb_y: usize, i: usize, fs: usize) -> McGeom {
+        let stride = self.mb_width * 16;
+        let uv_stride = match self.chroma_format {
+            3 => stride,
+            _ => stride / 2,
+        };
+        let px = mb_x * 16;
+        let py = mb_y * 16;
+        let uv_x = if self.chroma_format == 3 { px } else { px / 2 };
+        let uv_y = if self.chroma_format == 1 { py / 2 } else { py };
+        McGeom {
+            dy: py * stride + px + i * stride,
+            sy: py * stride + px + fs * stride,
+            y_stride: stride * 2,
+            duv: uv_y * uv_stride + uv_x + i * uv_stride,
+            suv: uv_y * uv_stride + uv_x + fs * uv_stride,
+            uv_stride: uv_stride * 2,
+            sx0: px as i32,
+            sy0: (mb_y * 8) as i32,
+            h: 8,
+            field_based: true,
+        }
+    }
+
+    fn geom_field_field(&self, mb_x: usize, field_row: usize, parity: usize, fs: usize) -> McGeom {
+        let stride = self.mb_width * 16;
+        let uv_stride = match self.chroma_format {
+            3 => stride,
+            _ => stride / 2,
+        };
+        let px = mb_x * 16;
+        let y_base = field_row * 16 * stride * 2;
+        let uv_x = if self.chroma_format == 3 { px } else { px / 2 };
+        let uv_rows = if self.chroma_format == 1 { 8 } else { 16 };
+        let uv_base = field_row * uv_rows * uv_stride * 2;
+        McGeom {
+            dy: y_base + parity * stride + px,
+            sy: y_base + fs * stride + px,
+            y_stride: stride * 2,
+            duv: uv_base + parity * uv_stride + uv_x,
+            suv: uv_base + fs * uv_stride + uv_x,
+            uv_stride: uv_stride * 2,
+            sx0: px as i32,
+            sy0: (field_row * 16) as i32,
+            h: 16,
+            field_based: true,
+        }
+    }
+
+    fn geom_field_frame(
+        &self,
+        mb_x: usize,
+        field_row: usize,
+        parity: usize,
+        i: usize,
+        fs: usize,
+    ) -> McGeom {
+        let stride = self.mb_width * 16;
+        let uv_stride = match self.chroma_format {
+            3 => stride,
+            _ => stride / 2,
+        };
+        let px = mb_x * 16;
+        let y_base = (field_row * 16 + i * 8) * stride * 2;
+        let uv_x = if self.chroma_format == 3 { px } else { px / 2 };
+        let uv_base = if self.chroma_format == 1 {
+            (field_row * 8 + i * 4) * uv_stride * 2
+        } else {
+            (field_row * 16 + i * 8) * uv_stride * 2
+        };
+        McGeom {
+            dy: y_base + parity * stride + px,
+            sy: y_base + fs * stride + px,
+            y_stride: stride * 2,
+            duv: uv_base + parity * uv_stride + uv_x,
+            suv: uv_base + fs * uv_stride + uv_x,
+            uv_stride: uv_stride * 2,
+            sx0: px as i32,
+            sy0: (field_row * 16 + i * 8) as i32,
+            h: 8,
+            field_based: true,
+        }
+    }
+
+    /// Apply a single half-pel motion-compensated block, including the
+    /// chroma MV scaling for 4:2:0 / 4:2:2 / 4:4:4.
+    fn apply_mc(&self, pic: &mut Picture, r: &Picture, geom: McGeom, mx: i32, my: i32, avg: bool) {
+        // MPEG skips the whole MB prediction when the source block leaves
+        // the coded picture (mpegvideo_motion.c:157-163).
+        let sx = geom.sx0 + (mx >> 1);
+        let sy = geom.sy0 + (my >> 1);
+        let v_edge = if geom.field_based {
+            r.height / 2
+        } else {
+            r.height
+        };
+        if (sx as u32) >= (r.width as i32 - (mx & 1) - 15).max(0) as u32
+            || (sy as u32) >= (v_edge as i32 - (my & 1) - geom.h as i32 + 1).max(0) as u32
         {
-            return Ok(());
+            return;
         }
 
-        let dxy = (((my & 1) << 1) | (mx & 1)) as usize;
-        mc_pixels(
-            &r.y, ref_stride, sx_base, sy_base, &mut pic.y, stride, px, py, 16, 16, dxy, avg,
+        mc_plane(
+            &r.y,
+            geom.sy,
+            geom.y_stride,
+            &mut pic.y,
+            geom.dy,
+            geom.y_stride,
+            16,
+            geom.h,
+            mx,
+            my,
+            avg,
         );
-
-        let cmx = mx / 2;
-        let cmy = my / 2;
-        let uv_dxy = (((cmy & 1) << 1) | (cmx & 1)) as usize;
-        let csx = px as i32 / 2 + (cmx >> 1);
-        let csy = py as i32 / 2 + (cmy >> 1);
-        mc_pixels(
+        let (cmx, cmy) = match self.chroma_format {
+            1 => (mx / 2, my / 2),
+            2 => (mx / 2, my),
+            _ => (mx, my),
+        };
+        let cw = if self.chroma_format == 3 { 16 } else { 8 };
+        let ch = if self.chroma_format == 1 {
+            geom.h / 2
+        } else {
+            geom.h
+        };
+        mc_plane(
             &r.u,
-            ref_uv_stride,
-            csx,
-            csy,
+            geom.suv,
+            geom.uv_stride,
             &mut pic.u,
-            uv_stride,
-            px / 2,
-            py / 2,
-            8,
-            8,
-            uv_dxy,
+            geom.duv,
+            geom.uv_stride,
+            cw,
+            ch,
+            cmx,
+            cmy,
             avg,
         );
-        mc_pixels(
+        mc_plane(
             &r.v,
-            ref_uv_stride,
-            csx,
-            csy,
+            geom.suv,
+            geom.uv_stride,
             &mut pic.v,
-            uv_stride,
-            px / 2,
-            py / 2,
-            8,
-            8,
-            uv_dxy,
+            geom.duv,
+            geom.uv_stride,
+            cw,
+            ch,
+            cmx,
+            cmy,
             avg,
         );
-        Ok(())
     }
 
     // ---------------------------------------------------------------------
     // Output
     // ---------------------------------------------------------------------
 
-    fn picture_to_frame(&self, pic: &Picture) -> Frame {
+    /// Queue a completed frame for output in display order. FFmpeg's
+    /// `slice_end()` emits B frames immediately and delays I/P frames by one
+    /// frame, so the final stream is ordered by `temporal_ref`, not by decode
+    /// order. A frame is released once a higher `temporal_ref` has been seen.
+    fn enqueue_frame(&mut self, temporal: u16, pict_type: u8, frame: Frame) {
+        // MPEG-2 temporal_ref is 10 bits and restarts at each GOP. A new I
+        // frame whose temporal_ref is not greater than the previous one marks
+        // a new GOP (and, at 1023, a wrap).
+        let t = i64::from(temporal);
+        if pict_type == 1 && t <= i64::from(self.last_temporal) {
+            self.temporal_offset += 1024;
+        }
+        self.last_temporal = i32::from(temporal);
+        let key = t + self.temporal_offset;
+        self.reorder.push((key, frame));
+        self.max_temporal = self.max_temporal.max(key);
+        // Stable partition: release every buffered frame older than the
+        // high-water mark, in temporal order.
+        let mut ready = Vec::new();
+        let mut keep = Vec::new();
+        for item in self.reorder.drain(..) {
+            if item.0 < self.max_temporal {
+                ready.push(item);
+            } else {
+                keep.push(item);
+            }
+        }
+        ready.sort_by_key(|(k, _)| *k);
+        for (_, frame) in ready {
+            self.frames.push_back(frame);
+        }
+        self.reorder = keep;
+    }
+
+    /// Drain the reorder buffer at EOS.
+    fn flush_reorder(&mut self) {
+        self.reorder.sort_by_key(|(k, _)| *k);
+        for (_, frame) in self.reorder.drain(..) {
+            self.frames.push_back(frame);
+        }
+    }
+
+    fn picture_to_frame(&self, pic: &Picture, pts: i64, pict_type: u8) -> Frame {
         let width = self.width;
         let height = self.height;
         let format = match self.chroma_format {
@@ -1210,13 +1586,12 @@ impl Mpeg12Decoder {
         let y_plane = copy_plane(&pic.y, pic.width, width, height);
         let u_plane = copy_plane(&pic.u, pic.chroma_w, chroma_w, chroma_h);
         let v_plane = copy_plane(&pic.v, pic.chroma_w, chroma_w, chroma_h);
-
         let mut frame = Frame::new_video(width as u32, height as u32, format);
-        frame.pts = self.packet_pts;
-        frame.best_effort_timestamp = self.packet_pts;
-        frame.pkt_dts = self.packet_pts;
+        frame.pts = pts;
+        frame.best_effort_timestamp = pts;
+        frame.pkt_dts = pts;
         frame.time_base = Rational::new(1, 90000);
-        let pict_type = match pic.pict_type {
+        let frame_type = match pict_type {
             1 => PictureType::I,
             2 => PictureType::P,
             3 => PictureType::B,
@@ -1224,10 +1599,18 @@ impl Mpeg12Decoder {
         };
         if let FrameData::Video(ref mut video) = frame.data {
             video.planes = vec![y_plane, u_plane, v_plane];
-            video.picture_type = pict_type;
+            video.picture_type = frame_type;
         }
-        if pic.pict_type == 1 {
+        if pict_type == 1 {
             frame.flags |= FrameFlags::KEY;
+        }
+        // FFmpeg's ff_mpv_frame_start(): a field picture pair is an
+        // interlaced frame. `repeat_pict` is handled below.
+        if self.picture_structure != PICT_FRAME && !self.progressive_frame {
+            frame.flags |= FrameFlags::INTERLACED;
+            if self.top_field_first {
+                frame.flags |= FrameFlags::TOP_FIRST;
+            }
         }
         frame.repeat_pict = if self.repeat_first_field {
             if self.progressive_sequence {
@@ -1274,12 +1657,19 @@ impl Decoder for Mpeg12Decoder {
         self.pending_start = 0;
         self.scan_pos = 0;
         self.frames.clear();
+        self.reorder.clear();
+        self.max_temporal = -1;
+        self.temporal_offset = 0;
+        self.last_temporal = 0;
         self.draining = false;
         self.picture_in_progress = false;
         self.cur_pic = None;
         self.last_pic = None;
         self.next_pic = None;
         self.pict_type = 0;
+        self.first_field = false;
+        self.pair_pts = wedeo_core::timestamp::NOPTS_VALUE;
+        self.pair_pict_type = 0;
         self.sequence_seen = false;
     }
 
@@ -1667,41 +2057,45 @@ fn skip_1stop_8data_bits(gb: &mut BitReader<'_>) -> Result<()> {
     Ok(())
 }
 
-// Mirrors FFmpeg's `put_pixels_*` signature (src/dst geometry + mode).
+/// Half-pel block copy, mirroring FFmpeg's `put_pixels_*` / `avg_pixels_*`
+/// DSP functions. `src_base`/`dst_base` are byte offsets already including
+/// MB position and (for field prediction) the field parity row.
 #[allow(clippy::too_many_arguments)]
-fn mc_pixels(
+fn mc_plane(
     src: &[u8],
+    src_base: usize,
     src_stride: usize,
-    src_x: i32,
-    src_y: i32,
     dst: &mut [u8],
+    dst_base: usize,
     dst_stride: usize,
-    dst_x: usize,
-    dst_y: usize,
     w: usize,
     h: usize,
-    dxy: usize,
+    mx: i32,
+    my: i32,
     avg: bool,
 ) {
+    let sx = mx >> 1;
+    let sy = my >> 1;
+    let dxy = (((my & 1) << 1) | (mx & 1)) as usize;
+    let src_origin = (src_base as i64 + sy as i64 * src_stride as i64 + sx as i64) as usize;
     for row in 0..h {
-        let sy = (src_y + row as i32) as usize;
-        let dy = dst_y + row;
+        let srow = src_origin + row * src_stride;
+        let drow = dst_base + row * dst_stride;
         for col in 0..w {
-            let sx = (src_x + col as i32) as usize;
-            let a = src[sy * src_stride + sx] as i32;
+            let a = src[srow + col] as i32;
             let v = match dxy {
                 0 => a,
-                1 => (a + src[sy * src_stride + sx + 1] as i32 + 1) >> 1,
-                2 => (a + src[(sy + 1) * src_stride + sx] as i32 + 1) >> 1,
+                1 => (a + src[srow + col + 1] as i32 + 1) >> 1,
+                2 => (a + src[srow + src_stride + col] as i32 + 1) >> 1,
                 3 => {
-                    let b = src[sy * src_stride + sx + 1] as i32;
-                    let c = src[(sy + 1) * src_stride + sx] as i32;
-                    let d = src[(sy + 1) * src_stride + sx + 1] as i32;
+                    let b = src[srow + col + 1] as i32;
+                    let c = src[srow + src_stride + col] as i32;
+                    let d = src[srow + src_stride + col + 1] as i32;
                     (a + b + c + d + 2) >> 2
                 }
                 _ => a,
             };
-            let p = &mut dst[dy * dst_stride + dst_x + col];
+            let p = &mut dst[drow + col];
             *p = if avg {
                 ((*p as i32 + v + 1) >> 1) as u8
             } else {

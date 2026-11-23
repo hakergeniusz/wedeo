@@ -4,8 +4,10 @@
 //! * checks bitexact framecrc parity on a deterministic, frame-picture
 //!   MPEG-2 elementary stream (I and P frames, no B frames);
 //! * decodes the available FATE MPEG-2 samples and reports per-sample
-//!   conformance counts (field pictures and 4:2:2 remain partially supported,
-//!   so those are sanity-checked rather than asserted bitexact).
+//!   conformance counts. Complementary field pictures are paired into one
+//!   output frame and 4:2:2 chroma is bitexact; B frames still show small
+//!   (+/-1-3) prediction differences, so those samples are sanity-checked
+//!   rather than asserted bitexact.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -133,6 +135,10 @@ fn ffmpeg_framecrc(path: &Path) -> Vec<String> {
             "-map",
             "0:v:0",
             "-an",
+            // The default framerate logic drops frames with negative pts
+            // (I/P frames preceding B frames) and shifts the comparison.
+            "-fps_mode",
+            "passthrough",
             "-f",
             "framecrc",
             "-",
