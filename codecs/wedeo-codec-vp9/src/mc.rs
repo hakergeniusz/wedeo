@@ -545,10 +545,25 @@ pub fn inter_pred(
             None => return,
         };
 
-        // MC ref1 into temp buffers, then average with fb.
-        let mut tmp_y = vec![0u8; fb.y_stride * bh];
-        let mut tmp_u = vec![0u8; fb.uv_stride * uv_bh];
-        let mut tmp_v = vec![0u8; fb.uv_stride * uv_bh];
+        // MC ref1 into temp buffers, then average with fb. For sub-8x8
+        // blocks the MC helpers write each sub-block at a relative offset
+        // inside the temp buffer, so the buffer (and the subsequent
+        // averaging) must cover the full 8x8 luma / 4x4 chroma region.
+        // Using the single-sub-block bw/bh here caused OOB writes and
+        // left all but the first sub-block un-averaged.
+        let (avg_bw, avg_bh) = if bs > BlockSize::Bs8x8 as usize {
+            (8, 8)
+        } else {
+            (bw, bh)
+        };
+        let (avg_uv_bw, avg_uv_bh) = if bs > BlockSize::Bs8x8 as usize {
+            (4, 4)
+        } else {
+            (uv_bw, uv_bh)
+        };
+        let mut tmp_y = vec![0u8; fb.y_stride * avg_bh];
+        let mut tmp_u = vec![0u8; fb.uv_stride * avg_uv_bh];
+        let mut tmp_v = vec![0u8; fb.uv_stride * avg_uv_bh];
 
         // Luma ref1 — per-sub-block for sub-8x8, single MC for >=8x8.
         if bs > BlockSize::Bs8x8 as usize {
@@ -587,8 +602,8 @@ pub fn inter_pred(
             fb.y_stride,
             &tmp_y,
             fb.y_stride,
-            bw,
-            bh,
+            avg_bw,
+            avg_bh,
         );
 
         // Chroma ref1 — per-sub-block averaging for sub-8x8.
@@ -640,16 +655,16 @@ pub fn inter_pred(
             fb.uv_stride,
             &tmp_u,
             fb.uv_stride,
-            uv_bw,
-            uv_bh,
+            avg_uv_bw,
+            avg_uv_bh,
         );
         avg_block(
             &mut fb.v[u_off..],
             fb.uv_stride,
             &tmp_v,
             fb.uv_stride,
-            uv_bw,
-            uv_bh,
+            avg_uv_bw,
+            avg_uv_bh,
         );
     }
 }
