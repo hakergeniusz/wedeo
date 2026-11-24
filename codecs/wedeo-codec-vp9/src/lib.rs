@@ -19,4 +19,5 @@ pub mod prob;
 pub mod quant;
 pub mod recon;
 pub mod refs;
+pub mod simd;
 pub mod types;

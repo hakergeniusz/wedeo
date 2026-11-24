@@ -3,6 +3,8 @@
 // 8-tap subpel interpolation, edge emulation, and inter prediction dispatch.
 // Translated from FFmpeg's vp9recon.c (mc_luma_unscaled, mc_chroma_unscaled),
 // vp9_mc_template.c (inter_pred), and vp9dsp_template.c (8-tap filter kernels).
+// The 8-tap kernels and compound average are runtime-dispatched through
+// `crate::simd` (SSE2/AVX2/NEON, scalar fallback), preserving bit-exact output.
 //
 // Only 8-bit unscaled prediction is implemented. Scaled prediction (when ref
 // dimensions differ from current frame) returns an error.
@@ -25,6 +27,8 @@ use crate::types::BlockSize;
 ///
 /// `src` must have at least `w + 7` accessible columns (3 before, 4 after).
 /// The filter operates on `src[x - 3 .. x + 4]` for each output pixel.
+/// Dispatched at runtime to the best available SIMD backend (SSE2/AVX2/NEON),
+/// with a bit-exact scalar fallback.
 fn filter_h_8tap(
     dst: &mut [u8],
     dst_stride: usize,
@@ -34,26 +38,13 @@ fn filter_h_8tap(
     h: usize,
     filter: &[i16; 8],
 ) {
-    for y in 0..h {
-        let src_row = &src[y * src_stride..];
-        let dst_row = &mut dst[y * dst_stride..];
-        for x in 0..w {
-            let val = filter[0] as i32 * src_row[x] as i32     // x + (-3) + 3 = x
-                + filter[1] as i32 * src_row[x + 1] as i32
-                + filter[2] as i32 * src_row[x + 2] as i32
-                + filter[3] as i32 * src_row[x + 3] as i32
-                + filter[4] as i32 * src_row[x + 4] as i32
-                + filter[5] as i32 * src_row[x + 5] as i32
-                + filter[6] as i32 * src_row[x + 6] as i32
-                + filter[7] as i32 * src_row[x + 7] as i32;
-            dst_row[x] = ((val + 64) >> 7).clamp(0, 255) as u8;
-        }
-    }
+    crate::simd::filter_h_8tap(dst, dst_stride, src, src_stride, w, h, filter);
 }
 
 /// Apply an 8-tap filter vertically (put, not avg).
 ///
 /// `src` must have at least `h + 7` accessible rows (3 before, 4 after).
+/// Runtime-dispatched like the horizontal filter.
 fn filter_v_8tap(
     dst: &mut [u8],
     dst_stride: usize,
@@ -63,20 +54,7 @@ fn filter_v_8tap(
     h: usize,
     filter: &[i16; 8],
 ) {
-    for y in 0..h {
-        let dst_row = &mut dst[y * dst_stride..];
-        for x in 0..w {
-            let val = filter[0] as i32 * src[y * src_stride + x] as i32
-                + filter[1] as i32 * src[(y + 1) * src_stride + x] as i32
-                + filter[2] as i32 * src[(y + 2) * src_stride + x] as i32
-                + filter[3] as i32 * src[(y + 3) * src_stride + x] as i32
-                + filter[4] as i32 * src[(y + 4) * src_stride + x] as i32
-                + filter[5] as i32 * src[(y + 5) * src_stride + x] as i32
-                + filter[6] as i32 * src[(y + 6) * src_stride + x] as i32
-                + filter[7] as i32 * src[(y + 7) * src_stride + x] as i32;
-            dst_row[x] = ((val + 64) >> 7).clamp(0, 255) as u8;
-        }
-    }
+    crate::simd::filter_v_8tap(dst, dst_stride, src, src_stride, w, h, filter);
 }
 
 /// Apply an 8-tap filter in both dimensions (2-pass: horizontal into i16
@@ -95,45 +73,14 @@ fn filter_hv_8tap(
     h_filter: &[i16; 8],
     v_filter: &[i16; 8],
 ) {
-    // Horizontal pass into i16 intermediate (stride = 64, height = h + 7).
-    let tmp_h = h + 7;
-    let mut tmp = [0i16; 64 * 71]; // 64 * (64 + 7) max
-    for y in 0..tmp_h {
-        let src_row = &src[y * src_stride..];
-        for x in 0..w {
-            let val = h_filter[0] as i32 * src_row[x] as i32
-                + h_filter[1] as i32 * src_row[x + 1] as i32
-                + h_filter[2] as i32 * src_row[x + 2] as i32
-                + h_filter[3] as i32 * src_row[x + 3] as i32
-                + h_filter[4] as i32 * src_row[x + 4] as i32
-                + h_filter[5] as i32 * src_row[x + 5] as i32
-                + h_filter[6] as i32 * src_row[x + 6] as i32
-                + h_filter[7] as i32 * src_row[x + 7] as i32;
-            // Store as i16 (no clipping yet; that happens after vertical pass).
-            // FFmpeg: FILTER_8TAP returns clipped pixel, but the C template
-            // stores into `int16_t tmp[]` without clipping for the 2D case.
-            // Actually in the C code tmp_ptr[x] = FILTER_8TAP which clips to pixel.
-            // For 8-bit, pixel = uint8_t, so the clip is to [0, 255].
-            // But the intermediate value is stored as int16_t for the vertical pass.
-            tmp[y * 64 + x] = ((val + 64) >> 7).clamp(0, 255) as i16;
-        }
-    }
-
-    // Vertical pass from i16 intermediate to u8 output.
-    for y in 0..h {
-        let dst_row = &mut dst[y * dst_stride..];
-        for x in 0..w {
-            let val = v_filter[0] as i32 * tmp[y * 64 + x] as i32
-                + v_filter[1] as i32 * tmp[(y + 1) * 64 + x] as i32
-                + v_filter[2] as i32 * tmp[(y + 2) * 64 + x] as i32
-                + v_filter[3] as i32 * tmp[(y + 3) * 64 + x] as i32
-                + v_filter[4] as i32 * tmp[(y + 4) * 64 + x] as i32
-                + v_filter[5] as i32 * tmp[(y + 5) * 64 + x] as i32
-                + v_filter[6] as i32 * tmp[(y + 6) * 64 + x] as i32
-                + v_filter[7] as i32 * tmp[(y + 7) * 64 + x] as i32;
-            dst_row[x] = ((val + 64) >> 7).clamp(0, 255) as u8;
-        }
-    }
+    // FFmpeg's do_8tap_2d_c uses `pixel tmp[64 * 71]`: the horizontal pass
+    // writes h+7 rows (max 71) of up to 64 clipped u8 pixels, then the
+    // vertical pass reads 8 rows above the current one. SIMD loads touch 8
+    // columns per lane, so use 64*72 bytes of zeroed scratch to stay in bounds.
+    let mut tmp = [0u8; 64 * 72];
+    crate::simd::filter_hv_8tap(
+        dst, dst_stride, src, src_stride, w, h, h_filter, v_filter, &mut tmp,
+    );
 }
 
 /// Simple pixel copy (integer-pel, no filtering).
@@ -152,14 +99,10 @@ fn copy_block(
 }
 
 /// Average dst with src: `dst[i] = (dst[i] + src[i] + 1) >> 1`.
+/// Runtime-dispatched: SSE2/AVX2 `_mm_avg_epu8` and NEON `vrhadd` compute the
+/// identical round-up-on-tie result as the scalar fallback.
 fn avg_block(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize) {
-    for y in 0..h {
-        for x in 0..w {
-            let d = dst[y * dst_stride + x] as u16;
-            let s = src[y * src_stride + x] as u16;
-            dst[y * dst_stride + x] = ((d + s + 1) >> 1) as u8;
-        }
-    }
+    crate::simd::avg_block(dst, dst_stride, src, src_stride, w, h);
 }
 
 // ---------------------------------------------------------------------------
