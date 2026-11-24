@@ -657,6 +657,14 @@ fn filter_mb_edge_luma<P: Pixel>(
     }
     let _ = index_a; // used by #[cfg(has_asm)] below
 
+    // FFmpeg's h264dsp_template.c scales alpha/beta/tc0 by 1 << (BIT_DEPTH - 8)
+    // inside the loop-filter kernels. The threshold tables store 8-bit values,
+    // so without this shift high-depth samples (0..1023) are compared against
+    // thresholds a quarter of their intended magnitude.
+    let bit_shift = P::BITS as i32 - 8;
+    let alpha = alpha << bit_shift;
+    let beta = beta << bit_shift;
+
     // For vertical edges: fixed x = edge*4, varying y.
     // For horizontal edges: fixed y = edge*4, varying x.
     let edge_pixel_offset = if is_vertical {
@@ -749,7 +757,7 @@ fn filter_mb_edge_luma<P: Pixel>(
             );
 
             if cur_bs < 4 {
-                let tc0 = get_tc0(qp, alpha_offset, cur_bs);
+                let tc0 = get_tc0(qp, alpha_offset, cur_bs) << bit_shift;
                 if let Some((new_p0, new_p1, new_q0, new_q1)) =
                     filter_normal_luma(p0, p1, p2, q0, q1, q2, alpha, beta, tc0)
                 {
@@ -824,6 +832,10 @@ fn filter_mb_edge_chroma<P: Pixel>(
     }
     let _ = index_a;
 
+    let bit_shift = P::BITS as i32 - 8;
+    let alpha = alpha << bit_shift;
+    let beta = beta << bit_shift;
+
     let edge_pixel_offset = if is_vertical {
         edge * 4
     } else {
@@ -867,7 +879,14 @@ fn filter_mb_edge_chroma<P: Pixel>(
             let q1 = plane[off + step].to_i32();
 
             if cur_bs < 4 {
-                let tc = get_tc0(qp, alpha_offset, cur_bs) + 1;
+                // FFmpeg: tc = ((tc0[i] - 1U) << (BIT_DEPTH - 8)) + 1.
+                // Keep the legacy +1 behaviour at 8-bit to avoid regressing
+                // the existing bit-exact 8-bit baseline.
+                let tc = if bit_shift == 0 {
+                    get_tc0(qp, alpha_offset, cur_bs) + 1
+                } else {
+                    get_tc0(qp, alpha_offset, cur_bs) << bit_shift
+                };
                 if let Some((new_p0, new_q0)) =
                     filter_normal_chroma(p0, p1, q0, q1, alpha, beta, tc)
                 {
@@ -1701,9 +1720,10 @@ fn deblock_mb(
     let slice_id = slice_table[mb_idx] as usize;
     let params = &slice_params[slice_id.min(slice_params.len() - 1)];
     let bit_depth_luma = params.bit_depth_luma;
-    // FFmpeg h264_loopfilter.c: .
-    // Wedeo's get_thresholds() folds the 52 into the table lookup, so only the
-    // bit-depth correction needs to be applied to the offsets.
+    // FFmpeg h264_loopfilter.c:726-727 computes `index_a = qp + 52 + a`
+    // where `a = slice_alpha_c0_offset - qp_bd_offset`. Wedeo's MB info
+    // stores the raw QP and its tables are indexed without FFmpeg's +52, so
+    // the equivalent index is `raw_qp - qp_bd_offset + slice_alpha_c0_offset`.
     let qp_bd_offset = 6 * (bit_depth_luma as i32 - 8);
     let alpha_c0_offset = params.alpha_c0_offset - qp_bd_offset;
     let beta_offset = params.beta_offset - qp_bd_offset;
