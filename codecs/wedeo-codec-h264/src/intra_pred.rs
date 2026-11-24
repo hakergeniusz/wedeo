@@ -1002,72 +1002,87 @@ pub fn predict_chroma_8x16<P: Pixel>(
     has_top: bool,
     has_left: bool,
 ) {
+    // FFmpeg ff_h264_check_intra_pred_mode (h264_parse.c:182-220) remaps the
+    // DC mode when an edge is unavailable:
+    //   top[]  = { LEFT_DC_PRED8x8, 1, -1, -1 }
+    //   left[] = { TOP_DC_PRED8x8, -1, 2, -1, DC_128_PRED8x8 }
+    // HOR/VERT/PLANE are only valid with their respective edges, so fall back
+    // to the flat 128 prediction when the edge is missing.
+    let mode = if !has_top {
+        match mode {
+            INTRA_CHROMA_DC => 4,                            // LEFT_DC_PRED8x8
+            INTRA_CHROMA_VERTICAL | INTRA_CHROMA_PLANE => 6, // DC_128_PRED8x8
+            _ => mode,
+        }
+    } else {
+        mode
+    };
+    let mode = if !has_left {
+        match mode {
+            INTRA_CHROMA_DC => 5, // TOP_DC_PRED8x8
+            4 => 6,               // LEFT_DC_PRED8x8 -> DC_128_PRED8x8
+            INTRA_CHROMA_HORIZONTAL | INTRA_CHROMA_PLANE => 6,
+            _ => mode,
+        }
+    } else {
+        mode
+    };
+
     match mode {
+        4..=6 => {
+            // FFmpeg pred8x16_{left,top,128}_dc (h264pred_template.c:535-619).
+            let mut dc = [0i32; 4];
+            match mode {
+                4 => {
+                    for (i, d) in dc.iter_mut().enumerate() {
+                        for j in 0..4 {
+                            *d += left[4 * i + j].to_i32();
+                        }
+                    }
+                }
+                5 => {
+                    for i in 0..4 {
+                        dc[0] += top[i].to_i32();
+                        dc[1] += top[4 + i].to_i32();
+                    }
+                }
+                _ => {}
+            }
+            for y in 0..16usize {
+                let row = y * stride;
+                let (lv, rv) = match mode {
+                    4 => {
+                        let d = (dc[y >> 2] + 2) >> 2;
+                        (d, d)
+                    }
+                    5 => ((dc[0] + 2) >> 2, (dc[1] + 2) >> 2),
+                    _ => (P::MID, P::MID),
+                };
+                dst[row..row + 4].fill(P::from_i32(lv));
+                dst[row + 4..row + 8].fill(P::from_i32(rv));
+            }
+        }
         INTRA_CHROMA_DC => {
+            // Full pred8x16_dc: four 4-row bands, two column halves.
             let mut dc0 = 0i32;
             let mut dc1 = 0i32;
             let mut dc2 = 0i32;
             let mut dc3 = 0i32;
             let mut dc4 = 0i32;
-            if has_top {
-                for i in 0..4 {
-                    dc0 += top[i].to_i32() + if has_left { left[i].to_i32() } else { 0 };
-                    dc1 += top[4 + i].to_i32();
-                }
-            }
-            if has_left {
-                for i in 0..8 {
-                    match i {
-                        0..=3 => dc2 += left[4 + i].to_i32(),
-                        4..=7 => dc3 += left[i].to_i32(),
-                        _ => {}
-                    }
-                }
-                for i in 0..4 {
-                    dc4 += left[12 + i].to_i32();
-                }
+            for i in 0..4 {
+                dc0 += left[i].to_i32() + top[i].to_i32();
+                dc1 += top[4 + i].to_i32();
+                dc2 += left[4 + i].to_i32();
+                dc3 += left[8 + i].to_i32();
+                dc4 += left[12 + i].to_i32();
             }
             for y in 0..16usize {
                 let row = y * stride;
                 let (lv, rv) = match y {
-                    0..=3 => (
-                        (dc0 + 4) >> 3,
-                        if has_top { (dc1 + 2) >> 2 } else { P::MID },
-                    ),
-                    4..=7 => (
-                        if has_left { (dc2 + 2) >> 2 } else { P::MID },
-                        if has_top && has_left {
-                            (dc1 + dc2 + 4) >> 3
-                        } else if has_top {
-                            (dc1 + 2) >> 2
-                        } else {
-                            P::MID
-                        },
-                    ),
-                    8..=11 => (
-                        if has_left {
-                            ((if has_top { dc3 } else { dc0 }) + 2) >> 2
-                        } else {
-                            P::MID
-                        },
-                        if has_left {
-                            (dc1 + (if has_top { dc3 } else { dc0 }) + 4) >> 3
-                        } else {
-                            P::MID
-                        },
-                    ),
-                    _ => (
-                        if has_left {
-                            ((if has_top { dc4 } else { dc2 }) + 2) >> 2
-                        } else {
-                            P::MID
-                        },
-                        if has_left {
-                            (dc1 + (if has_top { dc4 } else { dc2 }) + 4) >> 3
-                        } else {
-                            P::MID
-                        },
-                    ),
+                    0..=3 => ((dc0 + 4) >> 3, (dc1 + 2) >> 2),
+                    4..=7 => ((dc2 + 2) >> 2, (dc1 + dc2 + 4) >> 3),
+                    8..=11 => ((dc3 + 2) >> 2, (dc1 + dc3 + 4) >> 3),
+                    _ => ((dc4 + 2) >> 2, (dc1 + dc4 + 4) >> 3),
                 };
                 dst[row..row + 4].fill(P::from_i32(lv));
                 dst[row + 4..row + 8].fill(P::from_i32(rv));
@@ -1086,7 +1101,9 @@ pub fn predict_chroma_8x16<P: Pixel>(
         INTRA_CHROMA_PLANE => {
             // FFmpeg FUNCC(pred8x16_plane).
             let mut h = top[4].to_i32() - top[2].to_i32();
-            let mut v = left[7].to_i32() - left[5].to_i32();
+            // FFmpeg pred8x16_plane: src1 = src + 8*stride - 1 (left[8]),
+            // src2 = src + 6*stride - 1 (left[6]).
+            let mut v = left[8].to_i32() - left[6].to_i32();
             for k in 2..=4usize {
                 let left_top = if k == 4 {
                     top_left.to_i32()
