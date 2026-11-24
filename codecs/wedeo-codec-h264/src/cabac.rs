@@ -487,6 +487,12 @@ impl CabacNeighborCtx {
         let nz_base = mb_idx * 40;
         self.nz_count[nz_base..nz_base + 40].copy_from_slice(nz);
         self.transform_8x8[mb_idx] = transform_8x8_flag;
+        trace!(
+            mb_idx,
+            cb = ?&nz[16..24],
+            cr = ?&nz[24..32],
+            "CABAC_STORE_NNZ"
+        );
     }
 
     /// Store intra4x4 right-column prediction modes for MBAFF left_block remapping.
@@ -1429,6 +1435,7 @@ fn get_cabac_cbf_ctx(
             left_block_option,
             chroma422,
         );
+        trace!(cat, block_idx, nza, nzb, chroma422, "CABAC_CBF_NNZ_CTX");
         if nza > 0 {
             ctx += 1;
         }
@@ -1476,9 +1483,12 @@ const LEFT_CHROMA_NZ_ROW: [[u8; 2]; 4] = [
 ///
 /// Returns (nz_left, nz_top).
 ///
+/// Public for the 4:2:2 conformance regression tests, which feed in the
+/// ground-truth cache values extracted from debug FFmpeg.
+///
 /// Reference: FFmpeg h264_mvpred.h:fill_decode_caches (non_zero_count_cache init).
 #[allow(clippy::too_many_arguments)] // mirrors FFmpeg fill_decode_caches parameter set
-fn get_nz_neighbors(
+pub fn get_nz_neighbors(
     cabac_nb: &CabacNeighborCtx,
     left_idx: Option<usize>,
     left_idx_bot: Option<usize>,
@@ -1529,30 +1539,72 @@ fn get_nz_neighbors(
         let blk_x = c_idx % 2;
         let blk_y = c_idx / 2;
 
-        let nza = if blk_x > 0 {
-            nz_cache[block_idx - 1]
-        } else {
-            let li = if blk_y < 2 { left_idx } else { left_idx_bot };
-            if let Some(li) = li {
-                let chroma_row =
-                    LEFT_CHROMA_NZ_ROW[left_block_option as usize][blk_y.min(1)] as usize;
-                let left_blk = base + chroma_row * 2 + 1;
-                cabac_nb.nz_count[li * 40 + left_blk]
+        if chroma422 {
+            // 4:2:2 chroma has four 4x4 rows per plane. FFmpeg's scan8 cache
+            // places Cb in rows 6..9 and Cr in rows 11..14, col 4/5, i.e. a
+            // 4x2 layout. `get_cabac_cbf_ctx` reads cache[scan8[idx] - 1] and
+            // cache[scan8[idx] - 8]:
+            //  - left: col 3 of the matching cache row, filled in
+            //    fill_decode_caches from the left MB's flat nnz slot
+            //    `base_ff + 4*row + 1` (h264_mvpred.h:715-719). Our flat
+            //    storage uses two entries per row, so that is `base + 2*row + 1`.
+            //  - top: row 5 (Cb) / row 10 (Cr) for the first chroma row,
+            //    filled from the top MB's *last* chroma row; all other rows
+            //    take the previous row from inside the current MB.
+            // Reference: FFmpeg h264_mvpred.h:686-733, h264_parse.h:40-54.
+            let nza = if blk_x > 0 {
+                nz_cache[block_idx - 1]
+            } else {
+                // left_block_options[option][8..12] uses the same four-row
+                // remapping for chroma as for luma in 4:2:2 (verified against
+                // debug FFmpeg: cache rows 6..9 left values come from flat
+                // nnz[17], [21], [25], [29] with left_block_options[0]).
+                let remapped_row = LEFT_LUMA_NZ_ROW[left_block_option as usize][blk_y] as usize;
+                let li = if blk_y < 2 { left_idx } else { left_idx_bot };
+                if let Some(li) = li {
+                    cabac_nb.nz_count[li * 40 + base + remapped_row * 2 + 1]
+                } else {
+                    unavail_nz
+                }
+            };
+
+            let nzb = if blk_y > 0 {
+                nz_cache[block_idx - 2]
+            } else if let Some(ti) = top_idx {
+                // Last chroma row of the top MB, matching FFmpeg's cache
+                // row 5/10 fill from nnz[28..31]/[44..47].
+                cabac_nb.nz_count[ti * 40 + base + 6 + blk_x]
             } else {
                 unavail_nz
-            }
-        };
+            };
 
-        let nzb = if blk_y > 0 {
-            nz_cache[block_idx - 2]
-        } else if let Some(ti) = top_idx {
-            let top_blk = base + 2 + blk_x;
-            cabac_nb.nz_count[ti * 40 + top_blk]
+            (nza, nzb)
         } else {
-            unavail_nz
-        };
+            let nza = if blk_x > 0 {
+                nz_cache[block_idx - 1]
+            } else {
+                let li = if blk_y < 2 { left_idx } else { left_idx_bot };
+                if let Some(li) = li {
+                    let chroma_row =
+                        LEFT_CHROMA_NZ_ROW[left_block_option as usize][blk_y.min(1)] as usize;
+                    let left_blk = base + chroma_row * 2 + 1;
+                    cabac_nb.nz_count[li * 40 + left_blk]
+                } else {
+                    unavail_nz
+                }
+            };
 
-        (nza, nzb)
+            let nzb = if blk_y > 0 {
+                nz_cache[block_idx - 2]
+            } else if let Some(ti) = top_idx {
+                let top_blk = base + 2 + blk_x;
+                cabac_nb.nz_count[ti * 40 + top_blk]
+            } else {
+                unavail_nz
+            };
+
+            (nza, nzb)
+        }
     }
 }
 
