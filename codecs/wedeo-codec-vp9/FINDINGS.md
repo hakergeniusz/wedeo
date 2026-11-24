@@ -77,3 +77,40 @@ ground truth to resolve.
   reference-frame dims (`vp9_mc_template.c:41`), so wedeo is already correct.
 
 No source changes remain; the worktree is clean. No conformance regression.
+
+## agent/w65: per-symbol ground truth and fixes
+
+Built a VP9-enabled debug FFmpeg (`libavcodec/vp9.c`, `--disable-optimizations
+--enable-debug=3 --disable-stripping --disable-asm`) and instrumented
+`decode_frame_header`, `decode_tiles`, and `ff_vp9_decode_block` with gated
+`av_log` calls. Extracted ground truth for `vp90-2-trac4359.webm`:
+
+```
+frame 0: off=33 size2=248 kf=1 tilelog=2,0 seg=1 segupd=1 segtemp=0
+frame 1: off=29 size2=304 kf=0 invis=1 refresh=0x04 tilelog=2,0
+         seg=1 segupd=1 segtemp=1  tile sizes 7395,5027,13510,9427
+```
+
+Root cause found: frames using `render_size_from_ref` inherit their dimensions
+from a reference slot. Wedeo parsed the header with `width=0`, so `sb_cols=0`
+and the tile-column increment bits were never consumed. That shifted every
+later uncompressed-header field: FFmpeg reads tile geometry `2,0` (4 cols x 1
+row) and `tile_data_offset=29+304=333`, while wedeo read `0,2` and offset 181
+(landing in compressed header data, yielding the fake 2.9 GB tile size).
+`decode_frame_header` now takes a reference-dimension callback, matching
+`vp9.c:625-637`.
+
+Instrumented block symbols for the invisible frame now match FFmpeg field for
+field for the first decoded blocks (`bs/seg/skip/intra/tx/uvtx/filter`), so
+the remaining hidden-frame pixel mismatch is in reconstruction, not parsing.
+
+Second fix: FFmpeg retains and temporally predicts the segmentation map
+(`vp9.c:1618-1670`, `vp9block.c:98-141`). Wedeo always decoded a fresh tree
+and used segment 0 when `update_map=0`. Added persistent per-4x4 segmap state
+and the `pred_prob` temporal path.
+
+Conformance (same measurement script, 225 VP9 WebM vectors):
+before 165/225 files, 1414/2027 frames; after 165/225 files, 1434/2027 frames.
+No file regressed; four vectors that previously aborted now decode fully.
+`vp90-2-trac4359.webm` still differs in pixels after decoding, and the
+size-03 +/-1 luma deltas plus `intra-only` wrong-reference issue remain open.

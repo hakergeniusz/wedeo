@@ -120,6 +120,12 @@ pub struct TileDecodeContext<'a> {
     pub prev_cols_4x4: usize,
     /// Sign bias per reference frame (from header).
     pub sign_bias: [bool; 3],
+    /// Current frame's segmentation map, one byte per 4×4 luma block.
+    /// Mirrors `s->s.frames[CUR_FRAME].segmentation_map` (vp9block.c:140).
+    pub seg_map: &'a mut [u8],
+    /// Retained segmentation map from an earlier frame, used when
+    /// `segmentation.update_map` is 0 or temporal prediction is signalled.
+    pub ref_seg_map: Option<&'a [u8]>,
 }
 
 impl<'a> TileDecodeContext<'a> {
@@ -134,6 +140,8 @@ impl<'a> TileDecodeContext<'a> {
         cur_mv_grid: &'a mut [MvRefPair],
         prev_mv_grid: Option<&'a [MvRefPair]>,
         prev_cols_4x4: usize,
+        seg_map: &'a mut [u8],
+        ref_seg_map: Option<&'a [u8]>,
     ) -> Self {
         let width = header.width as usize;
         let height = header.height as usize;
@@ -161,6 +169,8 @@ impl<'a> TileDecodeContext<'a> {
             prev_mv_grid,
             prev_cols_4x4,
             sign_bias: header.sign_bias,
+            seg_map,
+            ref_seg_map,
         }
     }
 }
@@ -315,14 +325,66 @@ fn decode_block(
     let is_kf = td.header.frame_type == FrameType::KeyFrame || td.header.intra_only;
 
     // --- Segment ID ---
-    let segment_id: u8 = if td.header.segmentation.enabled && td.header.segmentation.update_map {
-        td.bd.get_tree(
-            &crate::data::SEGMENTATION_TREE,
-            &td.header.segmentation.prob,
-        ) as u8
-    } else {
+    // FFmpeg vp9block.c:98-141. Three cases:
+    //   1. keyframe/intra-only: 0 or read from the tree (update_map).
+    //   2. inter frame with no map update, or temporal prediction signalled:
+    //      take the minimum segment id from the retained segmentation map.
+    //   3. otherwise: read from the tree.
+    let seg = &td.header.segmentation;
+    let seg_w = BWH_TAB[0][bs as usize][0] as usize;
+    let seg_h = BWH_TAB[0][bs as usize][1] as usize;
+    let seg_row7 = (row >> 1) & 7;
+    let pred_rows = seg_h.div_ceil(2); // 8x8 rows covered by this 4x4-unit height
+    let segment_id: u8 = if !seg.enabled {
         0
+    } else if is_kf {
+        if seg.update_map {
+            td.bd.get_tree(&crate::data::SEGMENTATION_TREE, &seg.prob) as u8
+        } else {
+            0
+        }
+    } else if !seg.update_map
+        || (seg.temporal
+            && td.bd.get_prob(
+                seg.pred_prob[td.above.seg_id[col] as usize + td.left.seg_id[seg_row7] as usize],
+            ))
+    {
+        let mut pred = 8u8;
+        if let Some(map) = td.ref_seg_map {
+            let w = seg_w.min(td.cols_4x4.saturating_sub(col));
+            let h = seg_h.min(td.rows_4x4.saturating_sub(row));
+            for y in row..row + h {
+                for x in col..col + w {
+                    pred = pred.min(map[y * td.cols_4x4 + x]);
+                }
+            }
+        }
+        let pred = if pred < 8 { pred } else { 0 };
+        let end_c = (col + seg_w).min(td.above.seg_id.len());
+        td.above.seg_id[col..end_c].fill(1);
+        let end_r = (seg_row7 + pred_rows).min(td.left.seg_id.len());
+        td.left.seg_id[seg_row7..end_r].fill(1);
+        pred
+    } else {
+        let id = td.bd.get_tree(&crate::data::SEGMENTATION_TREE, &seg.prob) as u8;
+        let end_c = (col + seg_w).min(td.above.seg_id.len());
+        td.above.seg_id[col..end_c].fill(0);
+        let end_r = (seg_row7 + pred_rows).min(td.left.seg_id.len());
+        td.left.seg_id[seg_row7..end_r].fill(0);
+        id
     };
+
+    // Keep the current frame's segmentation map for the next frame. FFmpeg
+    // writes it whenever a new map is decoded (vp9block.c:140-142).
+    if seg.enabled && (seg.update_map || is_kf) {
+        let end_c = (col + seg_w).min(td.cols_4x4);
+        let end_r = (row + seg_h).min(td.rows_4x4);
+        for y in row..end_r {
+            for x in col..end_c {
+                td.seg_map[y * td.cols_4x4 + x] = segment_id;
+            }
+        }
+    }
 
     // --- Skip flag ---
     let skip = if td.header.segmentation.enabled
