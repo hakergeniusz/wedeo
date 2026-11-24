@@ -309,3 +309,149 @@ fn bitexact_packet_crc_vs_ffmpeg_copy() {
         assert_crc_sequences(rel, &wedeo, &ffmpeg);
     }
 }
+
+#[test]
+fn diagnostic_all_flv_samples() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let mut paths = Vec::new();
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("flv") {
+                out.push(p);
+            }
+        }
+    }
+    walk(&fate_suite_dir().unwrap(), &mut paths);
+    paths.sort();
+    for path in paths {
+        let rel = path
+            .strip_prefix(fate_suite_dir().unwrap())
+            .unwrap()
+            .display()
+            .to_string();
+        let out = Command::new("ffmpeg")
+            .args(["-v", "error", "-bitexact", "-i"])
+            .arg(&path)
+            .args(["-map", "0", "-c", "copy", "-f", "framecrc", "-"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut ff: Vec<Vec<Vec<String>>> = vec![Vec::new(); 16];
+        for line in text.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let f: Vec<String> = line.split(',').map(|x| x.trim().to_string()).collect();
+            let si: usize = f[0].parse().unwrap();
+            ff[si].push(f);
+        }
+        println!("=== {rel}: ffmpeg streams:");
+        for line in text.lines().filter(|l| {
+            l.starts_with("#media_type")
+                || l.starts_with("#codec_id")
+                || l.starts_with("#extradata")
+        }) {
+            println!("  {line}");
+        }
+        let mut ctx = match InputContext::open(path.to_str().unwrap()) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("  OPEN ERROR: {e:?}");
+                continue;
+            }
+        };
+        println!("  wedeo streams: {}", ctx.nb_streams());
+        for st in &ctx.streams {
+            println!(
+                "   stream {}: {:?} {:?} tb={}/{} extradata={} dur={}",
+                st.index,
+                st.codec_params.media_type,
+                st.codec_params.codec_id,
+                st.time_base.num,
+                st.time_base.den,
+                st.codec_params.extradata.len(),
+                st.duration
+            );
+        }
+        let mut w: Vec<Vec<(i64, i64, u32, u32, bool)>> = vec![Vec::new(); ctx.streams.len()];
+        loop {
+            match ctx.read_packet() {
+                Ok(p) => w[p.stream_index].push((
+                    p.dts,
+                    p.pts,
+                    p.data.size() as u32,
+                    adler32(p.data.data()),
+                    p.flags.contains(wedeo_core::packet::PacketFlags::KEY),
+                )),
+                Err(wedeo_core::error::Error::Eof) => break,
+                Err(e) => {
+                    println!("  READ ERROR: {e:?}");
+                    break;
+                }
+            }
+        }
+        for i in 0..ctx.streams.len() {
+            let ffcrc: Vec<u32> = ff[i]
+                .iter()
+                .map(|f| u32::from_str_radix(f[5].trim_start_matches("0x"), 16).unwrap())
+                .collect();
+            let wcrc: Vec<u32> = w[i].iter().map(|x| x.3).collect();
+            let eq = ffcrc == wcrc;
+            let firstdiff = (0..ffcrc.len().min(wcrc.len())).find(|&j| ffcrc[j] != wcrc[j]);
+            println!(
+                "  stream {i}: ff={} wedeo={} crc_equal={eq} firstdiff={firstdiff:?}",
+                ffcrc.len(),
+                wcrc.len()
+            );
+            if !eq {
+                for j in 0..ffcrc.len().min(wcrc.len()).min(3) {
+                    println!(
+                        "    [{j}] ff={:?} w={:?}",
+                        (
+                            ff[i][j][1].clone(),
+                            ff[i][j][2].clone(),
+                            ff[i][j][3].clone(),
+                            ff[i][j][4].clone(),
+                            ff[i][j][5].clone(),
+                            ff[i][j].get(6).cloned()
+                        ),
+                        w[i][j]
+                    );
+                }
+            }
+            let mut tsdiff = 0;
+            let mut flagdiff = 0;
+            for j in 0..ffcrc.len().min(wcrc.len()) {
+                if ffcrc[j] != wcrc[j] {
+                    continue;
+                }
+                let fdts: i64 = ff[i][j][1].parse().unwrap();
+                let fpts: i64 = ff[i][j][2].parse().unwrap();
+                if fdts != w[i][j].0 || fpts != w[i][j].1 {
+                    if tsdiff < 2 {
+                        println!(
+                            "    ts diff [{j}] ff dts/pts={fdts}/{fpts} w={:?}/{:?} dur ff={}",
+                            w[i][j].0, w[i][j].1, ff[i][j][3]
+                        );
+                    }
+                    tsdiff += 1;
+                }
+                let fkey = ff[i][j].len() == 6 || !ff[i][j][6].starts_with("F=");
+                if fkey != w[i][j].4 {
+                    if flagdiff < 2 {
+                        println!("    flag diff [{j}] ff key={fkey} w={}", w[i][j].4);
+                    }
+                    flagdiff += 1;
+                }
+            }
+            if tsdiff > 0 || flagdiff > 0 {
+                println!("    tsdiff={tsdiff} flagdiff={flagdiff}");
+            }
+        }
+    }
+}

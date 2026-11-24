@@ -202,3 +202,199 @@ fn fate_avi_headers_are_parsed() {
     assert_eq!(audio.codec_params.codec_id, CodecId::Mp3);
     assert_eq!(audio.codec_params.sample_rate, 44100);
 }
+
+// ---------------------------------------------------------------------------
+// TEMPORARY diagnostic sweep (removed before final commit)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FullPkt {
+    stream: usize,
+    dts: i64,
+    pts: i64,
+    duration: i64,
+    size: usize,
+    crc: u32,
+}
+
+fn wedeo_full(path: &Path) -> std::result::Result<Vec<FullPkt>, String> {
+    let mut input = InputContext::open(path.to_str().unwrap()).map_err(|e| format!("open: {e}"))?;
+    let mut out = Vec::new();
+    loop {
+        match input.read_packet() {
+            Ok(p) => out.push(FullPkt {
+                stream: p.stream_index,
+                dts: p.dts,
+                pts: p.pts,
+                duration: p.duration,
+                size: p.data.size(),
+                crc: adler32(p.data.data()),
+            }),
+            Err(Error::Eof) => break,
+            Err(e) => return Err(format!("read: {e}")),
+        }
+    }
+    Ok(out)
+}
+
+fn ffmpeg_full(path: &Path) -> std::result::Result<Vec<FullPkt>, String> {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-bitexact",
+            "-i",
+            path.to_str().unwrap(),
+            "-c",
+            "copy",
+            "-f",
+            "framecrc",
+            "-",
+        ])
+        .output()
+        .map_err(|e| format!("spawn: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffmpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .next()
+                .unwrap_or("")
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split(',').map(str::trim).collect();
+        if f.len() < 6 {
+            continue;
+        }
+        out.push(FullPkt {
+            stream: f[0].parse().unwrap_or(1000),
+            dts: f[1].parse().unwrap_or(i64::MIN),
+            pts: f[2].parse().unwrap_or(i64::MIN),
+            duration: f[3].parse().unwrap_or(0),
+            size: f[4].parse().unwrap_or(0),
+            crc: u32::from_str_radix(f[5].trim_start_matches("0x"), 16).unwrap_or(0),
+        });
+    }
+    Ok(out)
+}
+
+fn collect_avis(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_avis(&p, out);
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("avi")) {
+                out.push(p);
+            }
+        }
+    }
+}
+
+#[test]
+fn sweep_one_file() {
+    let rel = match std::env::var("SWEEP_FILE") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let dir = std::env::var("FATE_SUITE").unwrap_or_else(|_| "fate-suite".to_string());
+    let path = Path::new(&dir).join(&rel);
+    let w = wedeo_full(&path).unwrap_or_else(|e| panic!("wedeo: {e}"));
+    let f = ffmpeg_full(&path).unwrap_or_else(|e| panic!("ffmpeg: {e}"));
+    println!(
+        "=== {rel}: wedeo {} pkts, ffmpeg {} pkts ===",
+        w.len(),
+        f.len()
+    );
+    for i in 0..w.len().min(f.len()).min(15) {
+        println!("  [{i:2}] W {:?}", w[i]);
+        println!("       F {:?}", f[i]);
+    }
+}
+
+#[test]
+fn sweep_all_avi_samples() {
+    let dir = std::env::var("FATE_SUITE").unwrap_or_else(|_| "fate-suite".to_string());
+    let mut files = Vec::new();
+    collect_avis(Path::new(&dir), &mut files);
+    files.sort();
+    let base = Path::new(&dir);
+
+    let mut n_ok = 0usize;
+    let mut n_open_err = 0usize;
+    let mut n_count_err = 0usize;
+    let mut n_mismatch = 0usize;
+    let mut total_pkts = 0usize;
+    let mut bitexact_pkts = 0usize;
+    let mut detail: Vec<String> = Vec::new();
+
+    for path in &files {
+        let rel = path
+            .strip_prefix(base)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        let w = match wedeo_full(path) {
+            Ok(v) => v,
+            Err(e) => {
+                n_open_err += 1;
+                detail.push(format!("OPEN-ERR {rel}: {e}"));
+                continue;
+            }
+        };
+        let f = match ffmpeg_full(path) {
+            Ok(v) => v,
+            Err(e) => {
+                detail.push(format!("FFMPEG-ERR {rel}: {e}"));
+                continue;
+            }
+        };
+        // Compare stream/size/crc only as the primary parity metric (existing
+        // tests ignore timestamps). Count matching packets by index.
+        let common = w.len().min(f.len());
+        total_pkts += common;
+        let mut first_bad = None;
+        for i in 0..common {
+            let (a, b) = (&w[i], &f[i]);
+            if (a.stream, a.size, a.crc) == (b.stream, b.size, b.crc) {
+                bitexact_pkts += 1;
+            } else if first_bad.is_none() {
+                first_bad = Some(i);
+            }
+        }
+        if w.len() != f.len() {
+            n_count_err += 1;
+            detail.push(format!(
+                "COUNT    {rel}: wedeo={} ffmpeg={} (first mismatch idx {:?})",
+                w.len(),
+                f.len(),
+                first_bad
+            ));
+        } else if let Some(i) = first_bad {
+            n_mismatch += 1;
+            detail.push(format!(
+                "MISMATCH {rel}: idx {i}: wedeo={:?} ffmpeg={:?}",
+                w[i], f[i]
+            ));
+        } else {
+            n_ok += 1;
+        }
+    }
+
+    println!("=== AVI SWEEP SUMMARY ===");
+    println!("files total:       {}", files.len());
+    println!("bitexact packets:  {bitexact_pkts}/{total_pkts}");
+    println!("fully OK files:    {n_ok}");
+    println!("open errors:       {n_open_err}");
+    println!("count mismatches:  {n_count_err}");
+    println!("data mismatches:   {n_mismatch}");
+    for d in &detail {
+        println!("{d}");
+    }
+}
