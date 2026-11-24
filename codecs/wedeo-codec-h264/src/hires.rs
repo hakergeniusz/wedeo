@@ -379,8 +379,20 @@ fn decode_intra8x8_hires(
         let top = gather_top::<u16>(&ctx.pic.y16, offset, stride);
         let left = gather_left8::<u16>(&ctx.pic.y16, offset, stride, bl);
         let top_left = gather_top_left::<u16>(&ctx.pic.y16, offset, stride, bt, bl);
-        let _ = btr;
-        let mode = mb.intra4x4_pred_mode[i8x8 * 4];
+        // FFmpeg's `topright_samples_available` mask (0xEEEA) marks the
+        // top-right sample unavailable for the bottom-right 8x8 block: its
+        // top-right neighbor lies in the next MB, which is not decoded yet.
+        // `btr` is derived from the 4x4-block cache; refine it for the 8x8
+        // geometry used by `predict_8x8l`.
+        let btr8 = if blk_y == 0 { btr } else { btr && blk_x == 0 };
+        // 8x8DCT shares one prediction mode across the four 4x4 sub-blocks
+        // of each 8x8 block. FFmpeg reads `intra4x4_pred_mode_cache[scan8[i]]`
+        // where i is the 4x4 block index of the group's top-left sub-block.
+        // Our `intra4x4_pred_mode` array is raster-ordered, so index it with
+        // the raster position of that sub-block, not i8x8 * 4 (which points
+        // into a different group for i8x8 >= 1).
+        let mode_raster = (blk_y / 4 * 4 + blk_x / 4) as usize;
+        let mode = mb.intra4x4_pred_mode[mode_raster];
         intra_pred::predict_8x8l(
             &mut ctx.pic.y16[offset..],
             stride,
@@ -391,7 +403,7 @@ fn decode_intra8x8_hires(
             bt,
             bl,
             bt && bl,
-            btr,
+            btr8,
         );
         if cbp_luma & (1 << i8x8) != 0 {
             dequant::dequant_8x8(
