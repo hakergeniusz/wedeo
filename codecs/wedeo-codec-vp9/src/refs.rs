@@ -69,6 +69,12 @@ pub struct RefStore {
     pub prev_frame_mvs: Option<Vec<MvRefPair>>,
     /// Previous frame's cols_4x4 (needed to index prev_frame_mvs correctly).
     pub prev_cols_4x4: usize,
+    /// Last segmentation map, per 4×4 luma block, row-major.
+    /// Mirrors FFmpeg's `s->s.frames[REF_FRAME_SEGMAP].segmentation_map`.
+    pub prev_seg_map: Option<Vec<u8>>,
+    /// Dimensions of `prev_seg_map` (4×4 units).
+    pub prev_seg_rows: usize,
+    pub prev_seg_cols: usize,
 }
 
 impl RefStore {
@@ -78,6 +84,9 @@ impl RefStore {
             slots: Default::default(),
             prev_frame_mvs: None,
             prev_cols_4x4: 0,
+            prev_seg_map: None,
+            prev_seg_rows: 0,
+            prev_seg_cols: 0,
         }
     }
 
@@ -100,11 +109,30 @@ impl RefStore {
         self.prev_cols_4x4 = cols_4x4;
     }
 
+    /// Store the current frame's segmentation map as the reference map for
+    /// the next frame (FFmpeg vp9.c:1667-1670, vp9block.c:140-142).
+    pub fn update_seg_map(&mut self, map: Vec<u8>, rows: usize, cols: usize) {
+        self.prev_seg_map = Some(map);
+        self.prev_seg_rows = rows;
+        self.prev_seg_cols = cols;
+    }
+
+    /// Return the retained segmentation map when its dimensions match.
+    pub fn seg_map_for(&self, rows: usize, cols: usize) -> Option<&[u8]> {
+        match &self.prev_seg_map {
+            Some(map) if self.prev_seg_rows == rows && self.prev_seg_cols == cols => Some(map),
+            _ => None,
+        }
+    }
+
     /// Clear all reference state (e.g. on keyframe or error).
     pub fn clear(&mut self) {
         self.slots = Default::default();
         self.prev_frame_mvs = None;
         self.prev_cols_4x4 = 0;
+        self.prev_seg_map = None;
+        self.prev_seg_rows = 0;
+        self.prev_seg_cols = 0;
     }
 }
 

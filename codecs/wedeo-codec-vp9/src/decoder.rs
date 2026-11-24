@@ -101,7 +101,12 @@ impl Vp9Decoder {
     /// Decode one VP9 frame from `data` and push the result to `output_queue`.
     fn decode_frame(&mut self, data: &[u8], pts: i64) -> Result<()> {
         // --- 1. Parse frame header ---
-        let (header, _hdr_bytes) = decode_frame_header(data, &self.prob_ctx, &self.coef_ctx)?;
+        let (header, _hdr_bytes) =
+            decode_frame_header(data, &self.prob_ctx, &self.coef_ctx, |i| {
+                self.ref_store.slots[i]
+                    .as_ref()
+                    .map(|rf| (rf.width, rf.height))
+            })?;
 
         debug!(
             frame_type = ?header.frame_type,
@@ -214,6 +219,19 @@ impl Vp9Decoder {
         // Allocate per-4×4 MV grid for this frame.
         let mut cur_mv_grid = vec![MvRefPair::default(); rows_4x4 * cols_4x4];
 
+        // Segmentation map. FFmpeg keeps the last decoded map in
+        // `s->s.frames[REF_FRAME_SEGMAP]` and only replaces it when a new map
+        // is decoded (vp9.c:1667-1670, vp9block.c:98-141).
+        let mut cur_seg_map = vec![0u8; rows_4x4 * cols_4x4];
+        // FFmpeg vp9.c:1618-1670: the segmentation-map reference is the
+        // previous current frame (which holds its decoded map) even when the
+        // new frame has update_map set; temporal prediction may still use it.
+        let ref_seg_map = if is_kf {
+            None
+        } else {
+            self.ref_store.seg_map_for(rows_4x4, cols_4x4)
+        };
+
         // --- 3. Locate tile data ---
         // `header.tile_data_offset` points to the first byte after the
         // compressed header (= start of tile bitstream data).
@@ -277,6 +295,8 @@ impl Vp9Decoder {
                         &mut cur_mv_grid,
                         self.ref_store.prev_frame_mvs.as_deref(),
                         self.ref_store.prev_cols_4x4,
+                        &mut cur_seg_map,
+                        ref_seg_map,
                     )?;
                     all_blocks.extend(blocks);
                     merged_counts.merge(&counts);
@@ -287,6 +307,7 @@ impl Vp9Decoder {
                 // (UB under Rust aliasing rules even for disjoint access).
                 let sync_above = SyncAbove(&mut above as *mut AboveContext);
                 let sync_mv_grid = SyncMvGrid(&mut cur_mv_grid[..] as *mut [MvRefPair]);
+                let sync_seg_map = SyncSegMap(&mut cur_seg_map[..] as *mut [u8]);
                 let prev_mvs = self.ref_store.prev_frame_mvs.as_deref();
                 let prev_c4 = self.ref_store.prev_cols_4x4;
 
@@ -306,6 +327,7 @@ impl Vp9Decoder {
                         for tile_col in 0..tile_cols {
                             let above_ref = &sync_above;
                             let mv_ref = &sync_mv_grid;
+                            let seg_ref = &sync_seg_map;
                             let header_ref = &header;
                             let td = tile_data;
                             let offsets = &tile_offsets;
@@ -316,9 +338,23 @@ impl Vp9Decoder {
                                 // avoid the UB of multiple &mut references.
                                 let above = unsafe { &mut *above_ref.0 };
                                 let mv_grid = unsafe { &mut *mv_ref.0 };
+                                let seg_map = unsafe { &mut *seg_ref.0 };
                                 decode_tile_column(
-                                    td, offsets, header_ref, above, tile_row, tile_col, tile_cols,
-                                    tr_start, tr_end, sb_cols, mv_grid, prev_mvs, prev_c4,
+                                    td,
+                                    offsets,
+                                    header_ref,
+                                    above,
+                                    tile_row,
+                                    tile_col,
+                                    tile_cols,
+                                    tr_start,
+                                    tr_end,
+                                    sb_cols,
+                                    mv_grid,
+                                    prev_mvs,
+                                    prev_c4,
+                                    seg_map,
+                                    ref_seg_map,
                                 )
                             }));
                         }
@@ -404,6 +440,13 @@ impl Vp9Decoder {
         });
         self.ref_store.refresh(header.refresh_ref_mask, ref_frame);
         self.ref_store.rotate_mvpair(cur_mv_grid, cols_4x4);
+        // FFmpeg vp9.c:1669 retains the previous segmentation map unless a
+        // new one is decoded; vp9block.c:140 writes one on keyframes and on
+        // frames with segmentation.update_map set.
+        if header.segmentation.enabled && (is_kf || header.segmentation.update_map) {
+            self.ref_store
+                .update_seg_map(cur_seg_map, rows_4x4, cols_4x4);
+        }
 
         // Track this frame's `invisible` bit for the *next* frame's
         // use_last_frame_mvs (FFmpeg vp9.c:569: invisible = !show_frame).
@@ -496,6 +539,16 @@ struct SyncMvGrid(*mut [MvRefPair]);
 unsafe impl Send for SyncMvGrid {}
 unsafe impl Sync for SyncMvGrid {}
 
+/// Raw pointer wrapper for the current frame's segmentation map.
+///
+/// SAFETY: Each tile column writes only to its own 4×4 column range of the
+/// segmentation map, exactly as it does for AboveContext and the MV grid.
+struct SyncSegMap(*mut [u8]);
+
+// SAFETY: Disjoint column ranges — see SyncSegMap doc comment.
+unsafe impl Send for SyncSegMap {}
+unsafe impl Sync for SyncSegMap {}
+
 /// Decode all superblocks in one tile column for a given tile row.
 /// Returns the decoded blocks.
 #[allow(clippy::too_many_arguments)]
@@ -513,6 +566,8 @@ fn decode_tile_column(
     cur_mv_grid: &mut [MvRefPair],
     prev_mv_grid: Option<&[MvRefPair]>,
     prev_cols_4x4: usize,
+    seg_map: &mut [u8],
+    ref_seg_map: Option<&[u8]>,
 ) -> Result<(Vec<BlockInfo>, CountContext)> {
     let tile_col_start_sb = tile_sb_offset(tile_col, header.tile_cols_log2, sb_cols);
     let tile_col_end_sb = tile_sb_offset(tile_col + 1, header.tile_cols_log2, sb_cols).min(sb_cols);
@@ -542,6 +597,8 @@ fn decode_tile_column(
         cur_mv_grid,
         prev_mv_grid,
         prev_cols_4x4,
+        seg_map,
+        ref_seg_map,
     );
 
     for sb_row in tr_start..tr_end {

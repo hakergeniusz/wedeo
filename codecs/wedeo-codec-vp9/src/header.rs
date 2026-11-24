@@ -519,11 +519,15 @@ fn get_sbits_inv(gb: &mut GetBits<'_>, n: usize) -> Result<i8> {
 ///
 /// Returns the parsed `FrameHeader` and the byte offset in `data` where the
 /// tile bitstream begins (i.e. after the compressed header).
-pub fn decode_frame_header(
+pub fn decode_frame_header<F>(
     data: &[u8],
     prob_ctx: &[ProbContext; 4],
     coef_ctx: &[CoefProbArray; 4],
-) -> Result<(FrameHeader, usize)> {
+    ref_dims: F,
+) -> Result<(FrameHeader, usize)>
+where
+    F: Fn(usize) -> Option<(u32, u32)>,
+{
     let mut gb = GetBits::new(data);
 
     // Frame marker (2 bits, must be 0b10 = 2).
@@ -733,7 +737,13 @@ pub fn decode_frame_header(
                 false
             };
             if use_ref0 || use_ref1 || use_ref2 {
-                // Caller must fill in width/height from the referenced frame.
+                // FFmpeg vp9.c:625-637 resolves dimensions from the selected
+                // reference frame *while parsing the header*, before the
+                // tiling bits and compressed_header_size are read. Without
+                // the reference dimensions, sb_cols is 0, no tile-column
+                // increment bits are consumed, and the whole header after
+                // this point is misparsed (wrong tile geometry and a bogus
+                // tile_data_offset).
                 let which = if use_ref0 {
                     0
                 } else if use_ref1 {
@@ -742,8 +752,13 @@ pub fn decode_frame_header(
                     2
                 };
                 size_from_ref = which;
-                width = 0;
-                height = 0;
+                if let Some((ref_w, ref_h)) = ref_dims(which as usize) {
+                    width = ref_w;
+                    height = ref_h;
+                } else {
+                    width = 0;
+                    height = 0;
+                }
             } else {
                 width = gb.get_bits(16)? + 1;
                 height = gb.get_bits(16)? + 1;
@@ -1304,13 +1319,17 @@ mod tests {
     fn test_invalid_frame_marker() {
         // First 2 bits must be 0b10. Provide 0b00 instead.
         let data = [0x00u8; 32];
-        let result = decode_frame_header(&data, &Default::default(), &[DEFAULT_COEF_PROBS; 4]);
+        let result =
+            decode_frame_header(&data, &Default::default(), &[DEFAULT_COEF_PROBS; 4], |_| {
+                None
+            });
         assert!(result.is_err(), "Expected error for bad frame marker");
     }
 
     #[test]
     fn test_empty_data() {
-        let result = decode_frame_header(&[], &Default::default(), &[DEFAULT_COEF_PROBS; 4]);
+        let result =
+            decode_frame_header(&[], &Default::default(), &[DEFAULT_COEF_PROBS; 4], |_| None);
         assert!(result.is_err());
     }
 
