@@ -266,9 +266,7 @@ pub fn dequant_4x4_flat(coeffs: &mut [i16; 16], qp: u8) {
     let scale = &DEQUANT4_COEFF_INIT[qp_rem];
     for i in 0..16 {
         let s = scale[POS_CLASS[i]] as i32;
-        coeffs[i] = ((coeffs[i] as i32)
-            .wrapping_mul(s)
-            .wrapping_shl(qp_per as u32)) as i16;
+        coeffs[i] = ((coeffs[i] as i32).wrapping_mul(s).wrapping_shl(qp_per)) as i16;
     }
 }
 

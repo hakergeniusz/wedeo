@@ -7,7 +7,7 @@
 //! pipeline stays in sync (frame count and pixel format), even while
 //! reconstruction parity is still tracked separately by `fate_h264.rs`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Ensure codec and format registrations are linked.
 use wedeo_codec_h264 as _;
@@ -37,7 +37,7 @@ fn jvt_frext_file(name: &str) -> PathBuf {
 }
 
 /// Decode a vector, returning (frame count, pixel format of first frame).
-fn decode_vector(path: &PathBuf) -> Option<(usize, PixelFormat)> {
+fn decode_vector(path: &Path) -> Option<(usize, PixelFormat)> {
     if !path.exists() {
         return None;
     }
