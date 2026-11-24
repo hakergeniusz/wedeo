@@ -20,7 +20,8 @@ use wedeo_filter::{FilterDescriptor, FilterFlags, FilterPadDescriptor, FilterPad
 /// and look up the registered factory without depending on `wedeo-filter`
 /// directly.
 pub use wedeo_filter::Filter;
-pub use wedeo_filter::registry::find_filter_by_name;
+pub use wedeo_filter::formats::{FilterFormat, FilterFormats, FormatsConfig, PadFormats};
+pub use wedeo_filter::registry::{create_filter_with_options, find_filter_by_name};
 
 /// Alignment of allocated plane strides, matching FFmpeg's `ALIGN` in
 /// `libavutil/frame.c` on targets without AVX-512 (`HAVE_SIMD_ALIGN_64` false).
@@ -545,6 +546,46 @@ fn format_info(pf: PixelFormat) -> Option<FormatInfo> {
     }
 }
 
+/// Formats advertised by `query_formats()`.
+///
+/// FFmpeg:
+/// ```c
+/// return ff_set_common_formats2(ctx, cfg_in, cfg_out,
+///                               ff_draw_supported_pixel_formats(0));
+/// ```
+///
+/// This is exactly the set for which the local `format_info()` above (the
+/// equivalent of `ff_draw_init()`) provides plane geometry.
+const SUPPORTED_FORMATS: &[PixelFormat] = &[
+    PixelFormat::Yuv420p,
+    PixelFormat::Yuv422p,
+    PixelFormat::Yuv444p,
+    PixelFormat::Yuv410p,
+    PixelFormat::Yuv411p,
+    PixelFormat::Yuvj420p,
+    PixelFormat::Yuvj422p,
+    PixelFormat::Yuvj444p,
+    PixelFormat::Yuv420p10le,
+    PixelFormat::Yuv420p10be,
+    PixelFormat::Yuv420p16le,
+    PixelFormat::Yuv420p16be,
+    PixelFormat::Nv12,
+    PixelFormat::Nv21,
+    PixelFormat::Yuyv422,
+    PixelFormat::Uyvy422,
+    PixelFormat::Rgb24,
+    PixelFormat::Bgr24,
+    PixelFormat::Argb,
+    PixelFormat::Rgba,
+    PixelFormat::Abgr,
+    PixelFormat::Bgra,
+    PixelFormat::Rgb48le,
+    PixelFormat::Rgb48be,
+    PixelFormat::Gray8,
+    PixelFormat::Gray16le,
+    PixelFormat::Gray16be,
+];
+
 /// Luma coefficients from FFmpeg's `av_csp_luma_coeffs_from_avcsp()`.
 /// `AVCOL_SPC_UNSPECIFIED` maps to SMPTE170M (BT.601), as in `ff_draw_init2()`.
 fn luma_coefficients(csp: wedeo_core::frame::ColorSpace) -> (f64, f64, f64) {
@@ -905,6 +946,15 @@ impl Filter for PadFilter {
         Ok(())
     }
 
+    fn query_formats(&self, cfg: &mut FormatsConfig) -> Result<()> {
+        // FFmpeg: ff_set_common_formats2(ctx, cfg_in, cfg_out,
+        // ff_draw_supported_pixel_formats(0)). Both pads must use one of the
+        // formats ff_draw_init() can describe, since padding allocates new
+        // planes in that format.
+        cfg.set_common_pixel_formats(SUPPORTED_FORMATS);
+        Ok(())
+    }
+
     fn filter_frame(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         let (planes, out_w, out_h) = {
             let video = frame.video().ok_or(Error::InvalidData)?;
@@ -966,6 +1016,13 @@ impl FilterFactory for PadFilterFactory {
 
     fn create(&self) -> Result<Box<dyn Filter>> {
         Ok(Box::new(PadFilter::default()))
+    }
+
+    // FFmpeg applies the private options with av_opt_set() before
+    // avfilter_graph_config(). `PadFilter::from_options()` is the equivalent of
+    // parsing those AVOptions and rejects unknown names like av_opt_set().
+    fn create_with_options(&self, options: &[(&str, &str)]) -> Result<Box<dyn Filter>> {
+        Ok(Box::new(PadFilter::from_options(options.iter().copied())?))
     }
 }
 
@@ -1191,5 +1248,63 @@ mod tests {
             Error::InvalidArgument
         );
         let _ = NOPTS_VALUE;
+    }
+
+    #[test]
+    fn query_formats_uses_draw_supported_formats() {
+        let filter = PadFilter::default();
+        let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+        filter.query_formats(&mut cfg).unwrap();
+
+        let expected = FilterFormats::from_pixels(SUPPORTED_FORMATS.iter().copied());
+        assert_eq!(cfg.inputs[0].formats, expected);
+        assert_eq!(cfg.outputs[0].formats, expected);
+        // Every advertised format has local plane geometry.
+        for &format in SUPPORTED_FORMATS {
+            assert!(format_info(format).is_some(), "{format:?} lacks geometry");
+        }
+        // ff_draw_init() cannot describe palettes, bitstreams or the 10-bit
+        // 4:2:2 / 4:4:4 formats represented by wedeo-core.
+        for format in [
+            PixelFormat::None,
+            PixelFormat::Pal8,
+            PixelFormat::MonoWhite,
+            PixelFormat::MonoBlack,
+            PixelFormat::Yuv422p10le,
+            PixelFormat::Yuv444p10le,
+        ] {
+            assert!(!cfg.outputs[0].accepts(FilterFormat::Pixel(format)));
+        }
+    }
+
+    #[test]
+    fn factory_options_reach_the_pad_filter() {
+        let filter = wedeo_filter::registry::create_filter_with_options(
+            "pad",
+            &[
+                ("w", "8"),
+                ("h", "8"),
+                ("x", "2"),
+                ("y", "2"),
+                ("color", "white"),
+            ],
+        )
+        .unwrap();
+        let mut filter = filter;
+        filter.activate().unwrap();
+        let out = filter
+            .filter_frame(make_yuv420(4, 4, 100, 128, 128))
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            (out.video().unwrap().width, out.video().unwrap().height),
+            (8, 8)
+        );
+        assert_eq!(plane_byte(&out, 0, 0, 0), 235);
+        assert_eq!(plane_byte(&out, 0, 2, 2), 100);
+
+        assert!(
+            wedeo_filter::registry::create_filter_with_options("pad", &[("bogus", "1")]).is_err()
+        );
     }
 }

@@ -11,7 +11,7 @@ use wedeo_core::frame::{Frame, FramePlane};
 use wedeo_core::media_type::MediaType;
 use wedeo_core::pixel_format::PixelFormat;
 use wedeo_filter_vflip::registry::find_filter_by_name;
-use wedeo_filter_vflip::{FilterFlags, FilterPadDirection};
+use wedeo_filter_vflip::{FilterFlags, FilterFormat, FilterPadDirection, FormatsConfig};
 
 fn make_frame(width: u32, height: u32, format: PixelFormat, planes: &[(&[u8], usize)]) -> Frame {
     let mut frame = Frame::new_video(width, height, format);
@@ -148,4 +148,35 @@ fn test_vflip_rejects_audio_frames() {
     let factory = find_filter_by_name("vflip").unwrap();
     let mut filter = factory.create().unwrap();
     assert_eq!(filter.filter_frame(frame).err(), Some(Error::InvalidData));
+}
+
+#[test]
+fn test_vflip_query_formats_covers_all_real_pixel_formats() {
+    let factory = find_filter_by_name("vflip").unwrap();
+    let filter = factory.create().unwrap();
+    let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+    filter.query_formats(&mut cfg).unwrap();
+
+    // FFmpeg's vflip has no query_formats() callback, so all real formats are
+    // accepted on both pads.
+    for accepted in [
+        PixelFormat::Yuv420p,
+        PixelFormat::Yuyv422,
+        PixelFormat::MonoWhite,
+        PixelFormat::Pal8,
+        PixelFormat::Nv12,
+        PixelFormat::Yuv420p10le,
+    ] {
+        assert!(cfg.inputs[0].accepts(FilterFormat::Pixel(accepted)));
+        assert!(cfg.outputs[0].accepts(FilterFormat::Pixel(accepted)));
+    }
+    assert!(!cfg.outputs[0].accepts(FilterFormat::Pixel(PixelFormat::None)));
+    assert_eq!(cfg.inputs[0].formats, cfg.outputs[0].formats);
+}
+
+#[test]
+fn test_vflip_factory_rejects_options_as_ffmpeg_does() {
+    let factory = find_filter_by_name("vflip").unwrap();
+    assert!(factory.create_with_options(&[]).is_ok());
+    assert!(factory.create_with_options(&[("dir", "1")]).is_err());
 }

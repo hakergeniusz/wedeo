@@ -16,6 +16,7 @@ use wedeo_core::error::{Error, Result};
 use wedeo_core::frame::Frame;
 use wedeo_core::media_type::MediaType;
 use wedeo_filter::Filter;
+use wedeo_filter::formats::{FilterFormats, FormatsConfig};
 use wedeo_filter::graph::FilterLinkConfig;
 use wedeo_filter::registry::{filters, find_filter_by_name};
 
@@ -76,6 +77,11 @@ pub struct Node {
 pub struct Graph {
     nodes: Vec<Node>,
     links: Vec<Link>,
+    /// Per-node format configuration produced by [`Filter::query_formats`]
+    /// during [`Graph::config`].
+    node_formats: Vec<FormatsConfig>,
+    /// Format negotiated on each link, parallel to `links`.
+    link_formats: Vec<Option<FilterFormats>>,
     /// Frames produced by nodes with no output links (graph sinks).
     output_queue: VecDeque<Frame>,
     active: bool,
@@ -93,6 +99,8 @@ impl Graph {
         Self {
             nodes: Vec::new(),
             links: Vec::new(),
+            node_formats: Vec::new(),
+            link_formats: Vec::new(),
             output_queue: VecDeque::new(),
             active: false,
             eof: false,
@@ -122,6 +130,7 @@ impl Graph {
             )));
         }
         let filter_name = filter.descriptor().name.to_owned();
+        let formats = FormatsConfig::from_descriptor(filter.descriptor());
         let id = self.nodes.len();
         self.nodes.push(Node {
             instance_name,
@@ -131,6 +140,7 @@ impl Graph {
             output_links: Vec::new(),
             pending: VecDeque::new(),
         });
+        self.node_formats.push(formats);
         Ok(id)
     }
 
@@ -143,9 +153,24 @@ impl Graph {
         instance_name: impl Into<String>,
         filter_name: &str,
     ) -> Result<NodeId> {
+        self.add_node_with_options(instance_name, filter_name, &[])
+    }
+
+    /// Add an instance whose private options are applied by the factory.
+    ///
+    /// FFmpeg applies options with `av_opt_set()` before
+    /// `avfilter_graph_config()`; here the factory's
+    /// [`wedeo_filter::registry::FilterFactory::create_with_options`] receives
+    /// the same name/value pairs.
+    pub fn add_node_with_options(
+        &mut self,
+        instance_name: impl Into<String>,
+        filter_name: &str,
+        options: &[(&str, &str)],
+    ) -> Result<NodeId> {
         let factory = find_filter_by_name(filter_name)
             .ok_or_else(|| Error::Other(format!("no such filter: '{filter_name}'")))?;
-        self.add_node(instance_name, factory.create()?)
+        self.add_node(instance_name, factory.create_with_options(options)?)
     }
 
     /// Look up a node by its instance name.
@@ -246,6 +271,7 @@ impl Graph {
         });
         self.nodes[src].output_links.push(id);
         self.nodes[dst].input_links.push(id);
+        self.link_formats.push(None);
         Ok(id)
     }
 
@@ -328,11 +354,78 @@ impl Graph {
             .expect("node belongs to this graph")
     }
 
-    /// Validate the graph and activate all filters (FFmpeg's
-    /// `avfilter_graph_config`).
+    /// Validate the graph, negotiate formats and activate all filters
+    /// (FFmpeg's `avfilter_graph_config`).
     pub fn config(&mut self) -> Result<()> {
         self.validate()?;
+        self.query_formats()?;
         self.activate()
+    }
+
+    /// Call every node's [`Filter::query_formats`] and intersect the resulting
+    /// lists on each link, failing when a link has no common format.
+    ///
+    /// FFmpeg's `avfilter_graph_config()` performs the same two phases: the
+    /// `query_formats()` callbacks fill `cfg_in`/`cfg_out`, then
+    /// `ff_filter_graph_config_links()` narrows both ends of every link to the
+    /// intersection. Both per-node and per-link results are retained for
+    /// inspection by [`Self::node_formats`] and [`Self::link_formats`].
+    pub fn query_formats(&mut self) -> Result<()> {
+        for (node, cfg) in self.nodes.iter_mut().zip(self.node_formats.iter_mut()) {
+            *cfg = FormatsConfig::from_descriptor(node.filter.descriptor());
+            node.filter.query_formats(cfg)?;
+        }
+
+        let mut resolved = Vec::with_capacity(self.links.len());
+        for (index, link) in self.links.iter().enumerate() {
+            let src_cfg = self
+                .node_formats
+                .get(link.src_node)
+                .ok_or(Error::InvalidArgument)?;
+            let dst_cfg = self
+                .node_formats
+                .get(link.dst_node)
+                .ok_or(Error::InvalidArgument)?;
+            let formats = src_cfg
+                .negotiate_with(link.src_pad, dst_cfg, link.dst_pad)
+                .map_err(|e| {
+                    Error::Other(format!(
+                        "link {index} ({}:{} -> {}:{}): {e}",
+                        self.nodes[link.src_node].instance_name,
+                        link.src_pad,
+                        self.nodes[link.dst_node].instance_name,
+                        link.dst_pad,
+                    ))
+                })?;
+            resolved.push(formats);
+        }
+
+        for (link, formats) in self.links.iter().zip(&resolved) {
+            if let Some(pad) = self.node_formats[link.src_node]
+                .outputs
+                .get_mut(link.src_pad)
+            {
+                pad.formats = formats.clone();
+            }
+            if let Some(pad) = self.node_formats[link.dst_node]
+                .inputs
+                .get_mut(link.dst_pad)
+            {
+                pad.formats = formats.clone();
+            }
+        }
+        self.link_formats = resolved.into_iter().map(Some).collect();
+        Ok(())
+    }
+
+    /// Format configuration of node `node`, available after [`Self::config`].
+    pub fn node_formats(&self, node: NodeId) -> Option<&FormatsConfig> {
+        self.node_formats.get(node)
+    }
+
+    /// Format negotiated on link `link`, available after [`Self::config`].
+    pub fn link_formats(&self, link: LinkId) -> Option<&FilterFormats> {
+        self.link_formats.get(link)?.as_ref()
     }
 
     /// Activate every filter instance once.
@@ -515,9 +608,51 @@ impl Graph {
         self.output_queue.drain(..).collect()
     }
 
-    /// Signal end of input: run once more to flush queued frames, then
-    /// [`Graph::pull`] reports `Error::Eof` when the output queue is empty.
+    /// Flush every filter at end of stream and route the tail frames to the
+    /// graph sinks. Returns the number of frames emitted by the filters.
+    ///
+    /// FFmpeg's `activate()` pushes delayed frames with `ff_filter_frame()`
+    /// once the upstream link signals EOF. This graph has no scheduler, so
+    /// [`Filter::flush`] is the equivalent hook and [`Self::close`] drives it.
+    /// A filter that delays frames (e.g. `fps`) emits its tail here; filters
+    /// with no buffered tail return an empty vec through the default impl.
+    pub fn flush(&mut self) -> Result<usize> {
+        let mut tails = Vec::new();
+        for (id, node) in self.nodes.iter_mut().enumerate() {
+            let frames = node.filter.flush()?;
+            if !frames.is_empty() {
+                tails.push((id, frames));
+            }
+        }
+        let mut emitted = 0;
+        for (id, frames) in tails {
+            emitted += frames.len();
+            self.route_outputs(id, frames);
+        }
+        Ok(emitted)
+    }
+
+    /// Flush one node, routing its tail frames to the graph sinks.
+    pub fn flush_node(&mut self, node: NodeId) -> Result<usize> {
+        let frames = self
+            .nodes
+            .get_mut(node)
+            .ok_or(Error::InvalidArgument)?
+            .filter
+            .flush()?;
+        let emitted = frames.len();
+        self.route_outputs(node, frames);
+        Ok(emitted)
+    }
+
+    /// Signal end of input: run once more, drain filter tails with
+    /// [`Self::flush`], then [`Graph::pull`] reports `Error::Eof` when the
+    /// output queue is empty.
     pub fn close(&mut self) -> Result<()> {
+        self.run()?;
+        self.flush()?;
+        // Tail frames are pushed onto the same links as regular output, so
+        // downstream filters must see them once more before the graph is EOF.
         self.run()?;
         self.eof = true;
         Ok(())

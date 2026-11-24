@@ -26,8 +26,10 @@ use wedeo_filter::FilterPadDirection;
 use wedeo_filter::registry::FilterFactory;
 
 // Re-exported so the registration FATE test can reach the frozen filter
-// registry without adding a direct `wedeo-filter` dependency to the harness.
+// registry and format negotiation without adding a direct `wedeo-filter`
+// dependency to the harness.
 pub use wedeo_filter::Filter;
+pub use wedeo_filter::formats::{FilterFormat, FilterFormats, FormatsConfig, PadFormats};
 pub use wedeo_filter::registry;
 
 // ---------------------------------------------------------------------------
@@ -120,6 +122,53 @@ fn format_info(format: PixelFormat) -> FormatInfo {
         PixelFormat::None => FormatInfo::new(0, 0, [0, 0, 0, 0], false),
     }
 }
+
+/// Formats advertised by `query_formats()`.
+///
+/// FFmpeg:
+/// ```c
+/// int reject_flags = AV_PIX_FMT_FLAG_BITSTREAM | FF_PIX_FMT_FLAG_SW_FLAT_SUB;
+///
+/// return ff_set_common_formats2(ctx, cfg_in, cfg_out,
+///                               ff_formats_pixdesc_filter(0, reject_flags));
+/// ```
+///
+/// `FF_PIX_FMT_FLAG_SW_FLAT_SUB` marks non-planar formats with subsampling, so
+/// the packed 4:2:2 formats (`yuyv422`, `uyvy422`) are excluded together with
+/// the bitstream formats (`monow`, `monoblack`). Paletted formats are accepted
+/// by FFmpeg's crop filter and remain in the list.
+const SUPPORTED_FORMATS: &[PixelFormat] = &[
+    PixelFormat::Yuv420p,
+    PixelFormat::Rgb24,
+    PixelFormat::Bgr24,
+    PixelFormat::Yuv422p,
+    PixelFormat::Yuv444p,
+    PixelFormat::Yuv410p,
+    PixelFormat::Yuv411p,
+    PixelFormat::Gray8,
+    PixelFormat::Pal8,
+    PixelFormat::Yuvj420p,
+    PixelFormat::Yuvj422p,
+    PixelFormat::Yuvj444p,
+    PixelFormat::Nv12,
+    PixelFormat::Nv21,
+    PixelFormat::Argb,
+    PixelFormat::Rgba,
+    PixelFormat::Abgr,
+    PixelFormat::Bgra,
+    PixelFormat::Gray16be,
+    PixelFormat::Gray16le,
+    PixelFormat::Yuv420p16le,
+    PixelFormat::Yuv420p16be,
+    PixelFormat::Rgb48be,
+    PixelFormat::Rgb48le,
+    PixelFormat::Yuv422p10le,
+    PixelFormat::Yuv422p10be,
+    PixelFormat::Yuv444p10le,
+    PixelFormat::Yuv444p10be,
+    PixelFormat::Yuv420p10le,
+    PixelFormat::Yuv420p10be,
+];
 
 // ---------------------------------------------------------------------------
 // Crop filter
@@ -328,8 +377,34 @@ impl Filter for Crop {
         Ok(())
     }
 
+    fn query_formats(&self, cfg: &mut FormatsConfig) -> Result<()> {
+        // FFmpeg: ff_set_common_formats2(ctx, cfg_in, cfg_out,
+        // ff_formats_pixdesc_filter(0, reject_flags)) - both pads get the same
+        // list, and frames are never converted by this filter.
+        cfg.set_common_pixel_formats(SUPPORTED_FORMATS);
+        Ok(())
+    }
+
     fn filter_frame(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         Ok(vec![self.crop_frame(frame)?])
+    }
+}
+
+/// Parse the integer subset of FFmpeg's crop expressions accepted by this
+/// port. The geometry options are stored as plain integers (see module docs).
+fn parse_int_option(value: &str) -> Result<i32> {
+    value
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| Error::InvalidArgument)
+}
+
+/// FFmpeg's `AV_OPT_TYPE_BOOL` accepts both numeric and symbolic values.
+fn parse_bool_option(value: &str) -> Result<bool> {
+    match value {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(Error::InvalidArgument),
     }
 }
 
@@ -342,6 +417,26 @@ impl FilterFactory for CropFactory {
 
     fn create(&self) -> Result<Box<dyn Filter>> {
         Ok(Box::new(Crop::new()))
+    }
+
+    // FFmpeg applies the private options with av_opt_set() before
+    // avfilter_graph_config(). `w`/`out_w` and `h`/`out_h` are aliases for the
+    // same AVOption in vf_crop.c, so both names are accepted here.
+    fn create_with_options(&self, options: &[(&str, &str)]) -> Result<Box<dyn Filter>> {
+        let mut filter = Crop::new();
+        for &(key, value) in options {
+            match key {
+                "w" | "out_w" => filter.width = Some(parse_int_option(value)?),
+                "h" | "out_h" => filter.height = Some(parse_int_option(value)?),
+                "x" => filter.x = Some(parse_int_option(value)?),
+                "y" => filter.y = Some(parse_int_option(value)?),
+                "keep_aspect" => filter.keep_aspect = parse_bool_option(value)?,
+                "exact" => filter.exact = parse_bool_option(value)?,
+                // av_opt_set() rejects unknown option names.
+                _ => return Err(Error::InvalidArgument),
+            }
+        }
+        Ok(Box::new(filter))
     }
 }
 
@@ -697,5 +792,82 @@ mod tests {
             out.video().unwrap().sample_aspect_ratio,
             Rational::new(2, 1)
         );
+    }
+
+    #[test]
+    fn query_formats_mirrors_ffmpeg_crop_pixdesc_filter() {
+        let filter = Crop::new();
+        let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+        filter.query_formats(&mut cfg).unwrap();
+
+        let expected = FilterFormats::from_pixels(SUPPORTED_FORMATS.iter().copied());
+        assert_eq!(cfg.inputs.len(), 1);
+        assert_eq!(cfg.outputs.len(), 1);
+        assert_eq!(cfg.inputs[0].formats, expected);
+        assert_eq!(cfg.outputs[0].formats, expected);
+        // Planar and packed 4:4:4 formats, plus NV12 (planar), are accepted.
+        for format in [
+            PixelFormat::Yuv420p,
+            PixelFormat::Yuv422p,
+            PixelFormat::Nv12,
+            PixelFormat::Rgb24,
+            PixelFormat::Pal8,
+        ] {
+            assert!(cfg.inputs[0].accepts(FilterFormat::Pixel(format)));
+        }
+        // AV_PIX_FMT_FLAG_BITSTREAM and FF_PIX_FMT_FLAG_SW_FLAT_SUB are
+        // rejected by ff_formats_pixdesc_filter(0, reject_flags).
+        for format in [
+            PixelFormat::None,
+            PixelFormat::MonoWhite,
+            PixelFormat::MonoBlack,
+            PixelFormat::Yuyv422,
+            PixelFormat::Uyvy422,
+        ] {
+            assert!(!cfg.inputs[0].accepts(FilterFormat::Pixel(format)));
+        }
+    }
+
+    #[test]
+    fn factory_options_reach_the_crop_filter() {
+        let filter = registry::create_filter_with_options(
+            "crop",
+            &[
+                ("w", "4"),
+                ("h", "2"),
+                ("x", "2"),
+                ("y", "1"),
+                ("exact", "1"),
+            ],
+        )
+        .unwrap();
+        let mut filter = filter;
+        filter.activate().unwrap();
+
+        let src = make_frame(8, 8, PixelFormat::Gray8, &[(8, 8, 8)]);
+        let out = filter.filter_frame(src.clone()).unwrap().remove(0);
+        let video = out.video().unwrap();
+        assert_eq!((video.width, video.height), (4, 2));
+        assert_eq!(video.planes[0].offset, 8 + 2);
+        assert_region(
+            &src.video().unwrap().planes[0],
+            &video.planes[0],
+            1,
+            2,
+            2,
+            4,
+        );
+
+        // `out_w`/`out_h` are aliases and the boolean options accept symbolic
+        // values, as in FFmpeg's AVOption table.
+        assert!(
+            registry::create_filter_with_options(
+                "crop",
+                &[("out_w", "4"), ("out_h", "4"), ("keep_aspect", "true")]
+            )
+            .is_ok()
+        );
+        assert!(registry::create_filter_with_options("crop", &[("w", "iw/2")]).is_err());
+        assert!(registry::create_filter_with_options("crop", &[("bogus", "1")]).is_err());
     }
 }

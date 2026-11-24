@@ -12,7 +12,10 @@ use wedeo_core::frame::{Frame, FrameData, FramePlane};
 use wedeo_core::metadata::Metadata;
 use wedeo_core::pixel_format::PixelFormat;
 use wedeo_core::rational::Rational;
-use wedeo_filter_pad::{Filter, PadColor, PadFilter, find_filter_by_name};
+use wedeo_filter_pad::{
+    Filter, FilterFormat, FormatsConfig, PadColor, PadFilter, create_filter_with_options,
+    find_filter_by_name,
+};
 
 /// Build a YUV420p frame with a distinct constant value on each plane.
 fn make_frame(w: u32, h: u32) -> Frame {
@@ -109,4 +112,58 @@ fn pad_expression_options() {
     // x/y=1 round down to 0 for 4:2:0; dimensions stay even.
     assert_eq!((video.width, video.height), (6, 6));
     assert_eq!(pixel(&out, 0, 0, 0), 100);
+}
+
+#[test]
+fn pad_query_formats_matches_draw_supported_formats() {
+    let filter = find_filter_by_name("pad").unwrap().create().unwrap();
+    let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+    filter.query_formats(&mut cfg).unwrap();
+
+    // ff_draw_init() can describe these families; palettes and bitstreams
+    // cannot be padded by vf_pad.
+    for accepted in [
+        PixelFormat::Yuv420p,
+        PixelFormat::Yuv422p,
+        PixelFormat::Nv12,
+        PixelFormat::Yuyv422,
+        PixelFormat::Rgb24,
+        PixelFormat::Gray16le,
+    ] {
+        assert!(cfg.inputs[0].accepts(FilterFormat::Pixel(accepted)));
+        assert!(cfg.outputs[0].accepts(FilterFormat::Pixel(accepted)));
+    }
+    for rejected in [
+        PixelFormat::None,
+        PixelFormat::Pal8,
+        PixelFormat::MonoWhite,
+        PixelFormat::MonoBlack,
+        PixelFormat::Yuv422p10le,
+    ] {
+        assert!(!cfg.outputs[0].accepts(FilterFormat::Pixel(rejected)));
+    }
+}
+
+#[test]
+fn pad_factory_options_reach_the_filter() {
+    let mut filter = create_filter_with_options(
+        "pad",
+        &[
+            ("w", "8"),
+            ("h", "8"),
+            ("x", "2"),
+            ("y", "2"),
+            ("color", "white"),
+        ],
+    )
+    .unwrap();
+    filter.activate().unwrap();
+
+    let out = filter.filter_frame(make_frame(4, 4)).unwrap().remove(0);
+    let video = out.video().unwrap();
+    assert_eq!((video.width, video.height), (8, 8));
+    assert_eq!(pixel(&out, 0, 0, 0), 235);
+    assert_eq!(pixel(&out, 0, 2, 2), 100);
+
+    assert!(create_filter_with_options("pad", &[("bogus", "1")]).is_err());
 }

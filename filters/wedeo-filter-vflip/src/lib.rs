@@ -34,6 +34,7 @@ use wedeo_core::pixel_format::PixelFormat;
 use wedeo_filter::registry::FilterFactory;
 // Re-exported so the FATE conformance test can drive the filter even though
 // the wedeo-fate harness has no direct dependency on wedeo-filter.
+pub use wedeo_filter::formats::{FilterFormat, FilterFormats, FormatsConfig, PadFormats};
 pub use wedeo_filter::{
     Filter, FilterDescriptor, FilterFlags, FilterPadDescriptor, FilterPadDirection, registry,
 };
@@ -184,6 +185,50 @@ static DESCRIPTOR: FilterDescriptor = FilterDescriptor {
     flags: FilterFlags::SUPPORT_TIMELINE_GENERIC,
 };
 
+/// Formats advertised by `query_formats()`.
+///
+/// FFmpeg's `vf_vflip.c` has no `query_formats()` callback, so the framework
+/// default (`ff_formats_pixdesc_filter(0, 0)` for video links) accepts every
+/// pixel format. The byte-wise row reversal implemented here works for every
+/// format wedeo-core can represent except `AV_PIX_FMT_NONE`, which is the
+/// sentinel for "unset" rather than a real pixel format.
+const SUPPORTED_FORMATS: &[PixelFormat] = &[
+    PixelFormat::Yuv420p,
+    PixelFormat::Yuyv422,
+    PixelFormat::Rgb24,
+    PixelFormat::Bgr24,
+    PixelFormat::Yuv422p,
+    PixelFormat::Yuv444p,
+    PixelFormat::Yuv410p,
+    PixelFormat::Yuv411p,
+    PixelFormat::Gray8,
+    PixelFormat::MonoWhite,
+    PixelFormat::MonoBlack,
+    PixelFormat::Pal8,
+    PixelFormat::Yuvj420p,
+    PixelFormat::Yuvj422p,
+    PixelFormat::Yuvj444p,
+    PixelFormat::Uyvy422,
+    PixelFormat::Nv12,
+    PixelFormat::Nv21,
+    PixelFormat::Argb,
+    PixelFormat::Rgba,
+    PixelFormat::Abgr,
+    PixelFormat::Bgra,
+    PixelFormat::Gray16be,
+    PixelFormat::Gray16le,
+    PixelFormat::Yuv420p16le,
+    PixelFormat::Yuv420p16be,
+    PixelFormat::Rgb48be,
+    PixelFormat::Rgb48le,
+    PixelFormat::Yuv422p10le,
+    PixelFormat::Yuv422p10be,
+    PixelFormat::Yuv444p10le,
+    PixelFormat::Yuv444p10be,
+    PixelFormat::Yuv420p10le,
+    PixelFormat::Yuv420p10be,
+];
+
 /// The `vflip` filter instance. All state is derived from the frame format
 /// inside `filter_frame` (the Wedeo `Filter` trait has no config_props step).
 pub struct VflipFilter;
@@ -200,6 +245,13 @@ impl Filter for VflipFilter {
     }
 
     fn activate(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn query_formats(&self, cfg: &mut FormatsConfig) -> Result<()> {
+        // Same list on both pads: vflip reverses rows in place and performs no
+        // pixel-format conversion.
+        cfg.set_common_pixel_formats(SUPPORTED_FORMATS);
         Ok(())
     }
 
@@ -239,6 +291,15 @@ impl FilterFactory for VflipFilterFactory {
 
     fn create(&self) -> Result<Box<dyn Filter>> {
         Ok(Box::new(VflipFilter::new()))
+    }
+
+    // FFmpeg's vflip filter has no private AVOptions; av_opt_set() rejects any
+    // option name. This override keeps the factory's option path explicit.
+    fn create_with_options(&self, options: &[(&str, &str)]) -> Result<Box<dyn Filter>> {
+        if options.is_empty() {
+            return self.create();
+        }
+        Err(Error::InvalidArgument)
     }
 }
 
@@ -452,5 +513,33 @@ mod tests {
         );
         flip_bayer(&mut frame, 4).unwrap();
         assert_eq!(plane_bytes(&frame, 0), vec![3, 3, 4, 4, 1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn query_formats_accepts_every_real_pixel_format() {
+        let filter = VflipFilter::new();
+        let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+        filter.query_formats(&mut cfg).unwrap();
+
+        let expected = FilterFormats::from_pixels(SUPPORTED_FORMATS.iter().copied());
+        assert_eq!(cfg.inputs[0].formats, expected);
+        assert_eq!(cfg.outputs[0].formats, expected);
+        for format in [
+            PixelFormat::Yuv420p,
+            PixelFormat::Yuyv422,
+            PixelFormat::MonoWhite,
+            PixelFormat::Pal8,
+            PixelFormat::Nv12,
+        ] {
+            assert!(cfg.inputs[0].accepts(FilterFormat::Pixel(format)));
+        }
+        assert!(!cfg.inputs[0].accepts(FilterFormat::Pixel(PixelFormat::None)));
+    }
+
+    #[test]
+    fn factory_rejects_options_as_ffmpeg_does() {
+        let factory = wedeo_filter::registry::find_filter_by_name("vflip").unwrap();
+        assert!(factory.create_with_options(&[]).is_ok());
+        assert!(factory.create_with_options(&[("dir", "1")]).is_err());
     }
 }

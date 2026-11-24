@@ -21,6 +21,7 @@ use wedeo_filter::{
 // Re-exported so the FATE harness can reach the registry and traits without
 // depending on `wedeo-filter` directly (only the filter crates are linked in).
 pub use wedeo_filter::Filter as RegisteredFilter;
+pub use wedeo_filter::formats::{FilterFormat, FilterFormats, FormatsConfig, PadFormats};
 pub use wedeo_filter::registry;
 pub use wedeo_filter::registry::FilterFactory as RegisteredFilterFactory;
 
@@ -121,6 +122,57 @@ fn format_info(format: PixelFormat) -> FormatInfo {
     }
 }
 
+/// Formats advertised by `query_formats()`.
+///
+/// FFmpeg:
+/// ```c
+/// for (fmt = 0; desc = av_pix_fmt_desc_get(fmt); fmt++) {
+///     if (!(desc->flags & AV_PIX_FMT_FLAG_HWACCEL ||
+///           desc->flags & AV_PIX_FMT_FLAG_BITSTREAM ||
+///           (desc->log2_chroma_w != desc->log2_chroma_h &&
+///            desc->comp[0].plane == desc->comp[1].plane)) &&
+///         (ret = ff_add_format(&pix_fmts, fmt)) < 0)
+///         return ret;
+/// }
+/// return ff_set_common_formats2(ctx, cfg_in, cfg_out, pix_fmts);
+/// ```
+///
+/// The last condition rejects packed 4:2:2 formats (`yuyv422`, `uyvy422`),
+/// whose two chroma components live on plane 0. Bitstream formats are
+/// rejected too; Wedeo has no hardware-accelerated pixel format.
+const SUPPORTED_FORMATS: &[PixelFormat] = &[
+    PixelFormat::Yuv420p,
+    PixelFormat::Rgb24,
+    PixelFormat::Bgr24,
+    PixelFormat::Yuv422p,
+    PixelFormat::Yuv444p,
+    PixelFormat::Yuv410p,
+    PixelFormat::Yuv411p,
+    PixelFormat::Gray8,
+    PixelFormat::Pal8,
+    PixelFormat::Yuvj420p,
+    PixelFormat::Yuvj422p,
+    PixelFormat::Yuvj444p,
+    PixelFormat::Nv12,
+    PixelFormat::Nv21,
+    PixelFormat::Argb,
+    PixelFormat::Rgba,
+    PixelFormat::Abgr,
+    PixelFormat::Bgra,
+    PixelFormat::Gray16be,
+    PixelFormat::Gray16le,
+    PixelFormat::Yuv420p10le,
+    PixelFormat::Yuv420p10be,
+    PixelFormat::Rgb48be,
+    PixelFormat::Rgb48le,
+    PixelFormat::Yuv420p16le,
+    PixelFormat::Yuv420p16be,
+    PixelFormat::Yuv422p10le,
+    PixelFormat::Yuv422p10be,
+    PixelFormat::Yuv444p10le,
+    PixelFormat::Yuv444p10be,
+];
+
 /// `AV_CEIL_RSHIFT(a, b)`: ceil(a / 2^b) for non-negative a and small b.
 fn ceil_rshift(value: usize, shift: u32) -> usize {
     (value + ((1usize << shift) - 1)) >> shift
@@ -195,6 +247,13 @@ impl Filter for HflipFilter {
         Ok(())
     }
 
+    fn query_formats(&self, cfg: &mut FormatsConfig) -> Result<()> {
+        // FFmpeg: ff_set_common_formats2() applies the same list to both pads;
+        // this filter never converts pixels, it only reorders them.
+        cfg.set_common_pixel_formats(SUPPORTED_FORMATS);
+        Ok(())
+    }
+
     fn filter_frame(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         let video = frame.video().ok_or(Error::InvalidArgument)?;
         let info = format_info(video.format);
@@ -263,6 +322,17 @@ impl FilterFactory for HflipFilterFactory {
 
     fn create(&self) -> Result<Box<dyn Filter>> {
         Ok(Box::new(HflipFilter::new()))
+    }
+
+    // FFmpeg's hflip filter has no private AVOptions, so av_opt_set() rejects
+    // every option name. Taking this path also ensures the factory honours the
+    // graph's `create_with_options()` interface instead of silently discarding
+    // the supplied options.
+    fn create_with_options(&self, options: &[(&str, &str)]) -> Result<Box<dyn Filter>> {
+        if options.is_empty() {
+            return self.create();
+        }
+        Err(Error::InvalidArgument)
     }
 }
 
@@ -415,5 +485,41 @@ mod tests {
         );
         let err = HflipFilter::new().filter_frame(frame).unwrap_err();
         assert_eq!(err, Error::InvalidArgument);
+    }
+
+    #[test]
+    fn query_formats_rejects_bitstream_and_packed_422() {
+        let filter = HflipFilter::new();
+        let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+        filter.query_formats(&mut cfg).unwrap();
+
+        let expected = FilterFormats::from_pixels(SUPPORTED_FORMATS.iter().copied());
+        assert_eq!(cfg.inputs[0].formats, expected);
+        assert_eq!(cfg.outputs[0].formats, expected);
+        for format in [
+            PixelFormat::Yuv420p,
+            PixelFormat::Yuv422p10le,
+            PixelFormat::Nv12,
+        ] {
+            assert!(cfg.outputs[0].accepts(FilterFormat::Pixel(format)));
+        }
+        // AV_PIX_FMT_FLAG_BITSTREAM or log2_chroma_w != log2_chroma_h with both
+        // chroma components on plane 0.
+        for format in [
+            PixelFormat::None,
+            PixelFormat::MonoWhite,
+            PixelFormat::MonoBlack,
+            PixelFormat::Yuyv422,
+            PixelFormat::Uyvy422,
+        ] {
+            assert!(!cfg.outputs[0].accepts(FilterFormat::Pixel(format)));
+        }
+    }
+
+    #[test]
+    fn factory_rejects_options_as_ffmpeg_does() {
+        let factory = registry::find_filter_by_name("hflip").unwrap();
+        assert!(factory.create_with_options(&[]).is_ok());
+        assert!(factory.create_with_options(&[("dir", "1")]).is_err());
     }
 }
