@@ -2395,12 +2395,327 @@ pub fn avg_pixels_inplace(
 }
 
 // ---------------------------------------------------------------------------
+// High bit-depth (9..14) motion compensation
+// ---------------------------------------------------------------------------
+//
+// FFmpeg compiles the qpel/chroma templates once per BIT_DEPTH with `pixel =
+// uint16_t` for BIT_DEPTH > 8. The 8-bit kernels above clip their intermediate
+// half-pel values to 255, which would destroy the low bits of a 10-bit sample.
+// The kernels below are a direct translation of `h264qpel_template.c` /
+// `h264chroma_template.c` for native-endian `u16` samples.
+//
+// Reference: FFmpeg `libavcodec/h264qpel_template.c` (op_put/op2_put),
+//            `libavcodec/h264chroma_template.c` (op_put).
+
+/// Read a reference sample with edge clamping (u16 planes).
+#[inline(always)]
+fn get16(ref_data: &[u16], stride: usize, x: i32, y: i32, w: i32, h: i32) -> i32 {
+    let cx = x.clamp(0, w - 1) as usize;
+    let cy = y.clamp(0, h - 1) as usize;
+    ref_data[cy * stride + cx] as i32
+}
+
+/// 6-tap FIR horizontal half-pel output, unshifted (`h264qpel_template.c`).
+#[inline(always)]
+fn filter6_h16(ref_data: &[u16], stride: usize, x: i32, y: i32, w: i32, h: i32) -> i32 {
+    let s = |dx: i32| get16(ref_data, stride, x + dx, y, w, h);
+    (s(0) + s(1)) * 20 - (s(-1) + s(2)) * 5 + (s(-2) + s(3))
+}
+
+/// 6-tap FIR vertical half-pel output, unshifted (`h264qpel_template.c`).
+#[inline(always)]
+fn filter6_v16(ref_data: &[u16], stride: usize, x: i32, y: i32, w: i32, h: i32) -> i32 {
+    let s = |dy: i32| get16(ref_data, stride, x, y + dy, w, h);
+    (s(0) + s(1)) * 20 - (s(-1) + s(2)) * 5 + (s(-2) + s(3))
+}
+
+/// 2D half-pel (`mc22`) output, unshifted.
+///
+/// FFmpeg's `hv_lowpass` uses a `pad` of `-10 * MAX_PIXEL` at BIT_DEPTH 10 so
+/// the first-pass intermediates fit in `pixeltmp`; the pad is removed before
+/// the vertical pass. Reproduce it verbatim for behavioral parity.
+#[inline(always)]
+fn filter6_hv16(ref_data: &[u16], stride: usize, x: i32, y: i32, w: i32, h: i32) -> i32 {
+    let pad = -10 * 1023;
+    let mut tmp = [0i32; 6];
+    for (k, t) in tmp.iter_mut().enumerate() {
+        let yy = y - 2 + k as i32;
+        let s = |dx: i32| get16(ref_data, stride, x + dx, yy, w, h);
+        *t = (s(0) + s(1)) * 20 - (s(-1) + s(2)) * 5 + (s(-2) + s(3)) + pad;
+    }
+    let v = |i: usize| tmp[i] - pad;
+    // FFmpeg's hv_lowpass second pass uses taps (y-2, y-1, y, y+1, y+2, y+3)
+    // with the {1, -5, 20, 20, -5, 1} coefficients centred on (y, y+1).
+    (v(2) + v(3)) * 20 - (v(1) + v(4)) * 5 + (v(0) + v(5))
+}
+
+#[inline(always)]
+fn clip16(v: i32, max_pixel: i32) -> u16 {
+    v.clamp(0, max_pixel) as u16
+}
+
+#[inline(always)]
+fn avg16(a: i32, b: i32, max_pixel: i32) -> u16 {
+    clip16((a + b + 1) >> 1, max_pixel)
+}
+
+/// Quarter-pel luma motion compensation for `u16` sample planes.
+///
+/// This is the high-depth counterpart of [`mc_luma`]. `dx`/`dy` are quarter-pel
+/// fractional MV components (0..3); `ref_x`/`ref_y_pos` are the integer part of
+/// the reference position. Samples are clipped to `0..=max_pixel` (1023 for
+/// High 10). Source coordinates are edge-clamped exactly as in the 8-bit path.
+#[allow(clippy::too_many_arguments)] // mirrors FFmpeg's MC function signature
+pub fn mc_luma_u16(
+    dst: &mut [u16],
+    dst_stride: usize,
+    ref_y: &[u16],
+    ref_stride: usize,
+    ref_x: i32,
+    ref_y_pos: i32,
+    dx: u8,
+    dy: u8,
+    block_w: usize,
+    block_h: usize,
+    pic_width: u32,
+    pic_height: u32,
+    max_pixel: i32,
+) {
+    let pw = pic_width as i32;
+    let ph = pic_height as i32;
+    for j in 0..block_h {
+        for i in 0..block_w {
+            let x = ref_x + i as i32;
+            let y = ref_y_pos + j as i32;
+            let val = match (dx, dy) {
+                (0, 0) => clip16(get16(ref_y, ref_stride, x, y, pw, ph), max_pixel),
+                (2, 0) => clip16(
+                    (filter6_h16(ref_y, ref_stride, x, y, pw, ph) + 16) >> 5,
+                    max_pixel,
+                ),
+                (0, 2) => clip16(
+                    (filter6_v16(ref_y, ref_stride, x, y, pw, ph) + 16) >> 5,
+                    max_pixel,
+                ),
+                (2, 2) => clip16(
+                    (filter6_hv16(ref_y, ref_stride, x, y, pw, ph) + 512) >> 10,
+                    max_pixel,
+                ),
+                _ => {
+                    // Quarter-pel positions are the rounded average of the two
+                    // neighbouring integer/half-pel positions (FFmpeg's
+                    // `pixels_l2` = `(a + b + 1) >> 1`). The exact pairing for
+                    // each of the 16 positions follows H264_MC in
+                    // `h264qpel_template.c` (mc10..mc33).
+                    let int = |ox: i32, oy: i32| get16(ref_y, ref_stride, x + ox, y + oy, pw, ph);
+                    let h = |ox: i32, oy: i32| {
+                        clip16(
+                            (filter6_h16(ref_y, ref_stride, x + ox, y + oy, pw, ph) + 16) >> 5,
+                            max_pixel,
+                        ) as i32
+                    };
+                    let v = |ox: i32, oy: i32| {
+                        clip16(
+                            (filter6_v16(ref_y, ref_stride, x + ox, y + oy, pw, ph) + 16) >> 5,
+                            max_pixel,
+                        ) as i32
+                    };
+                    let hv = |ox: i32, oy: i32| {
+                        clip16(
+                            (filter6_hv16(ref_y, ref_stride, x + ox, y + oy, pw, ph) + 512) >> 10,
+                            max_pixel,
+                        ) as i32
+                    };
+                    let (a, b) = match (dx, dy) {
+                        (1, 0) => (int(0, 0), h(0, 0)),
+                        (3, 0) => (int(1, 0), h(0, 0)),
+                        (0, 1) => (int(0, 0), v(0, 0)),
+                        (0, 3) => (int(0, 1), v(0, 0)),
+                        (1, 1) => (h(0, 0), v(0, 0)),
+                        (3, 1) => (h(0, 0), v(1, 0)),
+                        (1, 3) => (h(0, 1), v(0, 0)),
+                        (3, 3) => (h(0, 1), v(1, 0)),
+                        (2, 1) => (h(0, 0), hv(0, 0)),
+                        (2, 3) => (h(0, 1), hv(0, 0)),
+                        (1, 2) => (v(0, 0), hv(0, 0)),
+                        (3, 2) => (v(1, 0), hv(0, 0)),
+                        _ => unreachable!("handled by the (0/2, 0/2) arms above"),
+                    };
+                    avg16(a, b, max_pixel)
+                }
+            };
+            dst[j * dst_stride + i] = val;
+        }
+    }
+}
+
+/// Eighth-pel chroma motion compensation for `u16` sample planes.
+///
+/// Direct translation of FFmpeg's `h264chroma_template.c`: bilinear weights
+/// `A=(8-x)(8-y)`, `B=x(8-y)`, `C=(8-x)y`, `D=xy` and `CLIP((v + 32) >> 6)`.
+#[allow(clippy::too_many_arguments)] // mirrors FFmpeg's MC function signature
+pub fn mc_chroma_u16(
+    dst: &mut [u16],
+    dst_stride: usize,
+    ref_uv: &[u16],
+    ref_stride: usize,
+    ref_x: i32,
+    ref_y_pos: i32,
+    dx: u8,
+    dy: u8,
+    block_w: usize,
+    block_h: usize,
+    pic_width: u32,
+    pic_height: u32,
+    max_pixel: i32,
+) {
+    let x = dx as i32;
+    let y = dy as i32;
+    let a = (8 - x) * (8 - y);
+    let b = x * (8 - y);
+    let c = (8 - x) * y;
+    let d = x * y;
+    let pw = pic_width as i32;
+    let ph = pic_height as i32;
+    for j in 0..block_h {
+        for i in 0..block_w {
+            let px = ref_x + i as i32;
+            let py = ref_y_pos + j as i32;
+            let v = if d != 0 {
+                a * get16(ref_uv, ref_stride, px, py, pw, ph)
+                    + b * get16(ref_uv, ref_stride, px + 1, py, pw, ph)
+                    + c * get16(ref_uv, ref_stride, px, py + 1, pw, ph)
+                    + d * get16(ref_uv, ref_stride, px + 1, py + 1, pw, ph)
+            } else if b + c != 0 {
+                let e = b + c;
+                let (sx, sy) = if c != 0 { (0, 1) } else { (1, 0) };
+                a * get16(ref_uv, ref_stride, px, py, pw, ph)
+                    + e * get16(ref_uv, ref_stride, px + sx, py + sy, pw, ph)
+            } else {
+                a * get16(ref_uv, ref_stride, px, py, pw, ph)
+            };
+            dst[j * dst_stride + i] = clip16((v + 32) >> 6, max_pixel);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u16_mc_full_pel_copy_and_clamp() {
+        let w = 8usize;
+        let h = 8usize;
+        let mut r = vec![0u16; w * h];
+        for (i, s) in r.iter_mut().enumerate() {
+            *s = (i * 37 % 1024) as u16;
+        }
+        let mut dst = vec![0u16; w * h];
+        mc_luma_u16(
+            &mut dst, w, &r, w, 0, 0, 0, 0, w, h, w as u32, h as u32, 1023,
+        );
+        assert_eq!(dst, r);
+    }
+
+    #[test]
+    fn u16_mc_uniform_reference_is_constant() {
+        // A uniform reference must produce the same value at every fractional
+        // position (the 6-tap filter sums to 32 and the chroma weights to 64).
+        let w = 16usize;
+        let h = 16usize;
+        let r = vec![640u16; w * h];
+        let mut dst = vec![0u16; 4 * 4];
+        for dx in 0..4u8 {
+            for dy in 0..4u8 {
+                dst.fill(0);
+                mc_luma_u16(
+                    &mut dst, 4, &r, w, 2, 2, dx, dy, 4, 4, w as u32, h as u32, 1023,
+                );
+                assert!(
+                    dst.iter().all(|&s| s == 640),
+                    "luma dx={dx} dy={dy}: {:?}",
+                    dst
+                );
+            }
+        }
+
+        let mut cdst = vec![0u16; 8 * 8];
+        for dx in 0..8u8 {
+            for dy in 0..8u8 {
+                cdst.fill(0);
+                mc_chroma_u16(
+                    &mut cdst, 8, &r, w, 2, 2, dx, dy, 8, 8, w as u32, h as u32, 1023,
+                );
+                assert!(
+                    cdst.iter().all(|&s| s == 640),
+                    "chroma dx={dx} dy={dy}: {:?}",
+                    cdst
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn u16_mc_matches_u8_mc_in_8bit_range() {
+        // For samples in 0..=255 and max_pixel=255 the u16 and u8 kernels must
+        // agree at every fractional position. This cross-checks the translations
+        // of the 6-tap, HV and bilinear formulas against the established 8-bit
+        // implementation.
+        let w = 32usize;
+        let h = 32usize;
+        let mut r8 = vec![0u8; w * h];
+        for (i, s) in r8.iter_mut().enumerate() {
+            *s = ((i * 29 + (i / w) * 17) % 256) as u8;
+        }
+        let r16: Vec<u16> = r8.iter().map(|&v| v as u16).collect();
+        let mut scratch = McScratch::new();
+        for dx in 0..4u8 {
+            for dy in 0..4u8 {
+                let mut d8 = vec![0u8; 8 * 8];
+                let mut d16 = vec![0u16; 8 * 8];
+                mc_luma(
+                    &mut d8,
+                    8,
+                    &r8,
+                    w,
+                    5,
+                    5,
+                    dx,
+                    dy,
+                    8,
+                    8,
+                    w as u32,
+                    h as u32,
+                    &mut scratch,
+                );
+                mc_luma_u16(
+                    &mut d16, 8, &r16, w, 5, 5, dx, dy, 8, 8, w as u32, h as u32, 255,
+                );
+                assert_eq!(
+                    d8.iter().map(|&v| v as u16).collect::<Vec<_>>(),
+                    d16,
+                    "luma dx={dx} dy={dy}"
+                );
+
+                let mut c8 = vec![0u8; 4 * 4];
+                let mut c16 = vec![0u16; 4 * 4];
+                mc_chroma(&mut c8, 4, &r8, w, 5, 5, dx, dy, 4, 4, w as u32, h as u32);
+                mc_chroma_u16(
+                    &mut c16, 4, &r16, w, 5, 5, dx, dy, 4, 4, w as u32, h as u32, 255,
+                );
+                assert_eq!(
+                    c8.iter().map(|&v| v as u16).collect::<Vec<_>>(),
+                    c16,
+                    "chroma dx={dx} dy={dy}"
+                );
+            }
+        }
+    }
 
     /// Create a simple 8x8 test reference frame with a known gradient pattern.
     fn make_test_ref(w: usize, h: usize) -> (Vec<u8>, usize) {
