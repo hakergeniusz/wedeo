@@ -69,8 +69,38 @@ pub struct BiWeight {
     pub ox: i32,
 }
 
+/// Padding around a decoded picture plane. Matches `wedeo-codec-hevc`'s
+/// `picture::PAD`: FFmpeg calls `emulated_edge_mc()` whenever an interpolation
+/// tap can fall outside the picture, replicating the edge samples into a
+/// padded buffer. Our pictures already carry padding, so we replicate by
+/// clamping the sample coordinates to the picture area instead.
+const MC_PAD: usize = 16;
+
+/// Infer the picture area of a reference plane from its allocated size.
+/// Synthetic buffers used by the unit tests are smaller than a padded picture
+/// and keep the old unchecked behaviour.
+#[inline]
+fn picture_bounds(src_len: usize, stride: usize) -> Option<(usize, usize, usize, usize)> {
+    if stride <= 2 * MC_PAD || src_len <= stride * (2 * MC_PAD) {
+        return None;
+    }
+    let width = stride - 2 * MC_PAD;
+    let height = src_len / stride - 2 * MC_PAD;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((MC_PAD, MC_PAD + width - 1, MC_PAD, MC_PAD + height - 1))
+}
+
 #[inline]
 fn sample(src: &[u16], stride: usize, x: i64, y: i64) -> Result<u16> {
+    let (mut x, mut y) = (x, y);
+    if let Some((x_min, x_max, y_min, y_max)) = picture_bounds(src.len(), stride) {
+        // FFmpeg's `emulated_edge_mc()` replicates edge samples into the
+        // padding whenever a filter tap crosses the picture boundary.
+        x = x.clamp(x_min as i64, x_max as i64);
+        y = y.clamp(y_min as i64, y_max as i64);
+    }
     if x < 0 || y < 0 {
         return Err(DspError::OutOfBounds {
             what: "motion compensation source",

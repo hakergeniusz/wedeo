@@ -92,32 +92,77 @@ pub fn intra_prediction_unit(
         }
     }
 
-    // Chroma mode derivation (8.4.1.2.1).
-    let chroma_mode = cabac.decode_intra_chroma_pred_mode() as u8;
-    let n = if sps.chroma_format_idc == 3 {
-        side * side
-    } else {
-        1
-    };
-    for k in 0..n {
-        state.chroma_modes[k] = chroma_mode;
+    derive_chroma_modes(
+        sps.chroma_format_idc,
+        side,
+        &state.modes,
+        || cabac.decode_intra_chroma_pred_mode() as u8,
+        &mut state.chroma_modes,
+        &mut state.modes_c,
+    );
+    let _ = pps;
+    Ok(())
+}
+
+/// Chroma mode derivation (8.4.1.2.1) from FFmpeg's
+/// `intra_prediction_unit()`:
+///
+/// ```c
+/// if (sps->chroma_format_idc == 3) {
+///     for (i = 0; i < side; i++) {
+///         for (j = 0; j < side; j++) {
+///             lc->pu.chroma_mode_c[2 * i + j] = chroma_mode = ff_hevc_intra_chroma_pred_mode_decode(lc);
+///             ...
+///         }
+///     }
+/// } else if (sps->chroma_format_idc == 2) {
+///     lc->pu.chroma_mode_c[0] = chroma_mode = ff_hevc_intra_chroma_pred_mode_decode(lc);
+///     ...
+///     lc->pu.intra_pred_mode_c[0] = tab_mode_idx[mode_idx];
+/// } else if (sps->chroma_format_idc != 0) {
+///     chroma_mode = ff_hevc_intra_chroma_pred_mode_decode(lc);
+///     ...
+/// }
+/// ```
+///
+/// The decode closure is called once per prediction unit for 4:4:4 and once
+/// per coding unit otherwise (never for monochrome).
+fn derive_chroma_modes(
+    chroma_format_idc: u32,
+    side: usize,
+    modes: &[u8; 4],
+    mut decode_mode: impl FnMut() -> u8,
+    chroma_modes: &mut [u8; 4],
+    modes_c: &mut [u8; 4],
+) {
+    let mapped_mode = |k: usize, chroma_mode: u8| -> u8 {
         let idx = chroma_mode as usize;
-        let mapped = if idx == 4 {
-            state.modes[k.min(3)]
-        } else if state.modes[k.min(3)] == INTRA_CHROMA_TABLE[idx] {
+        if idx == 4 {
+            modes[k]
+        } else if modes[k] == INTRA_CHROMA_TABLE[idx] {
             34
         } else {
             INTRA_CHROMA_TABLE[idx]
-        };
-        let mapped = if sps.chroma_format_idc == 2 && mapped < TAB_MODE_IDX.len() as u8 {
-            TAB_MODE_IDX[mapped as usize]
-        } else {
-            mapped
-        };
-        state.modes_c[k] = mapped;
+        }
+    };
+    if chroma_format_idc == 3 {
+        for i in 0..side {
+            for j in 0..side {
+                let k = 2 * i + j;
+                let chroma_mode = decode_mode();
+                chroma_modes[k] = chroma_mode;
+                modes_c[k] = mapped_mode(k, chroma_mode);
+            }
+        }
+    } else if chroma_format_idc == 2 {
+        let chroma_mode = decode_mode();
+        chroma_modes[0] = chroma_mode;
+        modes_c[0] = TAB_MODE_IDX[mapped_mode(0, chroma_mode) as usize];
+    } else if chroma_format_idc != 0 {
+        let chroma_mode = decode_mode();
+        chroma_modes[0] = chroma_mode;
+        modes_c[0] = mapped_mode(0, chroma_mode);
     }
-    let _ = pps;
-    Ok(())
 }
 
 /// Default intra mode/flag state for inter or skip CUs (FFmpeg's
@@ -128,7 +173,7 @@ pub fn intra_defaults(
     x0: i32,
     y0: i32,
     log2_cb_size: u32,
-    picture: &mut Picture,
+    _picture: &mut Picture,
 ) {
     let pb_size = 1i32 << log2_cb_size;
     let mut size_in_pus = (pb_size as u32) >> sps.log2_min_pu_size;
@@ -138,21 +183,19 @@ pub fn intra_defaults(
     let x_pu = (x0 as u32 >> sps.log2_min_pu_size) as usize;
     let y_pu = (y0 as u32 >> sps.log2_min_pu_size) as usize;
     for j in 0..size_in_pus as usize {
-        for i in 0..state.min_pu_width.min(x_pu + size_in_pus as usize) {
+        for i in 0..size_in_pus as usize {
             let idx = (y_pu + j) * state.min_pu_width + x_pu + i;
             if idx < state.tab_ipm.len() {
                 state.tab_ipm[idx] = 1; // INTRA_DC
             }
         }
     }
-    // Mark the PUs as intra in the MV field table.
-    for j in 0..size_in_pus as usize {
-        for i in 0..size_in_pus as usize {
-            if let Some(f) = picture.tab_mvf.get_mut(x_pu + i, y_pu + j) {
-                f.pred_flag = wedeo_codec_hevc_refs::PredFlag::INTRA;
-            }
-        }
-    }
+    // hevcdec.c: "if (lc->cu.pred_mode == MODE_INTRA) ... pred_flag = PF_INTRA".
+    // The per-frame `tab_mvf` starts as PF_INTRA and each PU is decoded once,
+    // so an intra CU never needs to re-mark it. Marking here unconditionally
+    // would erase the MVs of a skip/inter CU (called after `prediction_unit`
+    // in `hls_coding_unit`), which FFmpeg does not do and which breaks the
+    // following block's AMVP/merge candidates.
     state.modes = [1; 4];
     state.modes_c = [1; 4];
 }
@@ -551,5 +594,91 @@ mod tests {
         assert_eq!(min_tb_addr_zs(&geo, -1, 0), -1);
         assert_eq!(min_tb_addr_zs(&geo, 0, -1), -1);
         assert_eq!(min_tb_addr_zs(&geo, -1, -1), -1);
+    }
+
+    #[test]
+    fn chroma_modes_444_decode_one_per_pu() {
+        let mut chroma_modes = [0u8; 4];
+        let mut modes_c = [0u8; 4];
+        let mut decoded = [0u8; 4];
+        let mut i = 0;
+        derive_chroma_modes(
+            3,
+            2,
+            &[1, 1, 1, 1],
+            || {
+                decoded[i] = [3, 1, 4, 2][i];
+                let v = decoded[i];
+                i += 1;
+                v
+            },
+            &mut chroma_modes,
+            &mut modes_c,
+        );
+        assert_eq!(i, 4, "4:4:4 NxN must decode side*side chroma modes");
+        assert_eq!(chroma_modes, [3, 1, 4, 2]);
+        // table = { 0, 26, 10, 1 }; mode 0 matches luma mode 1 -> 34,
+        // mode 4 copies the luma mode (1).
+        assert_eq!(modes_c, [34, 26, 1, 10]);
+    }
+
+    #[test]
+    fn chroma_modes_422_uses_tab_mode_idx_and_420_decodes_once() {
+        let mut chroma_modes = [0u8; 4];
+        let mut modes_c = [9u8; 4];
+        let mut calls = 0;
+        derive_chroma_modes(
+            2,
+            2,
+            &[1, 1, 1, 1],
+            || {
+                calls += 1;
+                2
+            },
+            &mut chroma_modes,
+            &mut modes_c,
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(chroma_modes[0], 2);
+        assert_eq!(modes_c[0], TAB_MODE_IDX[10]);
+        assert_eq!(modes_c[1], 9, "unused PUs keep their previous mode");
+
+        let mut chroma_modes = [7u8; 4];
+        let mut modes_c = [8u8; 4];
+        let mut calls = 0;
+        derive_chroma_modes(
+            1,
+            2,
+            &[26, 1, 1, 1],
+            || {
+                calls += 1;
+                1
+            },
+            &mut chroma_modes,
+            &mut modes_c,
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(chroma_modes[0], 1);
+        assert_eq!(
+            modes_c[0], 34,
+            "same as luma maps to intra_pred_mode_c = 34"
+        );
+        assert_eq!(modes_c[2], 8);
+    }
+
+    #[test]
+    fn chroma_modes_400_decodes_nothing() {
+        let mut chroma_modes = [5u8; 4];
+        let mut modes_c = [6u8; 4];
+        derive_chroma_modes(
+            0,
+            1,
+            &[0; 4],
+            || panic!("monochrome must not decode intra_chroma_pred_mode"),
+            &mut chroma_modes,
+            &mut modes_c,
+        );
+        assert_eq!(chroma_modes, [5; 4]);
+        assert_eq!(modes_c, [6; 4]);
     }
 }
