@@ -37,6 +37,39 @@ pub trait Muxer: Send {
     /// Write the file trailer (finalize).
     fn write_trailer(&mut self, io: &mut BufferedIo) -> Result<()>;
 
+    /// Set a muxer-private option, mirroring FFmpeg's `av_opt_set()` on the
+    /// muxer's private context (e.g. `movflags=+faststart` for the MP4 muxer,
+    /// the `movflags` AVOption declared in `movenc.c`).
+    ///
+    /// Additive default: a no-op, so every existing muxer compiles unchanged.
+    /// Muxers that expose options override this and apply the value before
+    /// [`Muxer::write_header`] runs.
+    fn set_option(&mut self, key: &str, value: &str) -> Result<()> {
+        let _ = (key, value);
+        Ok(())
+    }
+
+    /// Set a container-level metadata tag (FFmpeg's `-metadata key=value`,
+    /// stored in `AVFormatContext->metadata`).
+    ///
+    /// Additive default: a no-op, so every existing muxer compiles unchanged.
+    /// Muxers that write tags override this and apply the value before
+    /// [`Muxer::write_header`] runs.
+    fn set_metadata(&mut self, key: &str, value: &str) -> Result<()> {
+        let _ = (key, value);
+        Ok(())
+    }
+
+    /// The option key/value pairs currently applied to this muxer. Used for
+    /// introspection and validation; FFmpeg exposes the equivalent through
+    /// `av_opt_next()` on the muxer's private context.
+    ///
+    /// Additive default: empty, since the default [`Muxer::set_option`] stores
+    /// nothing. Muxers that override `set_option` may override this too.
+    fn options(&self) -> &[(String, String)] {
+        &[]
+    }
+
     /// Names of the per-stream bitstream filters FFmpeg applies before muxing
     /// (e.g. `h264_mp4toannexb`, `vp9_superframe`, `aac_adtstoasc`).
     ///
@@ -176,10 +209,60 @@ mod tests {
         CodecParameters::new(CodecId::Vp9, MediaType::Video)
     }
 
+    /// Records option/metadata calls so tests can assert values and ordering.
+    #[derive(Default)]
+    struct RecordingMuxer {
+        calls: Vec<String>,
+    }
+
+    impl Muxer for RecordingMuxer {
+        fn write_header(&mut self, _io: &mut BufferedIo, _streams: &[Stream]) -> Result<()> {
+            self.calls.push("header".into());
+            Ok(())
+        }
+
+        fn write_packet(&mut self, _io: &mut BufferedIo, _packet: &Packet) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_trailer(&mut self, _io: &mut BufferedIo) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_option(&mut self, key: &str, value: &str) -> Result<()> {
+            self.calls.push(format!("option:{key}={value}"));
+            Ok(())
+        }
+
+        fn set_metadata(&mut self, key: &str, value: &str) -> Result<()> {
+            self.calls.push(format!("metadata:{key}={value}"));
+            Ok(())
+        }
+    }
+
     #[test]
     fn muxer_default_has_no_bitstream_filters() {
         let muxer = TestMuxer;
         assert!(muxer.bitstream_filters().is_empty());
+    }
+
+    #[test]
+    fn option_and_metadata_hooks_default_to_noop() {
+        let mut muxer = TestMuxer;
+        assert!(muxer.set_option("movflags", "+faststart").is_ok());
+        assert!(muxer.set_metadata("title", "Example").is_ok());
+        assert!(muxer.options().is_empty());
+    }
+
+    #[test]
+    fn muxer_can_override_option_and_metadata_hooks() {
+        let mut muxer = RecordingMuxer::default();
+        muxer.set_option("movflags", "+faststart").unwrap();
+        muxer.set_metadata("title", "Example").unwrap();
+        assert_eq!(
+            muxer.calls,
+            vec!["option:movflags=+faststart", "metadata:title=Example"]
+        );
     }
 
     #[test]
