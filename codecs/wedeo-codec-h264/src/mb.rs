@@ -1048,11 +1048,14 @@ fn decode_chroma(
                     // AC coefficients present — combine DC into coeffs[0] and
                     // process everything through a single IDCT pass (matching
                     // FFmpeg, which applies one +32 rounding bias for DC+AC).
-                    let cqm = 1 + plane_idx; // intra: 1=Cb, 2=Cr
                     mb.chroma_ac[plane_idx][blk_idx][0] = dc_val as i16;
+                    // FFmpeg h264_cavlc.c:1158 / h264_cabac.c use the raw
+                    // `chroma_qp` for AC dequantization. The +3 adjustment in
+                    // `c_qp` applies only to the chroma DC Hadamard
+                    // (h264_mb_template.c:229-234).
                     dequant::dequant_4x4(
                         &mut mb.chroma_ac[plane_idx][blk_idx],
-                        &ctx.dequant4.coeffs[cqm][c_qp as usize],
+                        &ctx.dequant4.coeffs[1 + plane_idx][chroma_qp[plane_idx] as usize],
                     );
                     // dequant_4x4 scaled [0] by the AC dequant factor, but
                     // DC was already fully dequantized by the Hadamard. Restore it.
@@ -2084,8 +2087,15 @@ fn apply_mc_partition(
     }
 
     let (chroma_mb_off, chroma_dst_stride) = chroma_mb_offset(&ctx.pic, mb_x, mb_y, mb_field);
+    // 4:2:2 chroma has full vertical resolution: destination rows use luma
+    // units (FFmpeg h264_mb.c mc_part_std: yuv422 adds 2*y_offset).
+    let chroma_y_off = if chroma422 {
+        px_offset_y
+    } else {
+        px_offset_y / 2
+    };
     let chroma_offset =
-        chroma_mb_off + (px_offset_y / 2) as usize * chroma_dst_stride + (px_offset_x / 2) as usize;
+        chroma_mb_off + chroma_y_off as usize * chroma_dst_stride + (px_offset_x / 2) as usize;
 
     // For MV-based reference lookup, use frame-mode coordinates.
     let chroma_dst_x = (mb_x * 8 + px_offset_x / 2) as i32;
@@ -2098,9 +2108,19 @@ fn apply_mc_partition(
     let cmvx = mvx;
     let cmvy = mvy;
     let chroma_ref_x = chroma_dst_x + (cmvx >> 3);
-    let chroma_ref_y = chroma_dst_y + (cmvy >> 3);
+    // 4:2:2 chroma vertical MV is quarter-pel (ysh=2), not eighth-pel;
+    // the fractional part is `(my << 1) & 7` in FFmpeg mc_dir_part.
+    let chroma_ref_y = if chroma422 {
+        chroma_dst_y + (cmvy >> 2)
+    } else {
+        chroma_dst_y + (cmvy >> 3)
+    };
     let chroma_dx = (cmvx & 7) as u8;
-    let chroma_dy = (cmvy & 7) as u8;
+    let chroma_dy = if chroma422 {
+        ((cmvy << 1) & 7) as u8
+    } else {
+        (cmvy & 7) as u8
+    };
 
     mc::mc_chroma(
         &mut ctx.pic.u[chroma_offset..],
@@ -3700,15 +3720,29 @@ fn apply_mc_bi_partition(
     } else {
         (mb_y * 8 + px_offset_y / 2) as i32
     };
+    // See apply_mc: 4:2:2 chroma uses quarter-pel vertical precision.
     let chroma_ref_x = chroma_dst_x + (mvx1 >> 3);
-    let chroma_ref_y = chroma_dst_y + (mvy1 >> 3);
+    let chroma_ref_y = if chroma422 {
+        chroma_dst_y + (mvy1 >> 2)
+    } else {
+        chroma_dst_y + (mvy1 >> 3)
+    };
     let chroma_dx = (mvx1 & 7) as u8;
-    let chroma_dy = (mvy1 & 7) as u8;
+    let chroma_dy = if chroma422 {
+        ((mvy1 << 1) & 7) as u8
+    } else {
+        (mvy1 & 7) as u8
+    };
 
     // Field-aware destination offset
     let (chroma_mb_off, chroma_dst_stride) = chroma_mb_offset(&ctx.pic, mb_x, mb_y, mb_field);
+    let chroma_y_off = if chroma422 {
+        px_offset_y
+    } else {
+        px_offset_y / 2
+    };
     let chroma_off =
-        chroma_mb_off + (px_offset_y / 2) as usize * chroma_dst_stride + (px_offset_x / 2) as usize;
+        chroma_mb_off + chroma_y_off as usize * chroma_dst_stride + (px_offset_x / 2) as usize;
 
     let chroma_pic_w = rp_l1.width / 2;
     let chroma_pic_h = if chroma422 {
@@ -3965,9 +3999,11 @@ fn decode_chroma_inter(
                     // AC present: combine DC into coeffs[0] for single IDCT pass
                     let ac_cqm = 4 + plane_idx; // inter: 4=Cb, 5=Cr
                     mb.chroma_ac[plane_idx][blk_idx][0] = dc_val as i16;
+                    // FFmpeg: chroma AC dequant uses `chroma_qp` (no +3);
+                    // only the DC Hadamard uses `chroma_qp + 3` for 4:2:2.
                     dequant::dequant_4x4(
                         &mut mb.chroma_ac[plane_idx][blk_idx],
-                        &ctx.dequant4.coeffs[ac_cqm][c_qp as usize],
+                        &ctx.dequant4.coeffs[ac_cqm][chroma_qp[plane_idx] as usize],
                     );
                     mb.chroma_ac[plane_idx][blk_idx][0] = dc_val as i16;
                     idct::idct4x4_add(
