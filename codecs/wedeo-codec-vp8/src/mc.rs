@@ -310,7 +310,7 @@ pub fn mc_part(
         block_h >> 1,
         cmx,
         cmy,
-        false,
+        epel,
     );
     mc_block(
         dst_v,
@@ -326,7 +326,7 @@ pub fn mc_part(
         block_h >> 1,
         cmx,
         cmy,
-        false,
+        epel,
     );
 }
 

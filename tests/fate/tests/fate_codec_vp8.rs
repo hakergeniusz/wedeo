@@ -115,3 +115,49 @@ fn vp8_fate_keyframe_decode() {
     // Keyframe flag must be present on the first decoded frame.
     assert!(frames[0].flags.contains(FrameFlags::KEY));
 }
+
+/// Bit-exact framecrc parity against FFmpeg for a profile-0 VP8 stream that
+/// exercises inter prediction, sub-pixel motion compensation (luma EPEL and
+/// chroma EPEL) and the right-edge padding columns of the coded frame.
+///
+/// The expected Adler-32 values come from
+/// `ffmpeg -bitexact -i sintel-signbias.ivf -f framecrc -`. They guard two
+/// regressions fixed together:
+///   * chroma MC must use the EPEL 4/6-tap filters for profile 0, not bilinear;
+///   * reference-frame reads clamp to the coded size (16 * mb_width/height),
+///     so the padding columns inside the last macroblock stay addressable.
+#[test]
+fn vp8_fate_sintel_framecrc_parity() {
+    let Some(sample) = wedeo_fate::fate_sample("vp8/sintel-signbias.ivf") else {
+        eprintln!("vp8/sintel-signbias.ivf not present; skipping");
+        return;
+    };
+
+    let expected: [(&str, usize); 9] = [
+        ("0x28da37ad", 614880),
+        ("0x0b42feab", 614880),
+        ("0xb8d6f27b", 614880),
+        ("0x24dd487a", 614880),
+        ("0x8229e155", 614880),
+        ("0x3559610a", 614880),
+        ("0xcf1b54b1", 614880),
+        ("0xd3f1d787", 614880),
+        ("0x6535b2e8", 614880),
+    ];
+
+    let lines = wedeo_fate::run_wedeo_framecrc(&sample).expect("wedeo-framecrc failed");
+    let frames: Vec<(String, usize)> = lines
+        .iter()
+        .filter(|l| l.starts_with("0,"))
+        .map(|l| {
+            let fields: Vec<&str> = l.split(',').map(str::trim).collect();
+            (fields[5].to_string(), fields[4].parse().unwrap())
+        })
+        .collect();
+
+    assert_eq!(frames.len(), expected.len(), "frame count differs");
+    for (i, ((crc, size), (exp_crc, exp_size))) in frames.iter().zip(expected).enumerate() {
+        assert_eq!(*size, exp_size, "frame {i}: size differs");
+        assert_eq!(crc, exp_crc, "frame {i}: checksum differs");
+    }
+}

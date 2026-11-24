@@ -412,8 +412,12 @@ fn predict_inter(
     let ry = &ref_fb.y[ref_fb.base_y()..];
     let ru = &ref_fb.u[ref_fb.base_uv()..];
     let rv = &ref_fb.v[ref_fb.base_uv()..];
-    let pw = ref_fb.width;
-    let ph = ref_fb.height;
+    // FFmpeg passes the *coded* dimensions (16 * mb_width/height) to
+    // emulated_edge_mc, so the padding columns/rows inside the last
+    // macroblock are valid reference pixels. Clamping to the visible size
+    // would alias them to the last visible column/row.
+    let pw = (ref_fb.width + 15) & !15;
+    let ph = (ref_fb.height + 15) & !15;
 
     let mut part = |bx: usize, byoff: usize, bw: usize, bh: usize, mv: Mv| {
         mc_part(
@@ -480,7 +484,7 @@ fn predict_inter(
                         4,
                         cmx,
                         cmy,
-                        false,
+                        epel,
                     );
                     crate::mc::mc_block(
                         dv,
@@ -496,7 +500,7 @@ fn predict_inter(
                         4,
                         cmx,
                         cmy,
-                        false,
+                        epel,
                     );
                 }
             }
