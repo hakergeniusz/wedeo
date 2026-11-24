@@ -340,26 +340,26 @@ pub fn default_prob_context() -> ProbContext {
             [221, 135, 38, 194, 248, 121, 96, 85, 29],
         ],
         uv_mode: [
-            [ 48,  12, 154, 155, 139,  90,  34, 117, 119],
-            [ 67,   6,  25, 204, 243, 158,  13,  21,  96],
-            [120,   7,  76, 176, 208, 126,  28,  54, 103],
-            [ 97,   5,  44, 131, 176, 139,  48,  68,  97],
-            [ 83,   5,  42, 156, 111, 152,  26,  49, 152],
-            [ 80,   5,  58, 178,  74,  83,  33,  62, 145],
-            [ 86,   5,  32, 154, 192, 168,  14,  22, 163],
-            [ 77,   7,  64, 116, 132, 122,  37, 126, 120],
-            [ 85,   5,  32, 156, 216, 148,  19,  29,  73],
-            [101,  21, 107, 181, 192, 103,  19,  67, 125],
+            [48, 12, 154, 155, 139, 90, 34, 117, 119],
+            [67, 6, 25, 204, 243, 158, 13, 21, 96],
+            [120, 7, 76, 176, 208, 126, 28, 54, 103],
+            [97, 5, 44, 131, 176, 139, 48, 68, 97],
+            [83, 5, 42, 156, 111, 152, 26, 49, 152],
+            [80, 5, 58, 178, 74, 83, 33, 62, 145],
+            [86, 5, 32, 154, 192, 168, 14, 22, 163],
+            [77, 7, 64, 116, 132, 122, 37, 126, 120],
+            [85, 5, 32, 156, 216, 148, 19, 29, 73],
+            [101, 21, 107, 181, 192, 103, 19, 67, 125],
         ],
         filter: [[235, 162], [36, 255], [34, 3], [149, 144]],
         mv_mode: [
-            [  2, 173,  34],
-            [  7, 145,  85],
-            [  7, 166,  63],
-            [  7,  94,  66],
-            [  8,  64,  46],
-            [ 17,  81,  31],
-            [ 25,  29,  30],
+            [2, 173, 34],
+            [7, 145, 85],
+            [7, 166, 63],
+            [7, 94, 66],
+            [8, 64, 46],
+            [17, 81, 31],
+            [25, 29, 30],
         ],
         intra: [9, 102, 187, 225],
         comp: [239, 183, 119, 96, 41],
@@ -400,29 +400,29 @@ pub fn default_prob_context() -> ProbContext {
         partition: [
             // bl=0: 64x64 → 32x32
             [
-                [[222,  34,  30], [ 58,  32,  12], [0, 0, 0], [0, 0, 0]], // a=0: c=0, c=2
-                [[ 72,  16,  44], [ 10,   7,   6], [0, 0, 0], [0, 0, 0]], // a=1: c=1, c=3
+                [[222, 34, 30], [58, 32, 12], [0, 0, 0], [0, 0, 0]], // a=0: c=0, c=2
+                [[72, 16, 44], [10, 7, 6], [0, 0, 0], [0, 0, 0]],    // a=1: c=1, c=3
                 [[0, 0, 0]; 4],
                 [[0, 0, 0]; 4],
             ],
             // bl=1: 32x32 → 16x16
             [
-                [[177,  58,  59], [ 52,  79,  25], [0, 0, 0], [0, 0, 0]],
-                [[ 68,  26,  63], [ 17,  14,  12], [0, 0, 0], [0, 0, 0]],
+                [[177, 58, 59], [52, 79, 25], [0, 0, 0], [0, 0, 0]],
+                [[68, 26, 63], [17, 14, 12], [0, 0, 0], [0, 0, 0]],
                 [[0, 0, 0]; 4],
                 [[0, 0, 0]; 4],
             ],
             // bl=2: 16x16 → 8x8
             [
-                [[174,  73,  87], [ 82,  99,  50], [0, 0, 0], [0, 0, 0]],
-                [[ 92,  41,  83], [ 53,  39,  39], [0, 0, 0], [0, 0, 0]],
+                [[174, 73, 87], [82, 99, 50], [0, 0, 0], [0, 0, 0]],
+                [[92, 41, 83], [53, 39, 39], [0, 0, 0], [0, 0, 0]],
                 [[0, 0, 0]; 4],
                 [[0, 0, 0]; 4],
             ],
             // bl=3: 8x8 → 4x4
             [
                 [[199, 122, 141], [148, 133, 118], [0, 0, 0], [0, 0, 0]],
-                [[147,  63, 159], [121, 104, 114], [0, 0, 0], [0, 0, 0]],
+                [[147, 63, 159], [121, 104, 114], [0, 0, 0], [0, 0, 0]],
                 [[0, 0, 0]; 4],
                 [[0, 0, 0]; 4],
             ],
@@ -519,11 +519,15 @@ fn get_sbits_inv(gb: &mut GetBits<'_>, n: usize) -> Result<i8> {
 ///
 /// Returns the parsed `FrameHeader` and the byte offset in `data` where the
 /// tile bitstream begins (i.e. after the compressed header).
-pub fn decode_frame_header(
+pub fn decode_frame_header<F>(
     data: &[u8],
     prob_ctx: &[ProbContext; 4],
     coef_ctx: &[CoefProbArray; 4],
-) -> Result<(FrameHeader, usize)> {
+    ref_dims: F,
+) -> Result<(FrameHeader, usize)>
+where
+    F: Fn(usize) -> Option<(u32, u32)>,
+{
     let mut gb = GetBits::new(data);
 
     // Frame marker (2 bits, must be 0b10 = 2).
@@ -733,7 +737,13 @@ pub fn decode_frame_header(
                 false
             };
             if use_ref0 || use_ref1 || use_ref2 {
-                // Caller must fill in width/height from the referenced frame.
+                // FFmpeg vp9.c:625-637 resolves dimensions from the selected
+                // reference frame *while parsing the header*, before the
+                // tiling bits and compressed_header_size are read. Without
+                // the reference dimensions, sb_cols is 0, no tile-column
+                // increment bits are consumed, and the whole header after
+                // this point is misparsed (wrong tile geometry and a bogus
+                // tile_data_offset).
                 let which = if use_ref0 {
                     0
                 } else if use_ref1 {
@@ -742,8 +752,13 @@ pub fn decode_frame_header(
                     2
                 };
                 size_from_ref = which;
-                width = 0;
-                height = 0;
+                if let Some((ref_w, ref_h)) = ref_dims(which as usize) {
+                    width = ref_w;
+                    height = ref_h;
+                } else {
+                    width = 0;
+                    height = 0;
+                }
             } else {
                 width = gb.get_bits(16)? + 1;
                 height = gb.get_bits(16)? + 1;
@@ -1285,7 +1300,11 @@ pub fn decode_frame_header(
         refresh_ctx,
         parallel_mode,
         frame_ctx_id,
-        use_last_frame_mvs: !error_resilient && show_frame,
+        // FFmpeg vp9.c:568-571 derives this from the *previous* frame's
+        // `invisible` flag (last_invisible), not from this frame's show_frame.
+        // At header-parse time that state is not known, so leave it false;
+        // Vp9Decoder::decode_frame computes the real value after parsing.
+        use_last_frame_mvs: false,
         size_from_ref,
     };
 
@@ -1300,13 +1319,17 @@ mod tests {
     fn test_invalid_frame_marker() {
         // First 2 bits must be 0b10. Provide 0b00 instead.
         let data = [0x00u8; 32];
-        let result = decode_frame_header(&data, &Default::default(), &[DEFAULT_COEF_PROBS; 4]);
+        let result =
+            decode_frame_header(&data, &Default::default(), &[DEFAULT_COEF_PROBS; 4], |_| {
+                None
+            });
         assert!(result.is_err(), "Expected error for bad frame marker");
     }
 
     #[test]
     fn test_empty_data() {
-        let result = decode_frame_header(&[], &Default::default(), &[DEFAULT_COEF_PROBS; 4]);
+        let result =
+            decode_frame_header(&[], &Default::default(), &[DEFAULT_COEF_PROBS; 4], |_| None);
         assert!(result.is_err());
     }
 

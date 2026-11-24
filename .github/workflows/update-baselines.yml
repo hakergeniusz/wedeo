@@ -1,0 +1,123 @@
+name: Update baselines (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: 'Comma-separated suites to refresh (e.g. fate-cavlc,jvt-avc-v1). Blank = all tracked baselines.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: update-baselines-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  SUITES: ${{ inputs.suites || 'fate-cavlc,fate-cabac,jvt-avc-v1,jvt-fr-ext' }}
+
+jobs:
+  refresh:
+    name: Generate proposed baselines
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Resolve suite selection
+        id: config
+        run: |
+          set -euo pipefail
+          needs_fate=false
+          needs_jvt=false
+          if [ "$SUITES" = "all" ]; then
+            needs_fate=true
+            needs_jvt=true
+          else
+            case ",$SUITES," in
+              *,fate-*) needs_fate=true ;;
+            esac
+            case ",$SUITES," in
+              *,jvt-*) needs_jvt=true ;;
+            esac
+          fi
+          echo "needs_fate=$needs_fate" >> "$GITHUB_OUTPUT"
+          echo "needs_jvt=$needs_jvt" >> "$GITHUB_OUTPUT"
+          echo "Selected suites: $SUITES" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install dependencies
+        run: sudo apt-get install -y nasm libasound2-dev ffmpeg rsync
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: update-baselines
+
+      # Same commands as the regression jobs in ci.yml. Only the h264-conformance
+      # subset of FATE is needed (fetch-fate-suite.sh would pull the entire tree).
+      - name: Fetch FATE H.264 samples
+        if: steps.config.outputs.needs_fate == 'true'
+        timeout-minutes: 10
+        run: |
+          mkdir -p fate-suite
+          rsync -a rsync://fate-suite.ffmpeg.org/fate-suite/h264-conformance fate-suite/
+
+      - name: Download JVT vectors
+        if: steps.config.outputs.needs_jvt == 'true'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: python3 scripts/fetch_jvt.py --jobs 8
+
+      - name: Build wedeo-framecrc
+        run: cargo build --release --bin wedeo-framecrc -p wedeo-fate
+
+      - name: Generate snapshots into a temp dir
+        id: gen
+        run: |
+          set -o pipefail
+          SNAPSHOT_DIR="$(mktemp -d)"
+          echo "snapshot_dir=$SNAPSHOT_DIR" >> "$GITHUB_OUTPUT"
+          # Fresh baselines intentionally include known failures: suite_runner
+          # writes the snapshots first, then exits non-zero. Do not fail the job.
+          python3 scripts/suite_runner.py \
+            --suite "$SUITES" \
+            --format yuv420p \
+            --save-snapshot \
+            --snapshot-dir "$SNAPSHOT_DIR" \
+            2>&1 | tee /tmp/baseline-run.txt || true
+          cp /tmp/baseline-run.txt "$SNAPSHOT_DIR/run-log.txt"
+
+      - name: Upload proposed snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: proposed-baselines-run-${{ github.run_number }}
+          path: ${{ steps.gen.outputs.snapshot_dir }}
+          if-no-files-found: error
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo '## Proposed baseline refresh - review required'
+            echo
+            echo 'Snapshots were written to a **temporary directory** and uploaded as the'
+            echo '`proposed-baselines-run-${{ github.run_number }}` artifact.'
+            echo '`test_suites/baselines/` was NOT modified; nothing was committed or pushed.'
+            echo
+            echo 'Integrator next steps:'
+            echo '1. Download the artifact and review pass counts / failures in `run-log.txt`.'
+            echo '2. Copy only the reviewed snapshot `*.json` files into `test_suites/baselines/`.'
+            echo '3. Commit that baseline change yourself after the review.'
+            echo
+            echo "Suites: $SUITES"
+            echo
+            echo '```'
+            cat /tmp/baseline-run.txt 2>/dev/null || echo 'No runner output.'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

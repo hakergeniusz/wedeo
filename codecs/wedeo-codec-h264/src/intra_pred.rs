@@ -5,6 +5,8 @@
 //
 // Reference: FFmpeg libavcodec/h264pred_template.c
 
+use crate::pixel::Pixel;
+
 // -- Mode constants --
 
 /// Intra 4x4 prediction mode indices (Table 7-11).
@@ -35,20 +37,20 @@ pub const INTRA_CHROMA_PLANE: u8 = 3;
 
 /// Weighted average of three samples: (a + 2*b + c + 2) >> 2
 #[inline(always)]
-fn avg3(a: u8, b: u8, c: u8) -> u8 {
-    ((a as u16 + 2 * b as u16 + c as u16 + 2) >> 2) as u8
+fn avg3<P: Pixel>(a: P, b: P, c: P) -> P {
+    P::from_i32((a.to_i32() + 2 * b.to_i32() + c.to_i32() + 2) >> 2)
 }
 
 /// Simple average of two samples: (a + b + 1) >> 1
 #[inline(always)]
-fn avg2(a: u8, b: u8) -> u8 {
-    ((a as u16 + b as u16 + 1) >> 1) as u8
+fn avg2<P: Pixel>(a: P, b: P) -> P {
+    P::from_i32((a.to_i32() + b.to_i32() + 1) >> 1)
 }
 
-/// Clamp an i32 to [0, 255] and return as u8.
+/// Clamp an i32 to the sample range and return a pixel.
 #[inline(always)]
-fn clip(val: i32) -> u8 {
-    val.clamp(0, 255) as u8
+fn clip<P: Pixel>(val: i32) -> P {
+    P::from_i32(val)
 }
 
 /// Compute dst index from (x, y) coordinates and stride.
@@ -69,13 +71,13 @@ fn at(x: usize, y: usize, stride: usize) -> usize {
 /// `top_left` is the corner sample.
 /// `has_top`, `has_left`, `has_top_right` indicate neighbor availability.
 #[allow(clippy::too_many_arguments)] // Parameters match H.264 spec requirements
-pub fn predict_4x4(
-    dst: &mut [u8],
+pub fn predict_4x4<P: Pixel>(
+    dst: &mut [P],
     stride: usize,
     mode: u8,
-    top: &[u8],
-    left: &[u8],
-    top_left: u8,
+    top: &[P],
+    left: &[P],
+    top_left: P,
     has_top: bool,
     has_left: bool,
     has_top_right: bool,
@@ -95,26 +97,26 @@ pub fn predict_4x4(
 }
 
 /// Mode 0: Vertical -- each row copies top[0..3].
-fn pred_4x4_vertical(dst: &mut [u8], stride: usize, top: &[u8]) {
-    fill_vertical::<4>(dst, stride, top);
+fn pred_4x4_vertical<P: Pixel>(dst: &mut [P], stride: usize, top: &[P]) {
+    fill_vertical::<P, 4>(dst, stride, top);
 }
 
 /// Mode 1: Horizontal -- each row is filled with left[y].
-fn pred_4x4_horizontal(dst: &mut [u8], stride: usize, left: &[u8]) {
-    fill_horizontal::<4>(dst, stride, left);
+fn pred_4x4_horizontal<P: Pixel>(dst: &mut [P], stride: usize, left: &[P]) {
+    fill_horizontal::<P, 4>(dst, stride, left);
 }
 
-/// Mode 2: DC -- average of available neighbors, or 128 if none available.
-fn pred_4x4_dc(
-    dst: &mut [u8],
+/// Mode 2: DC -- average of available neighbors, or P::MID if none available.
+fn pred_4x4_dc<P: Pixel>(
+    dst: &mut [P],
     stride: usize,
-    top: &[u8],
-    left: &[u8],
+    top: &[P],
+    left: &[P],
     has_top: bool,
     has_left: bool,
 ) {
-    let dc = compute_dc_value::<4>(has_top, has_left, top, left);
-    fill_block::<4>(dst, stride, dc);
+    let dc = compute_dc_value::<P, 4>(has_top, has_left, top, left);
+    fill_block::<P, 4>(dst, stride, dc);
 }
 
 /// Mode 3: Diagonal Down-Left.
@@ -123,42 +125,53 @@ fn pred_4x4_dc(
 /// Uses top[0..7] (top-right samples top[4..7] are needed).
 /// When has_top_right is false, top[4..7] should already be filled with top[3]
 /// by the caller (as per H.264 spec 8.3.1.2.3).
-fn pred_4x4_diag_down_left(dst: &mut [u8], stride: usize, top: &[u8], _has_top_right: bool) {
-    let t0 = top[0] as u16;
-    let t1 = top[1] as u16;
-    let t2 = top[2] as u16;
-    let t3 = top[3] as u16;
-    let t4 = top[4] as u16;
-    let t5 = top[5] as u16;
-    let t6 = top[6] as u16;
-    let t7 = top[7] as u16;
+fn pred_4x4_diag_down_left<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    top: &[P],
+    _has_top_right: bool,
+) {
+    let t0 = top[0].to_i32();
+    let t1 = top[1].to_i32();
+    let t2 = top[2].to_i32();
+    let t3 = top[3].to_i32();
+    let t4 = top[4].to_i32();
+    let t5 = top[5].to_i32();
+    let t6 = top[6].to_i32();
+    let t7 = top[7].to_i32();
 
     let s = stride;
 
     // Matches FFmpeg pred4x4_down_left exactly.
     // Each anti-diagonal (x+y = const) shares the same value.
-    dst[at(0, 0, s)] = ((t0 + 2 * t1 + t2 + 2) >> 2) as u8;
-    dst[at(1, 0, s)] = ((t1 + 2 * t2 + t3 + 2) >> 2) as u8;
+    dst[at(0, 0, s)] = P::from_i32((t0 + 2 * t1 + t2 + 2) >> 2);
+    dst[at(1, 0, s)] = P::from_i32((t1 + 2 * t2 + t3 + 2) >> 2);
     dst[at(0, 1, s)] = dst[at(1, 0, s)];
-    dst[at(2, 0, s)] = ((t2 + 2 * t3 + t4 + 2) >> 2) as u8;
+    dst[at(2, 0, s)] = P::from_i32((t2 + 2 * t3 + t4 + 2) >> 2);
     dst[at(1, 1, s)] = dst[at(2, 0, s)];
     dst[at(0, 2, s)] = dst[at(2, 0, s)];
-    dst[at(3, 0, s)] = ((t3 + 2 * t4 + t5 + 2) >> 2) as u8;
+    dst[at(3, 0, s)] = P::from_i32((t3 + 2 * t4 + t5 + 2) >> 2);
     dst[at(2, 1, s)] = dst[at(3, 0, s)];
     dst[at(1, 2, s)] = dst[at(3, 0, s)];
     dst[at(0, 3, s)] = dst[at(3, 0, s)];
-    dst[at(3, 1, s)] = ((t4 + 2 * t5 + t6 + 2) >> 2) as u8;
+    dst[at(3, 1, s)] = P::from_i32((t4 + 2 * t5 + t6 + 2) >> 2);
     dst[at(2, 2, s)] = dst[at(3, 1, s)];
     dst[at(1, 3, s)] = dst[at(3, 1, s)];
-    dst[at(3, 2, s)] = ((t5 + 2 * t6 + t7 + 2) >> 2) as u8;
+    dst[at(3, 2, s)] = P::from_i32((t5 + 2 * t6 + t7 + 2) >> 2);
     dst[at(2, 3, s)] = dst[at(3, 2, s)];
-    dst[at(3, 3, s)] = ((t6 + 3 * t7 + 2) >> 2) as u8;
+    dst[at(3, 3, s)] = P::from_i32((t6 + 3 * t7 + 2) >> 2);
 }
 
 /// Mode 4: Diagonal Down-Right.
 ///
 /// Predicts toward the bottom-left using top, left, and top-left samples.
-fn pred_4x4_diag_down_right(dst: &mut [u8], stride: usize, top: &[u8], left: &[u8], top_left: u8) {
+fn pred_4x4_diag_down_right<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    top: &[P],
+    left: &[P],
+    top_left: P,
+) {
     let lt = top_left;
     let t0 = top[0];
     let t1 = top[1];
@@ -193,7 +206,13 @@ fn pred_4x4_diag_down_right(dst: &mut [u8], stride: usize, top: &[u8], left: &[u
 /// Mode 5: Vertical-Right.
 ///
 /// Approximately 26.6 degrees from vertical.
-fn pred_4x4_vertical_right(dst: &mut [u8], stride: usize, top: &[u8], left: &[u8], top_left: u8) {
+fn pred_4x4_vertical_right<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    top: &[P],
+    left: &[P],
+    top_left: P,
+) {
     let lt = top_left;
     let t0 = top[0];
     let t1 = top[1];
@@ -226,7 +245,13 @@ fn pred_4x4_vertical_right(dst: &mut [u8], stride: usize, top: &[u8], left: &[u8
 /// Mode 6: Horizontal-Down.
 ///
 /// Approximately 26.6 degrees from horizontal.
-fn pred_4x4_horizontal_down(dst: &mut [u8], stride: usize, top: &[u8], left: &[u8], top_left: u8) {
+fn pred_4x4_horizontal_down<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    top: &[P],
+    left: &[P],
+    top_left: P,
+) {
     let lt = top_left;
     let t0 = top[0];
     let t1 = top[1];
@@ -259,7 +284,7 @@ fn pred_4x4_horizontal_down(dst: &mut [u8], stride: usize, top: &[u8], left: &[u
 /// Mode 7: Vertical-Left.
 ///
 /// Mirror of diagonal down-left, uses top[0..7].
-fn pred_4x4_vertical_left(dst: &mut [u8], stride: usize, top: &[u8]) {
+fn pred_4x4_vertical_left<P: Pixel>(dst: &mut [P], stride: usize, top: &[P]) {
     let t0 = top[0];
     let t1 = top[1];
     let t2 = top[2];
@@ -291,7 +316,7 @@ fn pred_4x4_vertical_left(dst: &mut [u8], stride: usize, top: &[u8]) {
 /// Mode 8: Horizontal-Up.
 ///
 /// Uses left[0..3] only.
-fn pred_4x4_horizontal_up(dst: &mut [u8], stride: usize, left: &[u8]) {
+fn pred_4x4_horizontal_up<P: Pixel>(dst: &mut [P], stride: usize, left: &[P]) {
     let l0 = left[0];
     let l1 = left[1];
     let l2 = left[2];
@@ -333,13 +358,13 @@ fn pred_4x4_horizontal_up(dst: &mut [u8], stride: usize, left: &[u8]) {
 ///
 /// Reference: FFmpeg h264pred_template.c pred8x8l_* functions.
 #[allow(clippy::too_many_arguments)]
-pub fn predict_8x8l(
-    dst: &mut [u8],
+pub fn predict_8x8l<P: Pixel>(
+    dst: &mut [P],
     stride: usize,
     mode: u8,
-    top: &[u8],
-    left: &[u8],
-    top_left: u8,
+    top: &[P],
+    left: &[P],
+    top_left: P,
     has_top: bool,
     has_left: bool,
     has_top_left: bool,
@@ -349,14 +374,14 @@ pub fn predict_8x8l(
     // Reference: FFmpeg h264pred_template.c PREDICT_8x8_LOAD macros
 
     // Filtered left samples (l0..l7)
-    let mut fl = [0u8; 8];
+    let mut fl = [P::from_i32(0); 8];
     if has_left {
         let tl = if has_top_left { top_left } else { left[0] };
         fl[0] = avg3(tl, left[0], left[1]);
         for i in 1..7 {
             fl[i] = avg3(left[i - 1], left[i], left[i + 1]);
         }
-        fl[7] = ((left[6] as u16 + 3 * left[7] as u16 + 2) >> 2) as u8;
+        fl[7] = P::from_i32((left[6].to_i32() + 3 * left[7].to_i32() + 2) >> 2);
     }
 
     // Filtered top-left sample
@@ -367,11 +392,11 @@ pub fn predict_8x8l(
     } else if has_left {
         left[0]
     } else {
-        128
+        P::from_i32(P::MID)
     };
 
     // Filtered top samples (t0..t7) and top-right extension (t8..t15)
-    let mut ft = [0u8; 16];
+    let mut ft = [P::from_i32(0); 16];
     if has_top {
         let tl = if has_top_left { top_left } else { top[0] };
         ft[0] = avg3(tl, top[0], top[1]);
@@ -383,7 +408,7 @@ pub fn predict_8x8l(
             for i in 8..15 {
                 ft[i] = avg3(top[i - 1], top[i], top[i + 1]);
             }
-            ft[15] = ((top[14] as u16 + 3 * top[15] as u16 + 2) >> 2) as u8;
+            ft[15] = P::from_i32((top[14].to_i32() + 3 * top[15].to_i32() + 2) >> 2);
         } else {
             // No top-right: filter t7, then replicate the RAW p[7,-1].
             // Spec 8.3.2.2: p[8..15,-1] = p[7,-1] (unfiltered), then
@@ -409,14 +434,14 @@ pub fn predict_8x8l(
 }
 
 /// 8x8 mode 0: Vertical — each row copies filtered top[0..7].
-fn pred_8x8l_vertical(dst: &mut [u8], stride: usize, t: &[u8]) {
+fn pred_8x8l_vertical<P: Pixel>(dst: &mut [P], stride: usize, t: &[P]) {
     for y in 0..8 {
         dst[y * stride..y * stride + 8].copy_from_slice(&t[..8]);
     }
 }
 
 /// 8x8 mode 1: Horizontal — each column copies filtered left[y].
-fn pred_8x8l_horizontal(dst: &mut [u8], stride: usize, l: &[u8]) {
+fn pred_8x8l_horizontal<P: Pixel>(dst: &mut [P], stride: usize, l: &[P]) {
     for (y, &lv) in l[..8].iter().enumerate() {
         let row = y * stride;
         dst[row..row + 8].fill(lv);
@@ -424,22 +449,29 @@ fn pred_8x8l_horizontal(dst: &mut [u8], stride: usize, l: &[u8]) {
 }
 
 /// 8x8 mode 2: DC — average of available filtered neighbors.
-fn pred_8x8l_dc(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], has_top: bool, has_left: bool) {
+fn pred_8x8l_dc<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    t: &[P],
+    l: &[P],
+    has_top: bool,
+    has_left: bool,
+) {
     let dc = match (has_top, has_left) {
         (true, true) => {
-            let sum: u32 = t[..8].iter().map(|&v| v as u32).sum::<u32>()
-                + l[..8].iter().map(|&v| v as u32).sum::<u32>();
-            ((sum + 8) >> 4) as u8
+            let sum: u32 = t[..8].iter().map(|&v| v.to_i32() as u32).sum::<u32>()
+                + l[..8].iter().map(|&v| v.to_i32() as u32).sum::<u32>();
+            P::from_i32(((sum + 8) >> 4) as i32)
         }
         (true, false) => {
-            let sum: u32 = t[..8].iter().map(|&v| v as u32).sum();
-            ((sum + 4) >> 3) as u8
+            let sum: u32 = t[..8].iter().map(|&v| v.to_i32() as u32).sum();
+            P::from_i32(((sum + 4) >> 3) as i32)
         }
         (false, true) => {
-            let sum: u32 = l[..8].iter().map(|&v| v as u32).sum();
-            ((sum + 4) >> 3) as u8
+            let sum: u32 = l[..8].iter().map(|&v| v.to_i32() as u32).sum();
+            P::from_i32(((sum + 4) >> 3) as i32)
         }
-        (false, false) => 128,
+        (false, false) => P::from_i32(P::MID),
     };
     for y in 0..8 {
         let row = y * stride;
@@ -449,7 +481,7 @@ fn pred_8x8l_dc(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], has_top: bool
 
 /// 8x8 mode 3: Diagonal down-left.
 /// Uses t[0..15] (needs top-right extension).
-fn pred_8x8l_diag_down_left(dst: &mut [u8], stride: usize, t: &[u8]) {
+fn pred_8x8l_diag_down_left<P: Pixel>(dst: &mut [P], stride: usize, t: &[P]) {
     let s = stride;
     for y in 0..8 {
         for x in 0..8 {
@@ -458,7 +490,7 @@ fn pred_8x8l_diag_down_left(dst: &mut [u8], stride: usize, t: &[u8]) {
                 dst[at(x, y, s)] = avg3(t[i], t[i + 1], t[i + 2]);
             } else {
                 // i == 14: last position uses edge-biased formula
-                dst[at(x, y, s)] = ((t[14] as u16 + 3 * t[15] as u16 + 2) >> 2) as u8;
+                dst[at(x, y, s)] = P::from_i32((t[14].to_i32() + 3 * t[15].to_i32() + 2) >> 2);
             }
         }
     }
@@ -466,11 +498,11 @@ fn pred_8x8l_diag_down_left(dst: &mut [u8], stride: usize, t: &[u8]) {
 
 /// 8x8 mode 4: Diagonal down-right.
 /// Uses t[0..7], l[0..7], and lt (filtered top-left).
-fn pred_8x8l_diag_down_right(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], lt: u8) {
+fn pred_8x8l_diag_down_right<P: Pixel>(dst: &mut [P], stride: usize, t: &[P], l: &[P], lt: P) {
     let s = stride;
     for y in 0..8 {
         for x in 0..8 {
-            let d = x as i32 - y as i32;
+            let d = (x as i32) - (y as i32);
             dst[at(x, y, s)] = if d > 1 {
                 // Upper-right: uses top samples
                 let i = (d - 2) as usize;
@@ -494,12 +526,12 @@ fn pred_8x8l_diag_down_right(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], 
 /// 8x8 mode 5: Vertical-right (~26.6° from vertical).
 /// Uses t[0..7], l[0..6], and lt.
 /// Reference: FFmpeg h264pred_template.c pred8x8l_vertical_right.
-fn pred_8x8l_vert_right(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], lt: u8) {
+fn pred_8x8l_vert_right<P: Pixel>(dst: &mut [P], stride: usize, t: &[P], l: &[P], lt: P) {
     let s = stride;
     for y in 0..8 {
         for x in 0..8 {
             // zVR = 2*x - y
-            let zvr = 2 * x as i32 - y as i32;
+            let zvr = 2 * (x as i32) - (y as i32);
             dst[at(x, y, s)] = if zvr >= 2 {
                 let i = (zvr / 2 - 1) as usize;
                 if zvr & 1 == 0 {
@@ -516,7 +548,7 @@ fn pred_8x8l_vert_right(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], lt: u
             } else {
                 // zvr < -1: uses left samples.
                 // Pattern: avg3(l[d-3], l[d-2], l[d-1]) where d = y-2*x, l[-1] = lt
-                let li = (y as i32 - 2 * x as i32 - 2) as usize;
+                let li = ((y as i32) - 2 * (x as i32) - 2) as usize;
                 if li == 0 {
                     avg3(lt, l[0], l[1])
                 } else {
@@ -530,12 +562,12 @@ fn pred_8x8l_vert_right(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], lt: u
 /// 8x8 mode 6: Horizontal-down (~26.6° from horizontal).
 /// Uses t[0..6], l[0..7], and lt.
 /// Reference: FFmpeg h264pred_template.c pred8x8l_horizontal_down.
-fn pred_8x8l_hor_down(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], lt: u8) {
+fn pred_8x8l_hor_down<P: Pixel>(dst: &mut [P], stride: usize, t: &[P], l: &[P], lt: P) {
     let s = stride;
     for y in 0..8 {
         for x in 0..8 {
             // zHD = 2*y - x
-            let zhd = 2 * y as i32 - x as i32;
+            let zhd = 2 * (y as i32) - (x as i32);
             dst[at(x, y, s)] = if zhd >= 2 {
                 let i = (zhd / 2 - 1) as usize;
                 if zhd & 1 == 0 {
@@ -552,7 +584,7 @@ fn pred_8x8l_hor_down(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], lt: u8)
             } else {
                 // zhd < -1: uses top samples.
                 // Pattern: avg3(t[d-3], t[d-2], t[d-1]) where d = x-2*y, t[-1] = lt
-                let ti = (x as i32 - 2 * y as i32 - 2) as usize;
+                let ti = ((x as i32) - 2 * (y as i32) - 2) as usize;
                 if ti == 0 {
                     avg3(lt, t[0], t[1])
                 } else {
@@ -565,7 +597,7 @@ fn pred_8x8l_hor_down(dst: &mut [u8], stride: usize, t: &[u8], l: &[u8], lt: u8)
 
 /// 8x8 mode 7: Vertical-left (mirror of diag down-left from top).
 /// Uses t[0..14].
-fn pred_8x8l_vert_left(dst: &mut [u8], stride: usize, t: &[u8]) {
+fn pred_8x8l_vert_left<P: Pixel>(dst: &mut [P], stride: usize, t: &[P]) {
     let s = stride;
     for y in 0..8 {
         for x in 0..8 {
@@ -582,7 +614,7 @@ fn pred_8x8l_vert_left(dst: &mut [u8], stride: usize, t: &[u8]) {
 /// 8x8 mode 8: Horizontal-up (mirror of diag down-left from left).
 /// Uses l[0..7]. Replicates l[7] at the bottom boundary.
 /// Reference: FFmpeg h264pred_template.c pred8x8l_horizontal_up.
-fn pred_8x8l_hor_up(dst: &mut [u8], stride: usize, l: &[u8]) {
+fn pred_8x8l_hor_up<P: Pixel>(dst: &mut [P], stride: usize, l: &[P]) {
     let s = stride;
     for y in 0..8 {
         for x in 0..8 {
@@ -606,30 +638,35 @@ fn pred_8x8l_hor_up(dst: &mut [u8], stride: usize, l: &[u8]) {
 /// Compute the DC value for an N×N intra block.
 ///
 /// Averages the available top and/or left neighbors of length N.
-/// Falls back to 128 when neither is available.
+/// Falls back to P::MID when neither is available.
 #[inline]
-fn compute_dc_value<const N: usize>(has_top: bool, has_left: bool, top: &[u8], left: &[u8]) -> u8 {
+fn compute_dc_value<P: Pixel, const N: usize>(
+    has_top: bool,
+    has_left: bool,
+    top: &[P],
+    left: &[P],
+) -> P {
     match (has_top, has_left) {
         (true, true) => {
-            let sum: u32 = top[..N].iter().map(|&v| v as u32).sum::<u32>()
-                + left[..N].iter().map(|&v| v as u32).sum::<u32>();
-            ((sum + N as u32) >> (N.trailing_zeros() + 1)) as u8
+            let sum: u32 = top[..N].iter().map(|&v| v.to_i32() as u32).sum::<u32>()
+                + left[..N].iter().map(|&v| v.to_i32() as u32).sum::<u32>();
+            P::from_i32(((sum + N as u32) >> (N.trailing_zeros() + 1)) as i32)
         }
         (true, false) => {
-            let sum: u32 = top[..N].iter().map(|&v| v as u32).sum();
-            ((sum + (N as u32 / 2)) >> N.trailing_zeros()) as u8
+            let sum: u32 = top[..N].iter().map(|&v| v.to_i32() as u32).sum();
+            P::from_i32(((sum + (N / 2) as u32) >> N.trailing_zeros()) as i32)
         }
         (false, true) => {
-            let sum: u32 = left[..N].iter().map(|&v| v as u32).sum();
-            ((sum + (N as u32 / 2)) >> N.trailing_zeros()) as u8
+            let sum: u32 = left[..N].iter().map(|&v| v.to_i32() as u32).sum();
+            P::from_i32(((sum + (N / 2) as u32) >> N.trailing_zeros()) as i32)
         }
-        (false, false) => 128,
+        (false, false) => P::from_i32(P::MID),
     }
 }
 
 /// Fill every cell of an N×N block with `val`.
 #[inline]
-fn fill_block<const N: usize>(dst: &mut [u8], stride: usize, val: u8) {
+fn fill_block<P: Pixel, const N: usize>(dst: &mut [P], stride: usize, val: P) {
     for y in 0..N {
         let row = y * stride;
         dst[row..row + N].fill(val);
@@ -649,12 +686,18 @@ fn fill_block<const N: usize>(dst: &mut [u8], stride: usize, val: u8) {
 /// All other constants (pivot = N/2-1, extra_mult = N/2, coef = N/2-1)
 /// are derived from N at compile time.
 #[inline]
-fn plane_pred<const N: usize, const GRAD_MULT: i32, const GRAD_ADD: i32, const GRAD_SHIFT: i32>(
-    dst: &mut [u8],
+fn plane_pred<
+    P: Pixel,
+    const N: usize,
+    const GRAD_MULT: i32,
+    const GRAD_ADD: i32,
+    const GRAD_SHIFT: i32,
+>(
+    dst: &mut [P],
     stride: usize,
-    top: &[u8],
-    left: &[u8],
-    top_left: u8,
+    top: &[P],
+    left: &[P],
+    top_left: P,
 ) {
     let pivot = (N / 2 - 1) as i32;
     let extra_mult = (N / 2) as i32;
@@ -662,22 +705,22 @@ fn plane_pred<const N: usize, const GRAD_MULT: i32, const GRAD_ADD: i32, const G
 
     let mut h_val: i32 = 0;
     for x in 1..=pivot {
-        h_val += x * (top[last / 2 + x as usize] as i32 - top[last / 2 - x as usize] as i32);
+        h_val += x * (top[last / 2 + x as usize].to_i32() - top[last / 2 - x as usize].to_i32());
     }
-    h_val += extra_mult * (top[last] as i32 - top_left as i32);
+    h_val += extra_mult * (top[last].to_i32() - top_left.to_i32());
 
     let mut v_val: i32 = 0;
     for y in 1..=pivot {
-        v_val += y * (left[last / 2 + y as usize] as i32 - left[last / 2 - y as usize] as i32);
+        v_val += y * (left[last / 2 + y as usize].to_i32() - left[last / 2 - y as usize].to_i32());
     }
-    v_val += extra_mult * (left[last] as i32 - top_left as i32);
+    v_val += extra_mult * (left[last].to_i32() - top_left.to_i32());
 
     let b = (GRAD_MULT * h_val + GRAD_ADD) >> GRAD_SHIFT;
     let c = (GRAD_MULT * v_val + GRAD_ADD) >> GRAD_SHIFT;
-    let a = 16 * (left[last] as i32 + top[last] as i32 + 1) - pivot * (b + c);
+    let a = 16 * (left[last].to_i32() + top[last].to_i32() + 1) - pivot * (b + c);
 
     for j in 0..N {
-        let mut acc = a + c * j as i32;
+        let mut acc = a + c * (j as i32);
         let row = j * stride;
         for i in 0..N {
             dst[row + i] = clip(acc >> 5);
@@ -688,7 +731,7 @@ fn plane_pred<const N: usize, const GRAD_MULT: i32, const GRAD_ADD: i32, const G
 
 /// Fill an N×N block by repeating `top[0..N]` into every row (vertical pred).
 #[inline]
-fn fill_vertical<const N: usize>(dst: &mut [u8], stride: usize, top: &[u8]) {
+fn fill_vertical<P: Pixel, const N: usize>(dst: &mut [P], stride: usize, top: &[P]) {
     for y in 0..N {
         let row = y * stride;
         dst[row..row + N].copy_from_slice(&top[..N]);
@@ -697,7 +740,7 @@ fn fill_vertical<const N: usize>(dst: &mut [u8], stride: usize, top: &[u8]) {
 
 /// Fill an N×N block so that row y is entirely `left[y]` (horizontal pred).
 #[inline]
-fn fill_horizontal<const N: usize>(dst: &mut [u8], stride: usize, left: &[u8]) {
+fn fill_horizontal<P: Pixel, const N: usize>(dst: &mut [P], stride: usize, left: &[P]) {
     for (y, &val) in left[..N].iter().enumerate() {
         let row = y * stride;
         dst[row..row + N].fill(val);
@@ -716,13 +759,13 @@ fn fill_horizontal<const N: usize>(dst: &mut [u8], stride: usize, left: &[u8]) {
 /// `top_left` is the corner sample.
 /// `has_top`, `has_left` indicate neighbor availability.
 #[allow(clippy::too_many_arguments)] // Parameters match H.264 spec requirements
-pub fn predict_16x16(
-    dst: &mut [u8],
+pub fn predict_16x16<P: Pixel>(
+    dst: &mut [P],
     stride: usize,
     mode: u8,
-    top: &[u8],
-    left: &[u8],
-    top_left: u8,
+    top: &[P],
+    left: &[P],
+    top_left: P,
     has_top: bool,
     has_left: bool,
 ) {
@@ -736,26 +779,26 @@ pub fn predict_16x16(
 }
 
 /// Mode 0: Vertical -- each row copies top[0..15].
-fn pred_16x16_vertical(dst: &mut [u8], stride: usize, top: &[u8]) {
-    fill_vertical::<16>(dst, stride, top);
+fn pred_16x16_vertical<P: Pixel>(dst: &mut [P], stride: usize, top: &[P]) {
+    fill_vertical::<P, 16>(dst, stride, top);
 }
 
 /// Mode 1: Horizontal -- each row filled with left[y].
-fn pred_16x16_horizontal(dst: &mut [u8], stride: usize, left: &[u8]) {
-    fill_horizontal::<16>(dst, stride, left);
+fn pred_16x16_horizontal<P: Pixel>(dst: &mut [P], stride: usize, left: &[P]) {
+    fill_horizontal::<P, 16>(dst, stride, left);
 }
 
 /// Mode 2: DC -- average of available top + left samples.
-fn pred_16x16_dc(
-    dst: &mut [u8],
+fn pred_16x16_dc<P: Pixel>(
+    dst: &mut [P],
     stride: usize,
-    top: &[u8],
-    left: &[u8],
+    top: &[P],
+    left: &[P],
     has_top: bool,
     has_left: bool,
 ) {
-    let dc = compute_dc_value::<16>(has_top, has_left, top, left);
-    fill_block::<16>(dst, stride, dc);
+    let dc = compute_dc_value::<P, 16>(has_top, has_left, top, left);
+    fill_block::<P, 16>(dst, stride, dc);
 }
 
 /// Mode 3: Plane -- linear interpolation using H and V gradients.
@@ -765,9 +808,9 @@ fn pred_16x16_dc(
 /// a = 16 * (top[15] + left[15] + 1) - 7 * (b + c)
 /// b = (5*H + 32) >> 6
 /// c = (5*V + 32) >> 6
-/// pred[y][x] = clip((a + b*x + c*y) >> 5, 0, 255)
-fn pred_16x16_plane(dst: &mut [u8], stride: usize, top: &[u8], left: &[u8], top_left: u8) {
-    plane_pred::<16, 5, 32, 6>(dst, stride, top, left, top_left);
+/// pred[y][x] = clip((a + b*x + c*y) >> 5, 0, P::MAX)
+fn pred_16x16_plane<P: Pixel>(dst: &mut [P], stride: usize, top: &[P], left: &[P], top_left: P) {
+    plane_pred::<P, 16, 5, 32, 6>(dst, stride, top, left, top_left);
 }
 
 // ============================================================================
@@ -782,13 +825,13 @@ fn pred_16x16_plane(dst: &mut [u8], stride: usize, top: &[u8], left: &[u8], top_
 /// `top_left` is the corner sample.
 /// `has_top`, `has_left` indicate neighbor availability.
 #[allow(clippy::too_many_arguments)] // Parameters match H.264 spec requirements
-pub fn predict_chroma_8x8(
-    dst: &mut [u8],
+pub fn predict_chroma_8x8<P: Pixel>(
+    dst: &mut [P],
     stride: usize,
     mode: u8,
-    top: &[u8],
-    left: &[u8],
-    top_left: u8,
+    top: &[P],
+    left: &[P],
+    top_left: P,
     has_top: bool,
     has_left: bool,
 ) {
@@ -802,13 +845,13 @@ pub fn predict_chroma_8x8(
 }
 
 /// Chroma Mode 2: Vertical -- each row copies top[0..7].
-fn pred_chroma_8x8_vertical(dst: &mut [u8], stride: usize, top: &[u8]) {
-    fill_vertical::<8>(dst, stride, top);
+fn pred_chroma_8x8_vertical<P: Pixel>(dst: &mut [P], stride: usize, top: &[P]) {
+    fill_vertical::<P, 8>(dst, stride, top);
 }
 
 /// Chroma Mode 1: Horizontal -- each row filled with left[y].
-fn pred_chroma_8x8_horizontal(dst: &mut [u8], stride: usize, left: &[u8]) {
-    fill_horizontal::<8>(dst, stride, left);
+fn pred_chroma_8x8_horizontal<P: Pixel>(dst: &mut [P], stride: usize, left: &[P]) {
+    fill_horizontal::<P, 8>(dst, stride, left);
 }
 
 /// Chroma Mode 0: DC -- splits the 8x8 block into 4 quadrants (4x4 each).
@@ -832,11 +875,11 @@ fn pred_chroma_8x8_horizontal(dst: &mut [u8], stride: usize, left: &[u8]) {
 ///   applied uniformly across the full height.
 ///
 /// When neither available: all 128.
-fn pred_chroma_8x8_dc(
-    dst: &mut [u8],
+fn pred_chroma_8x8_dc<P: Pixel>(
+    dst: &mut [P],
     stride: usize,
-    top: &[u8],
-    left: &[u8],
+    top: &[P],
+    left: &[P],
     has_top: bool,
     has_left: bool,
 ) {
@@ -846,14 +889,14 @@ fn pred_chroma_8x8_dc(
             let mut dc1: u32 = 0;
             let mut dc2: u32 = 0;
             for i in 0..4 {
-                dc0 += top[i] as u32 + left[i] as u32;
-                dc1 += top[4 + i] as u32;
-                dc2 += left[4 + i] as u32;
+                dc0 += (top[i].to_i32() as u32) + (left[i].to_i32() as u32);
+                dc1 += top[4 + i].to_i32() as u32;
+                dc2 += left[4 + i].to_i32() as u32;
             }
-            let dc0_val = ((dc0 + 4) >> 3) as u8;
-            let dc1_val = ((dc1 + 2) >> 2) as u8;
-            let dc2_val = ((dc2 + 2) >> 2) as u8;
-            let dc3_val = ((dc1 + dc2 + 4) >> 3) as u8;
+            let dc0_val = P::from_i32(((dc0 + 4) >> 3) as i32);
+            let dc1_val = P::from_i32(((dc1 + 2) >> 2) as i32);
+            let dc2_val = P::from_i32(((dc2 + 2) >> 2) as i32);
+            let dc3_val = P::from_i32(((dc1 + dc2 + 4) >> 3) as i32);
 
             fill_quadrants(dst, stride, dc0_val, dc1_val, dc2_val, dc3_val);
         }
@@ -861,11 +904,11 @@ fn pred_chroma_8x8_dc(
             let mut dc0: u32 = 0;
             let mut dc2: u32 = 0;
             for i in 0..4 {
-                dc0 += left[i] as u32;
-                dc2 += left[4 + i] as u32;
+                dc0 += left[i].to_i32() as u32;
+                dc2 += left[4 + i].to_i32() as u32;
             }
-            let dc0_val = ((dc0 + 2) >> 2) as u8;
-            let dc2_val = ((dc2 + 2) >> 2) as u8;
+            let dc0_val = P::from_i32(((dc0 + 2) >> 2) as i32);
+            let dc2_val = P::from_i32(((dc2 + 2) >> 2) as i32);
 
             fill_quadrants(dst, stride, dc0_val, dc0_val, dc2_val, dc2_val);
         }
@@ -873,11 +916,11 @@ fn pred_chroma_8x8_dc(
             let mut dc0: u32 = 0;
             let mut dc1: u32 = 0;
             for i in 0..4 {
-                dc0 += top[i] as u32;
-                dc1 += top[4 + i] as u32;
+                dc0 += top[i].to_i32() as u32;
+                dc1 += top[4 + i].to_i32() as u32;
             }
-            let dc0_val = ((dc0 + 2) >> 2) as u8;
-            let dc1_val = ((dc1 + 2) >> 2) as u8;
+            let dc0_val = P::from_i32(((dc0 + 2) >> 2) as i32);
+            let dc1_val = P::from_i32(((dc1 + 2) >> 2) as i32);
 
             fill_quadrants(dst, stride, dc0_val, dc1_val, dc0_val, dc1_val);
         }
@@ -885,7 +928,7 @@ fn pred_chroma_8x8_dc(
             for y in 0..8 {
                 let row = y * stride;
                 for x in 0..8 {
-                    dst[row + x] = 128;
+                    dst[row + x] = P::from_i32(P::MID);
                 }
             }
         }
@@ -893,13 +936,13 @@ fn pred_chroma_8x8_dc(
 }
 
 /// Fill the 8x8 block as four 4x4 quadrants with the given DC values.
-fn fill_quadrants(
-    dst: &mut [u8],
+fn fill_quadrants<P: Pixel>(
+    dst: &mut [P],
     stride: usize,
-    top_left_dc: u8,
-    top_right_dc: u8,
-    bot_left_dc: u8,
-    bot_right_dc: u8,
+    top_left_dc: P,
+    top_right_dc: P,
+    bot_left_dc: P,
+    bot_right_dc: P,
 ) {
     for y in 0..4 {
         let row = y * stride;
@@ -928,9 +971,171 @@ fn fill_quadrants(
 /// a = 16 * (top[7] + left[7] + 1) - 3 * (b + c)
 /// b = (17*H + 16) >> 5
 /// c = (17*V + 16) >> 5
-/// pred[y][x] = clip((a + b*x + c*y) >> 5, 0, 255)
-fn pred_chroma_8x8_plane(dst: &mut [u8], stride: usize, top: &[u8], left: &[u8], top_left: u8) {
-    plane_pred::<8, 17, 16, 5>(dst, stride, top, left, top_left);
+/// pred[y][x] = clip((a + b*x + c*y) >> 5, 0, P::MAX)
+fn pred_chroma_8x8_plane<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    top: &[P],
+    left: &[P],
+    top_left: P,
+) {
+    plane_pred::<P, 8, 17, 16, 5>(dst, stride, top, left, top_left);
+}
+
+// ============================================================================
+// Chroma 8x16 prediction (4:2:2)
+// ============================================================================
+
+/// Predict an 8x16 chroma block (4:2:2 chroma has full vertical resolution).
+///
+/// `top` holds 8 samples above the block, `left` holds 16 samples to its left.
+/// FFmpeg selects these via `hpc.pred8x8[]` with `chroma_y_shift == 0`
+/// (`FUNCC(pred8x16_*)` in h264pred_template.c).
+#[allow(clippy::too_many_arguments)] // Parameters match H.264 spec requirements
+pub fn predict_chroma_8x16<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    mode: u8,
+    top: &[P],
+    left: &[P],
+    top_left: P,
+    has_top: bool,
+    has_left: bool,
+) {
+    // FFmpeg ff_h264_check_intra_pred_mode (h264_parse.c:182-220) remaps the
+    // DC mode when an edge is unavailable:
+    //   top[]  = { LEFT_DC_PRED8x8, 1, -1, -1 }
+    //   left[] = { TOP_DC_PRED8x8, -1, 2, -1, DC_128_PRED8x8 }
+    // HOR/VERT/PLANE are only valid with their respective edges, so fall back
+    // to the flat 128 prediction when the edge is missing.
+    let mode = if !has_top {
+        match mode {
+            INTRA_CHROMA_DC => 4,                            // LEFT_DC_PRED8x8
+            INTRA_CHROMA_VERTICAL | INTRA_CHROMA_PLANE => 6, // DC_128_PRED8x8
+            _ => mode,
+        }
+    } else {
+        mode
+    };
+    let mode = if !has_left {
+        match mode {
+            INTRA_CHROMA_DC => 5, // TOP_DC_PRED8x8
+            4 => 6,               // LEFT_DC_PRED8x8 -> DC_128_PRED8x8
+            INTRA_CHROMA_HORIZONTAL | INTRA_CHROMA_PLANE => 6,
+            _ => mode,
+        }
+    } else {
+        mode
+    };
+
+    match mode {
+        4..=6 => {
+            // FFmpeg pred8x16_{left,top,128}_dc (h264pred_template.c:535-619).
+            let mut dc = [0i32; 4];
+            match mode {
+                4 => {
+                    for (i, d) in dc.iter_mut().enumerate() {
+                        for j in 0..4 {
+                            *d += left[4 * i + j].to_i32();
+                        }
+                    }
+                }
+                5 => {
+                    for i in 0..4 {
+                        dc[0] += top[i].to_i32();
+                        dc[1] += top[4 + i].to_i32();
+                    }
+                }
+                _ => {}
+            }
+            for y in 0..16usize {
+                let row = y * stride;
+                let (lv, rv) = match mode {
+                    4 => {
+                        let d = (dc[y >> 2] + 2) >> 2;
+                        (d, d)
+                    }
+                    5 => ((dc[0] + 2) >> 2, (dc[1] + 2) >> 2),
+                    _ => (P::MID, P::MID),
+                };
+                dst[row..row + 4].fill(P::from_i32(lv));
+                dst[row + 4..row + 8].fill(P::from_i32(rv));
+            }
+        }
+        INTRA_CHROMA_DC => {
+            // Full pred8x16_dc: four 4-row bands, two column halves.
+            let mut dc0 = 0i32;
+            let mut dc1 = 0i32;
+            let mut dc2 = 0i32;
+            let mut dc3 = 0i32;
+            let mut dc4 = 0i32;
+            for i in 0..4 {
+                dc0 += left[i].to_i32() + top[i].to_i32();
+                dc1 += top[4 + i].to_i32();
+                dc2 += left[4 + i].to_i32();
+                dc3 += left[8 + i].to_i32();
+                dc4 += left[12 + i].to_i32();
+            }
+            for y in 0..16usize {
+                let row = y * stride;
+                let (lv, rv) = match y {
+                    0..=3 => ((dc0 + 4) >> 3, (dc1 + 2) >> 2),
+                    4..=7 => ((dc2 + 2) >> 2, (dc1 + dc2 + 4) >> 3),
+                    8..=11 => ((dc3 + 2) >> 2, (dc1 + dc3 + 4) >> 3),
+                    _ => ((dc4 + 2) >> 2, (dc1 + dc4 + 4) >> 3),
+                };
+                dst[row..row + 4].fill(P::from_i32(lv));
+                dst[row + 4..row + 8].fill(P::from_i32(rv));
+            }
+        }
+        INTRA_CHROMA_HORIZONTAL => {
+            for y in 0..16usize {
+                dst[y * stride..y * stride + 8].fill(left[y]);
+            }
+        }
+        INTRA_CHROMA_VERTICAL => {
+            for y in 0..16usize {
+                dst[y * stride..y * stride + 8].copy_from_slice(&top[..8]);
+            }
+        }
+        INTRA_CHROMA_PLANE => {
+            // FFmpeg FUNCC(pred8x16_plane).
+            let mut h = top[4].to_i32() - top[2].to_i32();
+            // FFmpeg pred8x16_plane: src1 = src + 8*stride - 1 (left[8]),
+            // src2 = src + 6*stride - 1 (left[6]).
+            let mut v = left[8].to_i32() - left[6].to_i32();
+            for k in 2..=4usize {
+                let left_top = if k == 4 {
+                    top_left.to_i32()
+                } else {
+                    top[3 - k].to_i32()
+                };
+                h += k as i32 * (top[3 + k].to_i32() - left_top);
+                v += k as i32 * (left[7 + k].to_i32() - left[7 - k].to_i32());
+            }
+            for k in 5..=8usize {
+                let above = if k == 8 {
+                    top_left.to_i32()
+                } else {
+                    left[7 - k].to_i32()
+                };
+                v += k as i32 * (left[7 + k].to_i32() - above);
+            }
+            let h = (17 * h + 16) >> 5;
+            let v = (5 * v + 32) >> 6;
+            let mut a = 16 * (left[15].to_i32() + top[7].to_i32() + 1) - 7 * v - 3 * h;
+            for y in 0..16usize {
+                let mut b = a;
+                a += v;
+                let row = y * stride;
+                for x in 0..8usize {
+                    dst[row + x] = P::from_i32(b >> 5);
+                    b += h;
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 // ============================================================================
@@ -1587,31 +1792,31 @@ mod tests {
 
     #[test]
     fn test_avg3() {
-        assert_eq!(avg3(0, 0, 0), 0);
-        assert_eq!(avg3(0, 128, 0), 64);
-        assert_eq!(avg3(100, 100, 100), 100);
-        assert_eq!(avg3(255, 255, 255), 255);
-        assert_eq!(avg3(10, 20, 30), 20);
+        assert_eq!(avg3(0u8, 0u8, 0u8), 0);
+        assert_eq!(avg3(0u8, 128u8, 0u8), 64);
+        assert_eq!(avg3(100u8, 100u8, 100u8), 100);
+        assert_eq!(avg3(255u8, 255u8, 255u8), 255);
+        assert_eq!(avg3(10u8, 20u8, 30u8), 20);
     }
 
     #[test]
     fn test_avg2() {
-        assert_eq!(avg2(0, 0), 0);
-        assert_eq!(avg2(0, 1), 1);
-        assert_eq!(avg2(1, 0), 1);
-        assert_eq!(avg2(254, 255), 255);
-        assert_eq!(avg2(10, 20), 15);
+        assert_eq!(avg2(0u8, 0u8), 0);
+        assert_eq!(avg2(0u8, 1u8), 1);
+        assert_eq!(avg2(1u8, 0u8), 1);
+        assert_eq!(avg2(254u8, 255u8), 255);
+        assert_eq!(avg2(10u8, 20u8), 15);
     }
 
     #[test]
     fn test_clip_function() {
-        assert_eq!(clip(0), 0);
-        assert_eq!(clip(128), 128);
-        assert_eq!(clip(255), 255);
-        assert_eq!(clip(256), 255);
-        assert_eq!(clip(-1), 0);
-        assert_eq!(clip(1000), 255);
-        assert_eq!(clip(-1000), 0);
+        assert_eq!(clip::<u8>(0), 0);
+        assert_eq!(clip::<u8>(128), 128);
+        assert_eq!(clip::<u8>(255), 255);
+        assert_eq!(clip::<u8>(256), 255);
+        assert_eq!(clip::<u8>(-1), 0);
+        assert_eq!(clip::<u8>(1000), 255);
+        assert_eq!(clip::<u8>(-1000), 0);
     }
 
     // ----- Cross-validation: verify diagonal symmetry properties -----

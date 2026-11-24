@@ -1,0 +1,17 @@
+[package]
+name = "wedeo-bsf-h264-mp4toannexb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "H.264 MP4 (AVCC) to Annex B byte stream bitstream filter"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+
+[lints]
+workspace = true

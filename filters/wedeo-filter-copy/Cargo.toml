@@ -1,0 +1,17 @@
+[package]
+name = "wedeo-filter-copy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Copy video filter - copy the input video unchanged to the output (FFmpeg vf_copy port)"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-filter = { workspace = true }
+inventory = { workspace = true }
+
+[lints]
+workspace = true

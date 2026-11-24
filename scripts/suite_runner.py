@@ -21,6 +21,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -28,13 +29,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from wedeo_utils import find_ffmpeg_binary, find_wedeo_binary, run_framecrc
+from wedeo_utils import atomic_write_text, find_ffmpeg_binary, find_wedeo_binary, run_framecrc
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_DIR = ROOT / "test_suites" / "h264"
-VECTORS_DIR = ROOT / "jvt-vectors"
-FATE_DIR = ROOT / "fate-suite" / "h264-conformance"
-DEFAULT_SNAPSHOT_DIR = Path(__file__).resolve().parent
+VECTORS_DIR = Path(os.environ.get("JVT_VECTORS", ROOT / "jvt-vectors"))
+FATE_DIR = Path(os.environ.get("FATE_SUITE", ROOT / "fate-suite")) / "h264-conformance"
+DEFAULT_SNAPSHOT_DIR = Path(os.environ.get("WEDEO_SNAPSHOT_DIR", Path(__file__).resolve().parent))
 
 
 # ── Suite definitions ────────────────────────────────────────────────────────
@@ -253,7 +254,7 @@ def save_snapshot(suite_name: str, results: list[RunResult], snapshot_dir: Path 
     tested = [r for r in results if r.status != "SKIP"]
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snap_path = _snapshot_path(suite_name, snapshot_dir)
-    snap_path.write_text(json.dumps({
+    atomic_write_text(snap_path, json.dumps({
         "suite": suite_name,
         "passing": passing,
         "count": len(passing),

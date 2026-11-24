@@ -1,0 +1,19 @@
+[package]
+name = "wedeo-codec-hevc-cabac"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure-Rust HEVC CABAC binary arithmetic decoder and syntax-element contexts"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+wedeo-codec-hevc-ps = { workspace = true }
+inventory = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

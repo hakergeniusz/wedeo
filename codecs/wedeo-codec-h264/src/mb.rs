@@ -19,10 +19,9 @@ use crate::intra_pred;
 use crate::mc;
 use crate::mvpred::{self, MvContext};
 use crate::pps::Pps;
-use crate::shared_picture::{BufferPool, PicHandle, SharedPicture};
+use crate::shared_picture::{BufferPool, PicHandle, PictureFormat, SharedPicture};
 use crate::slice::SliceHeader;
 use crate::sps::Sps;
-use crate::tables::CHROMA_QP_TABLE;
 
 // ---------------------------------------------------------------------------
 // Per-MB pixel checksum for pipeline-stage tracing
@@ -52,7 +51,7 @@ fn mb_plane_sum(plane: &[u8], offset: usize, stride: usize, size: u32) -> u32 {
 ///   Block 4..7  = top-right 8x8
 ///   Block 8..11 = bottom-left 8x8
 ///   Block 12..15 = bottom-right 8x8
-const BLOCK_INDEX_TO_XY: [(u32, u32); 16] = [
+pub(crate) const BLOCK_INDEX_TO_XY: [(u32, u32); 16] = [
     (0, 0),
     (1, 0),
     (0, 1),
@@ -75,7 +74,7 @@ const BLOCK_INDEX_TO_XY: [(u32, u32); 16] = [
 /// for neighbor context lookups.
 /// raster_idx = blk_y * 4 + blk_x
 #[inline]
-fn block_to_raster(block: usize) -> usize {
+pub(crate) fn block_to_raster(block: usize) -> usize {
     let (bx, by) = BLOCK_INDEX_TO_XY[block];
     (by * 4 + bx) as usize
 }
@@ -457,9 +456,9 @@ pub struct FrameDecodeContext {
     /// Pre-allocated scratch buffer for bi-prediction luma L1 (max 16x16 = 256 bytes).
     pub bi_scratch_y: [u8; 256],
     /// Pre-allocated scratch buffer for bi-prediction chroma-U L1 (max 8x8 = 64 bytes).
-    pub bi_scratch_u: [u8; 64],
+    pub bi_scratch_u: [u8; 128],
     /// Pre-allocated scratch buffer for bi-prediction chroma-V L1 (max 8x8 = 64 bytes).
-    pub bi_scratch_v: [u8; 64],
+    pub bi_scratch_v: [u8; 128],
     /// When true, inline deblocking is suppressed during decode.
     /// Used by the multi-slice parallel decode path, which runs a serial
     /// deblock pass after all slices complete (FFmpeg's `postpone_filter` model).
@@ -481,26 +480,59 @@ impl FrameDecodeContext {
         // yuv420p with U/V=128, not gray8. Chroma prediction/MC on 128-filled planes
         // naturally produces 128, so no additional guards needed in reconstruction.
         let uv_fill = if decode_chroma { 0u8 } else { 128u8 };
+        let bit_depth = sps.bit_depth_luma;
+        let chroma_format_idc = sps.chroma_format_idc;
+        let (shift_w, shift_h) = match chroma_format_idc {
+            1 => (1, 1),
+            2 => (1, 0),
+            3 => (0, 0),
+            _ => (1, 1),
+        };
+        let uv_stride = (width >> shift_w) as usize;
+        let uv_height = (height >> shift_h) as usize;
+        let uv_fill16 = if bit_depth > 8 {
+            1u16 << (bit_depth - 1)
+        } else {
+            u16::from(uv_fill)
+        };
 
         let pic = if let Some(pool) = buffer_pool {
-            let buf = pool
-                .lock()
-                .unwrap()
-                .acquire(width, height, mb_width, mb_height, uv_fill);
+            let buf = pool.lock().unwrap().acquire(PictureFormat {
+                width,
+                height,
+                mb_width,
+                mb_height,
+                uv_fill,
+                bit_depth,
+                chroma_format_idc,
+            });
             PicHandle::new_pooled(buf, pool)
         } else {
             let y_stride = width as usize;
-            let uv_stride = (width / 2) as usize;
+            let (y16, u16, v16) = if bit_depth > 8 {
+                (
+                    vec![0u16; y_stride * height as usize],
+                    vec![uv_fill16; uv_stride * uv_height],
+                    vec![uv_fill16; uv_stride * uv_height],
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
             PicHandle::new(PictureBuffer {
                 y: vec![0u8; y_stride * height as usize],
-                u: vec![uv_fill; uv_stride * (height / 2) as usize],
-                v: vec![uv_fill; uv_stride * (height / 2) as usize],
+                u: vec![uv_fill; uv_stride * uv_height],
+                v: vec![uv_fill; uv_stride * uv_height],
+                y16,
+                u16,
+                v16,
                 y_stride,
                 uv_stride,
                 width,
                 height,
                 mb_width,
                 mb_height,
+                bit_depth,
+                chroma_format_idc,
             })
         };
 
@@ -535,8 +567,16 @@ impl FrameDecodeContext {
             qp: 0,
             mb_width,
             mb_height,
-            dequant4: Dequant4Table::new(&pps.scaling_matrix4),
-            dequant8: Dequant8Table::new(&pps.scaling_matrix8),
+            dequant4: Dequant4Table::new(
+                &pps.scaling_matrix4,
+                sps.bit_depth_luma,
+                sps.transform_bypass,
+            ),
+            dequant8: Dequant8Table::new(
+                &pps.scaling_matrix8,
+                sps.bit_depth_luma,
+                sps.transform_bypass,
+            ),
             transform_8x8: vec![false; total_mbs],
             mb_field_flag: vec![false; total_mbs],
             mv_ctx: MvContext::new(mb_width, mb_height),
@@ -566,8 +606,8 @@ impl FrameDecodeContext {
             mb_field: false,
             mc_scratch: mc::McScratch::new(),
             bi_scratch_y: [0u8; 256],
-            bi_scratch_u: [0u8; 64],
-            bi_scratch_v: [0u8; 64],
+            bi_scratch_u: [0u8; 128],
+            bi_scratch_v: [0u8; 128],
             postpone_deblock: false,
         }
     }
@@ -627,16 +667,17 @@ fn finalize_skip_mb(ctx: &mut FrameDecodeContext, mb_x: u32, mb_y: u32, is_b_sli
     let mb_idx = (mb_y * ctx.mb_width + mb_x) as usize;
     ctx.slice_table[mb_idx] = ctx.current_slice;
     ctx.mb_field_flag[mb_idx] = ctx.mb_field;
-    let nz = [0u8; 24];
+    let nz = [0u8; 40];
     let modes = if ctx.constrained_intra_pred {
         [-1i8; 16] // unavailable for constrained intra prediction
     } else {
         [2i8; 16] // DC_PRED for inter MBs
     };
-    ctx.neighbor_ctx.update_after_mb(mb_x, &nz, &modes);
+    ctx.neighbor_ctx
+        .update_after_mb(mb_x, &nz, &modes, ctx.pic.chroma_format_idc == 2);
     ctx.neighbor_ctx.left_available = true;
     let qp = ctx.qp;
-    store_deblock_info(ctx, mb_idx, false, is_b_slice, qp, [0; 24], 0, false);
+    store_deblock_info(ctx, mb_idx, false, is_b_slice, qp, [0; 40], 0, false);
 }
 
 /// Store `MbDeblockInfo` for the deblocking filter after decoding a macroblock.
@@ -653,7 +694,7 @@ fn store_deblock_info(
     is_intra: bool,
     is_b_slice: bool,
     qp: u8,
-    non_zero_count: [u8; 24],
+    non_zero_count: [u8; 40],
     cbp: u8,
     is_cabac: bool,
 ) {
@@ -720,7 +761,7 @@ fn store_deblock_info(
 /// bottom field (mb_y & 1 == 1) starts one frame-row below the pair's top-left.
 /// Reference: FFmpeg h264_mb_template.c:65-96 (MB_FIELD linesize adjustment).
 #[inline]
-fn luma_block_offset(
+pub(crate) fn luma_block_offset(
     pic: &PictureBuffer,
     mb_x: u32,
     mb_y: u32,
@@ -758,8 +799,10 @@ fn chroma_block_offset(
 ) -> (usize, usize) {
     let x = (mb_x * 8 + blk_x * 4) as usize;
     let stride = pic.uv_stride;
+    // 4:2:2 has full chroma height: 16 rows per macroblock instead of 8.
+    let mb_rows = if pic.chroma_format_idc == 2 { 16 } else { 8 };
     if mb_field {
-        let pair_base_y = ((mb_y & !1) * 8) as usize;
+        let pair_base_y = ((mb_y & !1) * mb_rows) as usize;
         let field_offset = if mb_y & 1 == 1 { stride } else { 0 };
         let y_in_mb = (blk_y * 4) as usize;
         (
@@ -767,14 +810,19 @@ fn chroma_block_offset(
             stride * 2,
         )
     } else {
-        let y = (mb_y * 8 + blk_y * 4) as usize;
+        let y = (mb_y * mb_rows + blk_y * 4) as usize;
         (y * stride + x, stride)
     }
 }
 
 /// Get the offset and stride for the top-left of a luma MB.
 #[inline]
-fn luma_mb_offset(pic: &PictureBuffer, mb_x: u32, mb_y: u32, mb_field: bool) -> (usize, usize) {
+pub(crate) fn luma_mb_offset(
+    pic: &PictureBuffer,
+    mb_x: u32,
+    mb_y: u32,
+    mb_field: bool,
+) -> (usize, usize) {
     luma_block_offset(pic, mb_x, mb_y, 0, 0, mb_field)
 }
 
@@ -917,8 +965,18 @@ fn decode_chroma(
     has_left: bool,
 ) {
     let cbp_chroma = (mb.cbp >> 4) & 3;
+    let chroma422 = ctx.pic.chroma_format_idc == 2;
+    let max_qp = 51 + ctx.pic.qp_bd_offset();
+    // FFmpeg h264_mb_template.c: 4:2:2 chroma dequant uses `chroma_qp + 3`.
+    let c_qps = chroma_qp.map(|qp| {
+        if chroma422 {
+            (qp as i32 + 3).min(max_qp) as u8
+        } else {
+            qp
+        }
+    });
 
-    for (plane_idx, &c_qp) in chroma_qp.iter().enumerate() {
+    for (plane_idx, &c_qp) in c_qps.iter().enumerate() {
         // Compute field-aware offset before borrowing plane data mutably
         let (offset, c_stride) = chroma_mb_offset(&ctx.pic, mb_x, mb_y, ctx.mb_field);
 
@@ -929,24 +987,32 @@ fn decode_chroma(
             &mut ctx.pic.v as &mut Vec<u8>
         };
         let top: [u8; 8] = gather_top(plane_data, offset, c_stride);
-        let left: [u8; 8] = gather_left(plane_data, offset, c_stride, has_left);
-        let top_left = gather_top_left(plane_data, offset, c_stride, has_top, has_left);
-        intra_pred::predict_chroma_8x8(
-            &mut plane_data[offset..],
-            c_stride,
-            mb.chroma_pred_mode,
-            &top,
-            &left,
-            top_left,
-            has_top,
-            has_left,
-        );
-
-        {
-            let mut pred_row0 = [0u8; 8];
-            pred_row0.copy_from_slice(&plane_data[offset..offset + 8]);
-            let plane_name = if plane_idx == 0 { "U" } else { "V" };
-            trace!(mb_x, mb_y, plane = plane_name, row0 = ?pred_row0, "chroma prediction");
+        if chroma422 {
+            let left: [u8; 16] = gather_left(plane_data, offset, c_stride, has_left);
+            let top_left = gather_top_left(plane_data, offset, c_stride, has_top, has_left);
+            intra_pred::predict_chroma_8x16(
+                &mut plane_data[offset..],
+                c_stride,
+                mb.chroma_pred_mode,
+                &top,
+                &left,
+                top_left,
+                has_top,
+                has_left,
+            );
+        } else {
+            let left: [u8; 8] = gather_left(plane_data, offset, c_stride, has_left);
+            let top_left = gather_top_left(plane_data, offset, c_stride, has_top, has_left);
+            intra_pred::predict_chroma_8x8(
+                &mut plane_data[offset..],
+                c_stride,
+                mb.chroma_pred_mode,
+                &top,
+                &left,
+                top_left,
+                has_top,
+                has_left,
+            );
         }
 
         if cbp_chroma > 0 {
@@ -954,11 +1020,19 @@ fn decode_chroma(
             // FFmpeg uses list 1+plane for intra (1=Cb, 2=Cr)
             let dc_cqm = 1 + plane_idx;
             let qmul = dequant::dc_dequant_scale(&ctx.dequant4, dc_cqm, c_qp);
-            let mut chroma_dc_out = [0i32; 4];
-            idct::chroma_dc_dequant_idct(&mut chroma_dc_out, &mb.chroma_dc[plane_idx], qmul);
+            let mut chroma_dc_out = [0i32; 8];
+            let num_blocks = if chroma422 { 8 } else { 4 };
+            if chroma422 {
+                idct::chroma422_dc_dequant_idct(&mut chroma_dc_out, &mb.chroma_dc[plane_idx], qmul);
+            } else {
+                let dc_in: [i16; 4] = mb.chroma_dc[plane_idx][..4].try_into().unwrap();
+                let mut dc420 = [0i32; 4];
+                idct::chroma_dc_dequant_idct(&mut dc420, &dc_in, qmul);
+                chroma_dc_out[..4].copy_from_slice(&dc420);
+            }
 
             // For each 4x4 chroma block
-            for (blk_idx, &dc_val) in chroma_dc_out.iter().enumerate() {
+            for (blk_idx, &dc_val) in chroma_dc_out.iter().enumerate().take(num_blocks) {
                 let blk_x = (blk_idx & 1) as u32;
                 let blk_y = (blk_idx >> 1) as u32;
 
@@ -974,11 +1048,14 @@ fn decode_chroma(
                     // AC coefficients present — combine DC into coeffs[0] and
                     // process everything through a single IDCT pass (matching
                     // FFmpeg, which applies one +32 rounding bias for DC+AC).
-                    let cqm = 1 + plane_idx; // intra: 1=Cb, 2=Cr
                     mb.chroma_ac[plane_idx][blk_idx][0] = dc_val as i16;
+                    // FFmpeg h264_cavlc.c:1158 / h264_cabac.c use the raw
+                    // `chroma_qp` for AC dequantization. The +3 adjustment in
+                    // `c_qp` applies only to the chroma DC Hadamard
+                    // (h264_mb_template.c:229-234).
                     dequant::dequant_4x4(
                         &mut mb.chroma_ac[plane_idx][blk_idx],
-                        &ctx.dequant4.coeffs[cqm][c_qp as usize],
+                        &ctx.dequant4.coeffs[1 + plane_idx][chroma_qp[plane_idx] as usize],
                     );
                     // dequant_4x4 scaled [0] by the AC dequant factor, but
                     // DC was already fully dequantized by the Hadamard. Restore it.
@@ -997,16 +1074,6 @@ fn decode_chroma(
                             plane_data[idx] = (plane_data[idx] as i32 + dc_add).clamp(0, 255) as u8;
                         }
                     }
-                }
-
-                {
-                    let mut final_px = [0u8; 16];
-                    for r in 0..4 {
-                        let off = c_offset + r * c_stride;
-                        final_px[r * 4..r * 4 + 4].copy_from_slice(&plane_data[off..off + 4]);
-                    }
-                    let plane_name = if plane_idx == 0 { "U" } else { "V" };
-                    trace!(mb_x, mb_y, plane = plane_name, blk_x, blk_y, pixels = ?final_px, "chroma final");
                 }
             }
         }
@@ -1051,6 +1118,7 @@ pub fn decode_macroblock(
         ctx.direct_8x8_inference_flag,
         ctx.decode_chroma,
         ctx.mb_field,
+        _sps.chroma_format_idc,
     )?;
 
     // 2. Apply entropy-agnostic processing
@@ -1090,16 +1158,19 @@ pub fn apply_macroblock(
     // I_PCM: QP=0 for deblocking table, but running QP stays unchanged
     // (FFmpeg h264_cavlc.c: sl->qscale is NOT modified for I_PCM).
     if mb.mb_qp_delta != 0 {
-        ctx.qp = ((ctx.qp as i32 + mb.mb_qp_delta).rem_euclid(52)) as u8;
+        // QP wraps at `max_qp + 1` (51 + qp_bd_offset + 1), not at 52.
+        // Reference: FFmpeg h264_cabac.c:2409-2414 and h264_cavlc.c.
+        let range = 52 + 6 * (pps.bit_depth_luma as i32 - 8);
+        ctx.qp = ((ctx.qp as i32 + mb.mb_qp_delta).rem_euclid(range)) as u8;
     }
     ctx.last_qscale_diff = mb.mb_qp_delta;
     let qp = if mb.is_pcm { 0 } else { ctx.qp };
 
-    // Compute per-plane chroma QP (Cb uses offset[0], Cr uses offset[1])
-    let c_qp = [
-        CHROMA_QP_TABLE[(qp as i32 + pps.chroma_qp_index_offset[0]).clamp(0, 51) as usize],
-        CHROMA_QP_TABLE[(qp as i32 + pps.chroma_qp_index_offset[1]).clamp(0, 51) as usize],
-    ];
+    // Compute per-plane chroma QP (Cb uses offset[0], Cr uses offset[1]).
+    // `Pps::chroma_qp` applies both the PPS offset and the bit-depth-dependent
+    // H.264 Table 8-15 mapping; geometry (4:2:0/4:2:2/4:4:4) only decides how
+    // many chroma blocks are decoded, not how their QP is computed.
+    let c_qp = [pps.chroma_qp(0, qp as i32), pps.chroma_qp(1, qp as i32)];
 
     // Check neighbor availability with slice boundary awareness.
     // H.264 spec: neighbors from different slices are unavailable.
@@ -1187,6 +1258,10 @@ pub fn apply_macroblock(
                 }
             }
         } // if ctx.decode_chroma
+    } else if ctx.pic.is_high_depth() && mb.is_intra {
+        // FFmpeg's complex decoder reconstructs into uint16_t planes for
+        // BIT_DEPTH > 8. The generic intra_pred/idct kernels work on u16.
+        crate::hires::decode_intra_mb_hires(ctx, mb, mb_x, mb_y, qp, c_qp, has_top, has_left);
     } else if mb.is_intra4x4 {
         if mb.transform_size_8x8_flag {
             decode_intra8x8(ctx, mb, mb_x, mb_y, qp, c_qp, has_top, has_left);
@@ -1250,8 +1325,12 @@ pub fn apply_macroblock(
     ctx.slice_table[mb_idx] = ctx.current_slice;
     ctx.transform_8x8[mb_idx] = mb.transform_size_8x8_flag;
     ctx.mb_field_flag[mb_idx] = ctx.mb_field;
-    ctx.neighbor_ctx
-        .update_after_mb(mb_x, &mb.non_zero_count, &intra4x4_modes);
+    ctx.neighbor_ctx.update_after_mb(
+        mb_x,
+        &mb.non_zero_count,
+        &intra4x4_modes,
+        ctx.pic.chroma_format_idc == 2,
+    );
     ctx.neighbor_ctx.left_available = true;
 
     // Per-MB pipeline-stage checksum for diffing against FFmpeg.
@@ -2000,26 +2079,48 @@ fn apply_mc_partition(
     );
 
     // Chroma: eighth-pixel precision (MV divided by 2 with rounding)
+    let chroma422 = ctx.pic.chroma_format_idc == 2;
     let chroma_w = block_w / 2;
-    let chroma_h = block_h / 2;
+    let chroma_h = if chroma422 { block_h } else { block_h / 2 };
     if chroma_w == 0 || chroma_h == 0 {
         return; // Partitions smaller than 4 pixels wide don't have separate chroma
     }
 
     let (chroma_mb_off, chroma_dst_stride) = chroma_mb_offset(&ctx.pic, mb_x, mb_y, mb_field);
+    // 4:2:2 chroma has full vertical resolution: destination rows use luma
+    // units (FFmpeg h264_mb.c mc_part_std: yuv422 adds 2*y_offset).
+    let chroma_y_off = if chroma422 {
+        px_offset_y
+    } else {
+        px_offset_y / 2
+    };
     let chroma_offset =
-        chroma_mb_off + (px_offset_y / 2) as usize * chroma_dst_stride + (px_offset_x / 2) as usize;
+        chroma_mb_off + chroma_y_off as usize * chroma_dst_stride + (px_offset_x / 2) as usize;
 
     // For MV-based reference lookup, use frame-mode coordinates.
     let chroma_dst_x = (mb_x * 8 + px_offset_x / 2) as i32;
-    let chroma_dst_y = (mb_y * 8 + px_offset_y / 2) as i32;
+    let chroma_dst_y = if chroma422 {
+        (mb_y * 16 + px_offset_y) as i32
+    } else {
+        (mb_y * 8 + px_offset_y / 2) as i32
+    };
 
     let cmvx = mvx;
     let cmvy = mvy;
     let chroma_ref_x = chroma_dst_x + (cmvx >> 3);
-    let chroma_ref_y = chroma_dst_y + (cmvy >> 3);
+    // 4:2:2 chroma vertical MV is quarter-pel (ysh=2), not eighth-pel;
+    // the fractional part is `(my << 1) & 7` in FFmpeg mc_dir_part.
+    let chroma_ref_y = if chroma422 {
+        chroma_dst_y + (cmvy >> 2)
+    } else {
+        chroma_dst_y + (cmvy >> 3)
+    };
     let chroma_dx = (cmvx & 7) as u8;
-    let chroma_dy = (cmvy & 7) as u8;
+    let chroma_dy = if chroma422 {
+        ((cmvy << 1) & 7) as u8
+    } else {
+        (cmvy & 7) as u8
+    };
 
     mc::mc_chroma(
         &mut ctx.pic.u[chroma_offset..],
@@ -2033,7 +2134,7 @@ fn apply_mc_partition(
         chroma_w,
         chroma_h,
         rp.width / 2,
-        rp.height / 2,
+        if chroma422 { rp.height } else { rp.height / 2 },
     );
 
     mc::mc_chroma(
@@ -2048,7 +2149,7 @@ fn apply_mc_partition(
         chroma_w,
         chroma_h,
         rp.width / 2,
-        rp.height / 2,
+        if chroma422 { rp.height } else { rp.height / 2 },
     );
 }
 
@@ -3605,27 +3706,50 @@ fn apply_mc_bi_partition(
     }
 
     // Chroma L1
+    let chroma422 = ctx.pic.chroma_format_idc == 2;
     let chroma_w = block_w / 2;
-    let chroma_h = block_h / 2;
+    let chroma_h = if chroma422 { block_h } else { block_h / 2 };
     if chroma_w == 0 || chroma_h == 0 {
         return;
     }
 
     // Frame-mode coordinates for reference lookup
     let chroma_dst_x = (mb_x * 8 + px_offset_x / 2) as i32;
-    let chroma_dst_y = (mb_y * 8 + px_offset_y / 2) as i32;
+    let chroma_dst_y = if chroma422 {
+        (mb_y * 16 + px_offset_y) as i32
+    } else {
+        (mb_y * 8 + px_offset_y / 2) as i32
+    };
+    // See apply_mc: 4:2:2 chroma uses quarter-pel vertical precision.
     let chroma_ref_x = chroma_dst_x + (mvx1 >> 3);
-    let chroma_ref_y = chroma_dst_y + (mvy1 >> 3);
+    let chroma_ref_y = if chroma422 {
+        chroma_dst_y + (mvy1 >> 2)
+    } else {
+        chroma_dst_y + (mvy1 >> 3)
+    };
     let chroma_dx = (mvx1 & 7) as u8;
-    let chroma_dy = (mvy1 & 7) as u8;
+    let chroma_dy = if chroma422 {
+        ((mvy1 << 1) & 7) as u8
+    } else {
+        (mvy1 & 7) as u8
+    };
 
     // Field-aware destination offset
     let (chroma_mb_off, chroma_dst_stride) = chroma_mb_offset(&ctx.pic, mb_x, mb_y, mb_field);
+    let chroma_y_off = if chroma422 {
+        px_offset_y
+    } else {
+        px_offset_y / 2
+    };
     let chroma_off =
-        chroma_mb_off + (px_offset_y / 2) as usize * chroma_dst_stride + (px_offset_x / 2) as usize;
+        chroma_mb_off + chroma_y_off as usize * chroma_dst_stride + (px_offset_x / 2) as usize;
 
     let chroma_pic_w = rp_l1.width / 2;
-    let chroma_pic_h = rp_l1.height / 2;
+    let chroma_pic_h = if chroma422 {
+        rp_l1.height
+    } else {
+        rp_l1.height / 2
+    };
 
     // Check if weighted bi-prediction is needed (requires temp buffers)
     let use_implicit_weight = slice_hdr.weighted_bipred_idc == 2
@@ -3825,15 +3949,32 @@ fn decode_chroma_inter(
     chroma_qp: [u8; 2],
 ) {
     let cbp_chroma = (mb.cbp >> 4) & 3;
+    let chroma422 = ctx.pic.chroma_format_idc == 2;
+    let max_qp = 51 + ctx.pic.qp_bd_offset();
+    let c_qps = chroma_qp.map(|qp| {
+        if chroma422 {
+            (qp as i32 + 3).min(max_qp) as u8
+        } else {
+            qp
+        }
+    });
 
     if cbp_chroma > 0 {
-        for (plane_idx, &c_qp) in chroma_qp.iter().enumerate() {
+        for (plane_idx, &c_qp) in c_qps.iter().enumerate() {
             // Chroma DC: inverse Hadamard + dequant (i32 output to avoid i16 overflow)
             // FFmpeg uses list 4+plane for inter (4=Cb, 5=Cr)
             let dc_cqm = 4 + plane_idx;
             let qmul = dequant::dc_dequant_scale(&ctx.dequant4, dc_cqm, c_qp);
-            let mut chroma_dc_out = [0i32; 4];
-            idct::chroma_dc_dequant_idct(&mut chroma_dc_out, &mb.chroma_dc[plane_idx], qmul);
+            let mut chroma_dc_out = [0i32; 8];
+            let num_blocks = if chroma422 { 8 } else { 4 };
+            if chroma422 {
+                idct::chroma422_dc_dequant_idct(&mut chroma_dc_out, &mb.chroma_dc[plane_idx], qmul);
+            } else {
+                let dc_in: [i16; 4] = mb.chroma_dc[plane_idx][..4].try_into().unwrap();
+                let mut dc420 = [0i32; 4];
+                idct::chroma_dc_dequant_idct(&mut dc420, &dc_in, qmul);
+                chroma_dc_out[..4].copy_from_slice(&dc420);
+            }
 
             {
                 let plane_name = if plane_idx == 0 { "U" } else { "V" };
@@ -3842,7 +3983,7 @@ fn decode_chroma_inter(
                     qmul, c_qp, "inter chroma DC");
             }
 
-            for (blk_idx, &dc_val) in chroma_dc_out.iter().enumerate() {
+            for (blk_idx, &dc_val) in chroma_dc_out.iter().enumerate().take(num_blocks) {
                 let blk_x = (blk_idx & 1) as u32;
                 let blk_y = (blk_idx >> 1) as u32;
 
@@ -3858,9 +3999,11 @@ fn decode_chroma_inter(
                     // AC present: combine DC into coeffs[0] for single IDCT pass
                     let ac_cqm = 4 + plane_idx; // inter: 4=Cb, 5=Cr
                     mb.chroma_ac[plane_idx][blk_idx][0] = dc_val as i16;
+                    // FFmpeg: chroma AC dequant uses `chroma_qp` (no +3);
+                    // only the DC Hadamard uses `chroma_qp + 3` for 4:2:2.
                     dequant::dequant_4x4(
                         &mut mb.chroma_ac[plane_idx][blk_idx],
-                        &ctx.dequant4.coeffs[ac_cqm][c_qp as usize],
+                        &ctx.dequant4.coeffs[ac_cqm][chroma_qp[plane_idx] as usize],
                     );
                     mb.chroma_ac[plane_idx][blk_idx][0] = dc_val as i16;
                     idct::idct4x4_add(
@@ -3894,7 +4037,7 @@ fn decode_chroma_inter(
 // ---------------------------------------------------------------------------
 
 /// Maps 8x8 block index (0..3) to top-left pixel offset within the macroblock.
-const BLOCK_8X8_OFFSET: [(u32, u32); 4] = [(0, 0), (8, 0), (0, 8), (8, 8)];
+pub(crate) const BLOCK_8X8_OFFSET: [(u32, u32); 4] = [(0, 0), (8, 0), (0, 8), (8, 8)];
 
 /// Decode an intra 8x8 macroblock (High profile, transform_size_8x8_flag=1).
 #[allow(clippy::too_many_arguments)]

@@ -1,0 +1,21 @@
+[package]
+name = "wedeo-format-mpegts-mux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MPEG-2 Transport Stream muxer (libavformat/mpegtsenc.c)"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-format = { workspace = true }
+inventory = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+wedeo-codec = { workspace = true }
+
+[lints]
+workspace = true

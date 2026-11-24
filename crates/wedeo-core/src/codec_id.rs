@@ -16,10 +16,11 @@ pub enum CodecId {
     Mpeg4 = 12,
     Rawvideo = 13,
     H264 = 27,
-    Vp8 = 139,  // AV_CODEC_ID_VP8
-    Vp9 = 167,  // AV_CODEC_ID_VP9
-    Hevc = 173, // AV_CODEC_ID_HEVC
-    Av1 = 225,  // AV_CODEC_ID_AV1
+    Theora = 30, // AV_CODEC_ID_THEORA
+    Vp8 = 139,   // AV_CODEC_ID_VP8
+    Vp9 = 167,   // AV_CODEC_ID_VP9
+    Hevc = 173,  // AV_CODEC_ID_HEVC
+    Av1 = 225,   // AV_CODEC_ID_AV1
 
     // Audio codecs — start at 0x10000 per FFmpeg
     PcmS16le = 0x10000,
@@ -83,6 +84,7 @@ impl CodecId {
             CodecId::Mpeg4 => "mpeg4",
             CodecId::Rawvideo => "rawvideo",
             CodecId::H264 => "h264",
+            CodecId::Theora => "theora",
             CodecId::Vp8 => "vp8",
             CodecId::Vp9 => "vp9",
             CodecId::Av1 => "av1",
@@ -146,6 +148,7 @@ impl CodecId {
             "mpeg4" => Self::Mpeg4,
             "rawvideo" => Self::Rawvideo,
             "h264" | "libx264" | "libx264rgb" => Self::H264,
+            "theora" => Self::Theora,
             "vp8" | "libvpx" => Self::Vp8,
             "vp9" | "libvpx-vp9" => Self::Vp9,
             "av1" | "libaom-av1" | "librav1e" | "libsvtav1" => Self::Av1,

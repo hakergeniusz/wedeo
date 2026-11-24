@@ -6,6 +6,8 @@ use wedeo_format::io::BufferedIo;
 use wedeo_format::muxer::{Muxer, OutputFormatDescriptor, OutputFormatFlags};
 use wedeo_format::registry::MuxerFactory;
 
+mod demux;
+
 /// WAVE format codes
 const WAVE_FORMAT_PCM: u16 = 0x0001;
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;

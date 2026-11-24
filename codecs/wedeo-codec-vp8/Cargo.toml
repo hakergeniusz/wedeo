@@ -1,0 +1,18 @@
+[package]
+name = "wedeo-codec-vp8"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Work unit for libavcodec/vp8.c (scaffolding, not yet implemented)"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

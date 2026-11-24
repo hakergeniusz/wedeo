@@ -22,6 +22,7 @@ use wedeo_core::frame::{Frame, FrameData, FrameFlags, FramePlane, PictureType};
 use wedeo_core::media_type::MediaType;
 use wedeo_core::packet::Packet;
 use wedeo_core::pixel_format::PixelFormat;
+use wedeo_core::timestamp::NOPTS_VALUE;
 
 use crate::block::{BlockInfo, TileDecodeContext, decode_sb};
 use crate::bool_decoder::BoolDecoder;
@@ -56,8 +57,11 @@ pub struct Vp9Decoder {
     frame_count: u64,
     /// Reference frame storage for inter prediction.
     ref_store: RefStore,
-    /// Previous frame's show_frame flag (FFmpeg: `last_invisible`).
-    last_show_frame: bool,
+    /// Previous frame's `invisible` flag (FFmpeg: `s->s.h.invisible`).
+    /// `invisible = !show_frame`, so `!last_invisible` means the previous
+    /// frame was shown. FFmpeg vp9.c:568-571 uses this (not the *current*
+    /// frame's show_frame) to derive `use_last_frame_mvs`.
+    last_invisible: bool,
     /// Previous frame's width (for use_last_frame_mvs dimension check).
     last_width: u32,
     /// Previous frame's height.
@@ -84,7 +88,11 @@ impl Vp9Decoder {
             last_keyframe: false,
             frame_count: 0,
             ref_store: RefStore::new(),
-            last_show_frame: false,
+            // FFmpeg's `s->s.h.invisible` starts at 0, but its
+            // `use_last_frame_mvs &= frames[CUR_FRAME].tf.f` check (vp9.c:641)
+            // makes temporal MV prediction unavailable until a previous frame
+            // exists. Starting at `true` (invisible) preserves that behaviour.
+            last_invisible: true,
             last_width: 0,
             last_height: 0,
         })
@@ -93,7 +101,12 @@ impl Vp9Decoder {
     /// Decode one VP9 frame from `data` and push the result to `output_queue`.
     fn decode_frame(&mut self, data: &[u8], pts: i64) -> Result<()> {
         // --- 1. Parse frame header ---
-        let (header, _hdr_bytes) = decode_frame_header(data, &self.prob_ctx, &self.coef_ctx)?;
+        let (header, _hdr_bytes) =
+            decode_frame_header(data, &self.prob_ctx, &self.coef_ctx, |i| {
+                self.ref_store.slots[i]
+                    .as_ref()
+                    .map(|rf| (rf.width, rf.height))
+            })?;
 
         debug!(
             frame_type = ?header.frame_type,
@@ -103,7 +116,6 @@ impl Vp9Decoder {
             height = header.height,
             "VP9 frame header decoded"
         );
-
 
         // show_existing_frame: output a previously decoded reference frame.
         if header.show_existing_frame {
@@ -173,20 +185,30 @@ impl Vp9Decoder {
             }
         }
 
-        // FFmpeg: use_last_frame_mvs = !errorres && !last_invisible
-        //         use_last_frame_mvs &= (prev_frame exists && same dimensions)
-        header.use_last_frame_mvs = !header.error_resilient
-            && self.last_show_frame
-            && self.last_width == header.width
-            && self.last_height == header.height;
+        // FFmpeg vp9.c:568-571, 641-643:
+        //   last_invisible = s->s.h.invisible;                    (previous frame)
+        //   s->s.h.invisible = !get_bits1(&s->gb);                (this frame)
+        //   use_last_frame_mvs = !errorres && !last_invisible;
+        //   use_last_frame_mvs &= prev_frame_exists && same_dimensions;
+        header.use_last_frame_mvs = compute_use_last_frame_mvs(
+            header.error_resilient,
+            self.last_invisible,
+            self.last_width == header.width && self.last_height == header.height,
+        );
 
         // --- 2. Set up frame buffer and contexts ---
         let width = header.width;
         let height = header.height;
         let mut fb = FrameBuffer::new(width, height);
 
-        let cols_4x4 = (width as usize).div_ceil(4);
-        let rows_4x4 = (height as usize).div_ceil(4);
+        // FFmpeg's coding grid is 8x8-based: `cols = (w + 7) >> 3`,
+        // `rows = (h + 7) >> 3` (vp9.c:282-283). All frame-boundary
+        // calculations (partition decisions, coefficient end_x/end_y,
+        // context arrays) operate on this grid. Express it here in 4x4
+        // units so the rest of the decoder can keep using 4x4 indices.
+        // Using ceil(w/4) instead breaks for widths not divisible by 8.
+        let cols_4x4 = (width as usize).div_ceil(8) * 2;
+        let rows_4x4 = (height as usize).div_ceil(8) * 2;
         let sb_cols = cols_4x4.div_ceil(16);
         let sb_rows = rows_4x4.div_ceil(16);
         let is_kf = header.frame_type == FrameType::KeyFrame || header.intra_only;
@@ -196,6 +218,19 @@ impl Vp9Decoder {
 
         // Allocate per-4×4 MV grid for this frame.
         let mut cur_mv_grid = vec![MvRefPair::default(); rows_4x4 * cols_4x4];
+
+        // Segmentation map. FFmpeg keeps the last decoded map in
+        // `s->s.frames[REF_FRAME_SEGMAP]` and only replaces it when a new map
+        // is decoded (vp9.c:1667-1670, vp9block.c:98-141).
+        let mut cur_seg_map = vec![0u8; rows_4x4 * cols_4x4];
+        // FFmpeg vp9.c:1618-1670: the segmentation-map reference is the
+        // previous current frame (which holds its decoded map) even when the
+        // new frame has update_map set; temporal prediction may still use it.
+        let ref_seg_map = if is_kf {
+            None
+        } else {
+            self.ref_store.seg_map_for(rows_4x4, cols_4x4)
+        };
 
         // --- 3. Locate tile data ---
         // `header.tile_data_offset` points to the first byte after the
@@ -260,6 +295,8 @@ impl Vp9Decoder {
                         &mut cur_mv_grid,
                         self.ref_store.prev_frame_mvs.as_deref(),
                         self.ref_store.prev_cols_4x4,
+                        &mut cur_seg_map,
+                        ref_seg_map,
                     )?;
                     all_blocks.extend(blocks);
                     merged_counts.merge(&counts);
@@ -270,6 +307,7 @@ impl Vp9Decoder {
                 // (UB under Rust aliasing rules even for disjoint access).
                 let sync_above = SyncAbove(&mut above as *mut AboveContext);
                 let sync_mv_grid = SyncMvGrid(&mut cur_mv_grid[..] as *mut [MvRefPair]);
+                let sync_seg_map = SyncSegMap(&mut cur_seg_map[..] as *mut [u8]);
                 let prev_mvs = self.ref_store.prev_frame_mvs.as_deref();
                 let prev_c4 = self.ref_store.prev_cols_4x4;
 
@@ -289,6 +327,7 @@ impl Vp9Decoder {
                         for tile_col in 0..tile_cols {
                             let above_ref = &sync_above;
                             let mv_ref = &sync_mv_grid;
+                            let seg_ref = &sync_seg_map;
                             let header_ref = &header;
                             let td = tile_data;
                             let offsets = &tile_offsets;
@@ -299,9 +338,23 @@ impl Vp9Decoder {
                                 // avoid the UB of multiple &mut references.
                                 let above = unsafe { &mut *above_ref.0 };
                                 let mv_grid = unsafe { &mut *mv_ref.0 };
+                                let seg_map = unsafe { &mut *seg_ref.0 };
                                 decode_tile_column(
-                                    td, offsets, header_ref, above, tile_row, tile_col, tile_cols,
-                                    tr_start, tr_end, sb_cols, mv_grid, prev_mvs, prev_c4,
+                                    td,
+                                    offsets,
+                                    header_ref,
+                                    above,
+                                    tile_row,
+                                    tile_col,
+                                    tile_cols,
+                                    tr_start,
+                                    tr_end,
+                                    sb_cols,
+                                    mv_grid,
+                                    prev_mvs,
+                                    prev_c4,
+                                    seg_map,
+                                    ref_seg_map,
                                 )
                             }));
                         }
@@ -387,9 +440,17 @@ impl Vp9Decoder {
         });
         self.ref_store.refresh(header.refresh_ref_mask, ref_frame);
         self.ref_store.rotate_mvpair(cur_mv_grid, cols_4x4);
+        // FFmpeg vp9.c:1669 retains the previous segmentation map unless a
+        // new one is decoded; vp9block.c:140 writes one on keyframes and on
+        // frames with segmentation.update_map set.
+        if header.segmentation.enabled && (is_kf || header.segmentation.update_map) {
+            self.ref_store
+                .update_seg_map(cur_seg_map, rows_4x4, cols_4x4);
+        }
 
-        // Track frame state for use_last_frame_mvs in next frame.
-        self.last_show_frame = header.show_frame;
+        // Track this frame's `invisible` bit for the *next* frame's
+        // use_last_frame_mvs (FFmpeg vp9.c:569: invisible = !show_frame).
+        self.last_invisible = !header.show_frame;
         self.last_width = width;
         self.last_height = height;
 
@@ -438,6 +499,21 @@ impl Vp9Decoder {
     }
 }
 
+/// Derive `use_last_frame_mvs` exactly as FFmpeg vp9.c:568-571, 641-643 does.
+///
+/// FFmpeg reads the previous frame's `invisible` flag from persistent decoder
+/// state (`last_invisible = s->s.h.invisible`); it does **not** use the current
+/// frame's `show_frame`. `invisible` is `!show_frame`, so temporal MV
+/// prediction is enabled only when the previous frame was shown, the current
+/// frame is not error-resilient, and both frames share dimensions.
+fn compute_use_last_frame_mvs(
+    error_resilient: bool,
+    last_invisible: bool,
+    same_dimensions: bool,
+) -> bool {
+    !error_resilient && !last_invisible && same_dimensions
+}
+
 // ---------------------------------------------------------------------------
 // Parallel tile column helpers
 // ---------------------------------------------------------------------------
@@ -463,6 +539,16 @@ struct SyncMvGrid(*mut [MvRefPair]);
 unsafe impl Send for SyncMvGrid {}
 unsafe impl Sync for SyncMvGrid {}
 
+/// Raw pointer wrapper for the current frame's segmentation map.
+///
+/// SAFETY: Each tile column writes only to its own 4×4 column range of the
+/// segmentation map, exactly as it does for AboveContext and the MV grid.
+struct SyncSegMap(*mut [u8]);
+
+// SAFETY: Disjoint column ranges — see SyncSegMap doc comment.
+unsafe impl Send for SyncSegMap {}
+unsafe impl Sync for SyncSegMap {}
+
 /// Decode all superblocks in one tile column for a given tile row.
 /// Returns the decoded blocks.
 #[allow(clippy::too_many_arguments)]
@@ -480,6 +566,8 @@ fn decode_tile_column(
     cur_mv_grid: &mut [MvRefPair],
     prev_mv_grid: Option<&[MvRefPair]>,
     prev_cols_4x4: usize,
+    seg_map: &mut [u8],
+    ref_seg_map: Option<&[u8]>,
 ) -> Result<(Vec<BlockInfo>, CountContext)> {
     let tile_col_start_sb = tile_sb_offset(tile_col, header.tile_cols_log2, sb_cols);
     let tile_col_end_sb = tile_sb_offset(tile_col + 1, header.tile_cols_log2, sb_cols).min(sb_cols);
@@ -509,6 +597,8 @@ fn decode_tile_column(
         cur_mv_grid,
         prev_mv_grid,
         prev_cols_4x4,
+        seg_map,
+        ref_seg_map,
     );
 
     for sb_row in tr_start..tr_end {
@@ -542,45 +632,104 @@ fn tile_sb_offset(tile_num: usize, log2_tiles: u8, n_sbs: usize) -> usize {
 // Superframe parsing  (VP9 Annex B)
 // ---------------------------------------------------------------------------
 
-/// Parse a VP9 superframe index and return sub-frame slices.
+/// Parse the `invisible` (i.e. `!show_frame`) bit out of a VP9 frame header.
 ///
-/// If the packet is not a superframe, returns a single-element vec
-/// containing the entire packet.
-fn parse_superframe(data: &[u8]) -> Vec<&[u8]> {
+/// Matches FFmpeg's `vp9_superframe_split.c:113-121`: the `invisible` flag is
+/// only meaningful when `show_existing_frame` is not set. Bits are read MSB
+/// first directly from the byte stream (uncompressed header prefix).
+fn subframe_is_invisible(data: &[u8]) -> bool {
+    fn rb(data: &[u8], pos: &mut usize) -> Option<u8> {
+        if *pos >= data.len() * 8 {
+            return None;
+        }
+        let bit = (data[*pos / 8] >> (7 - (*pos % 8))) & 1;
+        *pos += 1;
+        Some(bit)
+    }
+
+    let mut p = 0usize;
+    // frame_marker (2 bits)
+    if rb(data, &mut p).is_none() || rb(data, &mut p).is_none() {
+        return false;
+    }
+    let lo = match rb(data, &mut p) {
+        Some(v) => v,
+        None => return false,
+    };
+    let hi = match rb(data, &mut p) {
+        Some(v) => v,
+        None => return false,
+    };
+    let profile = lo | (hi << 1);
+    if profile == 3 && rb(data, &mut p).is_none() {
+        return false;
+    }
+    let show_existing = match rb(data, &mut p) {
+        Some(v) => v,
+        None => return false,
+    };
+    if show_existing != 0 {
+        return false;
+    }
+    // frame_type bit (ignored by FFmpeg).
+    if rb(data, &mut p).is_none() {
+        return false;
+    }
+    let show_frame = match rb(data, &mut p) {
+        Some(v) => v,
+        None => return false,
+    };
+    show_frame == 0
+}
+
+/// Parse a VP9 superframe index and return sub-frame slices together with a
+/// flag telling whether each sub-frame is `invisible` (matches FFmpeg's
+/// `vp9_superframe_split` BSF).
+///
+/// If the packet is not a superframe, returns a single-element vec containing
+/// the entire packet (with `invisible = false`, i.e. the packet is passed
+/// through unchanged).
+fn parse_superframe(data: &[u8]) -> Vec<(&[u8], bool)> {
     let len = data.len();
     if len < 1 {
-        return vec![data];
+        return vec![(data, false)];
     }
     let marker = data[len - 1];
     // Superframe marker: top 3 bits = 0b110.
     if marker & 0xE0 != 0xC0 {
-        return vec![data];
+        return vec![(data, false)];
     }
-    let num_frames = ((marker >> 3) & 0x03) as usize + 1;
-    let mag = (marker & 0x03) as usize + 1; // bytes per size field
-    let idx_sz = 2 + num_frames * mag; // marker byte + sizes + marker byte
-    if idx_sz > len {
-        return vec![data];
+    // FFmpeg vp9_superframe_split.c:59-60:
+    //   length_size = 1 + ((marker >> 3) & 0x3);
+    //   nb_frames   = 1 + (marker & 0x7);
+    let length_size = 1 + ((marker >> 3) & 0x3) as usize;
+    let num_frames = 1 + (marker & 0x7) as usize; // up to 8 frames
+    let idx_size = 2 + num_frames * length_size; // leading marker + sizes + trailing marker
+    if idx_size > len {
+        return vec![(data, false)];
     }
     // Verify leading marker matches trailing marker.
-    if data[len - idx_sz] != marker {
-        return vec![data];
+    if data[len - idx_size] != marker {
+        return vec![(data, false)];
     }
-    // Parse per-frame sizes.
+    // Parse per-frame sizes (little-endian, one byte per `length_size`).
     let mut frames = Vec::with_capacity(num_frames);
-    let mut pos = len - idx_sz + 1; // skip leading marker byte
+    let mut pos = len - idx_size + 1; // skip leading marker byte
     let mut data_pos = 0usize;
     for _ in 0..num_frames {
         let mut sz = 0usize;
-        for j in 0..mag {
+        for j in 0..length_size {
             sz |= (data[pos] as usize) << (j * 8);
             pos += 1;
         }
-        if data_pos + sz > len - idx_sz {
+        // FFmpeg: invalid frame size (<= 0) or sum exceeding the payload area.
+        if sz == 0 || data_pos + sz > len - idx_size {
             // Malformed — fall back to treating as single frame.
-            return vec![data];
+            return vec![(data, false)];
         }
-        frames.push(&data[data_pos..data_pos + sz]);
+        let sub = &data[data_pos..data_pos + sz];
+        let invisible = subframe_is_invisible(sub);
+        frames.push((sub, invisible));
         data_pos += sz;
     }
     frames
@@ -602,9 +751,12 @@ impl Decoder for Vp9Decoder {
                 let data = pkt.data.data();
                 let pts = pkt.pts;
                 // Parse VP9 superframe index to split compound packets.
+                // FFmpeg's vp9_superframe_split BSF clears the PTS of
+                // invisible (show_frame == 0) sub-frames.
                 let sub_frames = parse_superframe(data);
-                for sub in &sub_frames {
-                    match self.decode_frame(sub, pts) {
+                for (sub, invisible) in &sub_frames {
+                    let sub_pts = if *invisible { NOPTS_VALUE } else { pts };
+                    match self.decode_frame(sub, sub_pts) {
                         Ok(()) => {}
                         Err(Error::PatchwelcomeNotImplemented) => {
                             debug!("VP9: skipping unsupported frame");
@@ -632,7 +784,9 @@ impl Decoder for Vp9Decoder {
         self.output_queue.clear();
         self.draining = false;
         self.ref_store.clear();
-        self.last_show_frame = false;
+        // No previous frame after a flush: keep temporal MV prediction off
+        // until a frame has been decoded (matches FFmpeg's tf.f check).
+        self.last_invisible = true;
     }
 
     fn descriptor(&self) -> &CodecDescriptor {
@@ -666,3 +820,122 @@ impl DecoderFactory for Vp9DecoderFactory {
 }
 
 inventory::submit!(&Vp9DecoderFactory as &dyn DecoderFactory);
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a synthetic superframe the way FFmpeg's muxer does:
+    /// `marker = 0xC0 | ((length_size - 1) << 3) | (nb_frames - 1)`.
+    fn make_superframe(sizes: &[usize], length_size: usize, invisible: &[bool]) -> Vec<u8> {
+        let nb = sizes.len();
+        assert_eq!(nb, invisible.len());
+        let marker = 0xC0u8 | (((length_size - 1) as u8) << 3) | ((nb - 1) as u8);
+        let idx_size = 2 + nb * length_size;
+        let payload_len: usize = sizes.iter().sum();
+        let mut data = vec![0u8; payload_len + idx_size];
+
+        let mut pos = 0usize;
+        for (i, &sz) in sizes.iter().enumerate() {
+            if sz >= 1 {
+                // VP9 header prefix (MSB first): frame_marker=0b10,
+                // profile=0b00, show_existing_frame=0, frame_type=0,
+                // show_frame = !invisible.
+                let show = u8::from(!invisible[i]);
+                data[pos] = 0x80 | (show << 1);
+            }
+            pos += sz;
+        }
+        data[payload_len] = marker;
+        let mut p = payload_len + 1;
+        for &sz in sizes {
+            for j in 0..length_size {
+                data[p] = (sz >> (j * 8)) as u8;
+                p += 1;
+            }
+        }
+        data[p] = marker;
+        data
+    }
+
+    #[test]
+    fn superframe_swapped_bit_layout() {
+        // nb_frames lives in bits 0..2, length_size in bits 3..4.
+        let data = make_superframe(&[10, 20], 1, &[false, false]);
+        let frames = parse_superframe(&data);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].0.len(), 10);
+        assert_eq!(frames[1].0.len(), 20);
+        assert!(!frames[0].1);
+        assert!(!frames[1].1);
+    }
+
+    #[test]
+    fn superframe_eight_frames_two_byte_sizes() {
+        let sizes = [4usize; 8];
+        let data = make_superframe(&sizes, 2, &[false; 8]);
+        let frames = parse_superframe(&data);
+        assert_eq!(frames.len(), 8);
+        for (sub, _) in &frames {
+            assert_eq!(sub.len(), 4);
+        }
+    }
+
+    #[test]
+    fn superframe_invisible_subframe() {
+        let data = make_superframe(&[10, 10], 1, &[false, true]);
+        let frames = parse_superframe(&data);
+        assert_eq!(frames.len(), 2);
+        assert!(!frames[0].1);
+        assert!(frames[1].1);
+    }
+
+    #[test]
+    fn non_superframe_passthrough() {
+        let data = [0x82u8, 1, 2, 3];
+        let frames = parse_superframe(&data);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, &data);
+        assert!(!frames[0].1);
+    }
+
+    #[test]
+    fn malformed_zero_size_falls_back_to_passthrough() {
+        let data = make_superframe(&[0, 10], 1, &[false, false]);
+        let frames = parse_superframe(&data);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, &data[..]);
+    }
+
+    #[test]
+    fn use_last_frame_mvs_uses_previous_invisible_not_current_show_frame() {
+        // FFmpeg vp9.c:568-571: `use_last_frame_mvs = !errorres &&
+        // !last_invisible`. A previous *invisible* frame (show_frame == 0)
+        // disables temporal MV prediction regardless of the current frame's
+        // show_frame bit.
+        assert!(compute_use_last_frame_mvs(false, false, true));
+        assert!(!compute_use_last_frame_mvs(false, true, true));
+        assert!(!compute_use_last_frame_mvs(true, false, true));
+        assert!(!compute_use_last_frame_mvs(false, false, false));
+    }
+
+    #[test]
+    fn invisible_state_tracks_previous_frame_across_superframe() {
+        // Simulate the decoder state update for a superframe whose second
+        // subframe is invisible: [visible, invisible, visible]. Only the
+        // frame after the visible one may use last-frame MVs.
+        let mut last_invisible = true;
+        let show_frames = [true, false, true];
+        let expected = [false, true, false];
+        for (show_frame, expected_use) in show_frames.into_iter().zip(expected) {
+            let use_last = compute_use_last_frame_mvs(false, last_invisible, true);
+            assert_eq!(use_last, expected_use);
+            // vp9.c:569: invisible = !show_frame.
+            last_invisible = !show_frame;
+        }
+    }
+}

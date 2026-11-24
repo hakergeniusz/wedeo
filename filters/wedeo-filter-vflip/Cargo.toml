@@ -1,0 +1,17 @@
+[package]
+name = "wedeo-filter-vflip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Video vertical flip filter (port of libavfilter/vf_vflip.c)"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-filter = { workspace = true }
+inventory = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "wedeo-codec-hevc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native HEVC / H.265 decoder (libavcodec/hevc/hevcdec.c)"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+wedeo-codec-hevc-ps = { workspace = true }
+wedeo-codec-hevc-cabac = { workspace = true }
+wedeo-codec-hevc-dsp = { workspace = true }
+wedeo-codec-hevc-refs = { workspace = true }
+inventory = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

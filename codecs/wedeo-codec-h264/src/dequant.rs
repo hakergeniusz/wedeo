@@ -9,7 +9,7 @@
 
 use crate::tables::{
     DEFAULT_SCALING4, DEFAULT_SCALING8, DEQUANT4_COEFF_INIT, DEQUANT8_COEFF_INIT,
-    DEQUANT8_COEFF_INIT_SCAN,
+    DEQUANT8_COEFF_INIT_SCAN, QP_MAX_NUM,
 };
 
 /// Pre-computed dequantization table for 4x4 blocks with the default flat
@@ -29,13 +29,19 @@ use crate::tables::{
 ///     table[qp][x] = dequant4_coeff_init[idx][scale_idx]
 ///                     * scaling_matrix4[x] << shift
 ///
-/// Maximum QP for 8-bit depth is 51.
+/// Maximum QP is `51 + qp_bd_offset` (`qp_bd_offset = 6 * (bit_depth - 8)`),
+/// which is 51 for 8-bit and 63 for 10-bit. The table is allocated for the
+/// FFmpeg maximum (`QP_MAX_NUM + 1`) and only entries up to the active
+/// maximum QP are filled, matching FFmpeg's `pps->dequant4_buffer`.
 ///
 /// Reference: FFmpeg `init_dequant4_coeff_table` in h264_ps.c
 pub struct Dequant4Table {
     /// `coeffs[qp][position_in_raster_order]` for each of the 6 scaling lists.
     /// Index 0-2 = intra (Y, Cr, Cb), index 3-5 = inter (Y, Cr, Cb).
-    pub coeffs: [[[u32; 16]; 52]; 6],
+    // Boxed per list so the large QP-range tables live on the heap: a
+    // FrameDecodeContext holds two of these and debug builds have limited
+    // stack space for the decode call chain.
+    pub coeffs: Vec<Box<[[u32; 16]; QP_MAX_NUM + 1]>>,
 }
 
 /// Pre-computed dequantization table for 8x8 blocks with the default flat
@@ -46,7 +52,9 @@ pub struct Dequant4Table {
 /// Reference: FFmpeg `init_dequant8_coeff_table` in h264_ps.c
 pub struct Dequant8Table {
     /// `coeffs[qp][position_in_raster_order]` for each of the 6 scaling lists.
-    pub coeffs: [[[u32; 64]; 52]; 6],
+    /// Indexed up to `51 + qp_bd_offset` (FFmpeg `pps->dequant8_buffer`).
+    // Boxed per list for the same stack-footprint reason as Dequant4Table.
+    pub coeffs: Vec<Box<[[u32; 64]; QP_MAX_NUM + 1]>>,
 }
 
 impl Dequant4Table {
@@ -55,14 +63,25 @@ impl Dequant4Table {
     /// `scaling_matrix4` is the array of 6 scaling lists (from PPS/SPS, or the
     /// default if none was signaled). Each list has 16 entries in raster order.
     ///
+    /// `bit_depth_luma` selects the QP range: `max_qp = 51 + qp_bd_offset`.
+    /// `transform_bypass` (SPS `qpprime_y_zero_transform_bypass_flag`) forces
+    /// the flat `1 << 6` tables at QP 0 (FFmpeg `init_dequant_tables`).
+    ///
     /// This replicates FFmpeg's `init_dequant4_coeff_table` exactly.
-    pub fn new(scaling_matrix4: &[[u8; 16]; 6]) -> Self {
+    pub fn new(
+        scaling_matrix4: &[[u8; 16]; 6],
+        bit_depth_luma: u8,
+        transform_bypass: bool,
+    ) -> Self {
         let mut table = Dequant4Table {
-            coeffs: [[[0u32; 16]; 52]; 6],
+            coeffs: (0..6)
+                .map(|_| Box::new([[0u32; 16]; QP_MAX_NUM + 1]))
+                .collect(),
         };
 
+        let max_qp = 51 + 6 * (bit_depth_luma as usize - 8);
         for (i, sm) in scaling_matrix4.iter().enumerate() {
-            for q in 0..52 {
+            for q in 0..=max_qp {
                 let shift = (q / 6) + 2;
                 let idx = q % 6;
                 for x in 0..16u32 {
@@ -76,10 +95,18 @@ impl Dequant4Table {
             }
         }
 
+        if transform_bypass {
+            for i in 0..6 {
+                for x in 0..16 {
+                    table.coeffs[i][0][x] = 1 << 6;
+                }
+            }
+        }
+
         table
     }
 
-    /// Build dequantization tables using the default scaling matrices.
+    /// Build dequantization tables using the default scaling matrices at 8-bit.
     pub fn default_tables() -> Self {
         // The 6 scaling lists: indices 0-2 use intra default, 3-5 use inter default.
         let mut scaling = [[0u8; 16]; 6];
@@ -89,7 +116,7 @@ impl Dequant4Table {
         scaling[3] = DEFAULT_SCALING4[1];
         scaling[4] = DEFAULT_SCALING4[1];
         scaling[5] = DEFAULT_SCALING4[1];
-        Self::new(&scaling)
+        Self::new(&scaling, 8, false)
     }
 }
 
@@ -99,14 +126,24 @@ impl Dequant8Table {
     /// `scaling_matrix8` is the array of 6 scaling lists (from PPS/SPS, or the
     /// default if none was signaled). Each list has 64 entries in raster order.
     ///
+    /// `max_qp = 51 + qp_bd_offset`; `transform_bypass` forces flat `1 << 6`
+    /// tables at QP 0 (FFmpeg `init_dequant_tables`).
+    ///
     /// This replicates FFmpeg's `init_dequant8_coeff_table` exactly.
-    pub fn new(scaling_matrix8: &[[u8; 64]; 6]) -> Self {
+    pub fn new(
+        scaling_matrix8: &[[u8; 64]; 6],
+        bit_depth_luma: u8,
+        transform_bypass: bool,
+    ) -> Self {
         let mut table = Dequant8Table {
-            coeffs: [[[0u32; 64]; 52]; 6],
+            coeffs: (0..6)
+                .map(|_| Box::new([[0u32; 64]; QP_MAX_NUM + 1]))
+                .collect(),
         };
 
+        let max_qp = 51 + 6 * (bit_depth_luma as usize - 8);
         for (i, sm) in scaling_matrix8.iter().enumerate() {
-            for q in 0..52 {
+            for q in 0..=max_qp {
                 let shift = q / 6;
                 let idx = q % 6;
                 for x in 0..64u32 {
@@ -123,10 +160,22 @@ impl Dequant8Table {
             }
         }
 
+        if transform_bypass {
+            // FFmpeg only does this when transform_8x8_mode is set; with
+            // transform bypass no 8x8 transform is ever applied, so the
+            // override is harmless in the other case.
+            // See `init_dequant_tables` in h264_ps.c.
+            for i in 0..6 {
+                for x in 0..64 {
+                    table.coeffs[i][0][x] = 1 << 6;
+                }
+            }
+        }
+
         table
     }
 
-    /// Build dequantization tables using the default scaling matrices.
+    /// Build dequantization tables using the default scaling matrices at 8-bit.
     pub fn default_tables() -> Self {
         let mut scaling = [[0u8; 64]; 6];
         scaling[0] = DEFAULT_SCALING8[0];
@@ -135,7 +184,7 @@ impl Dequant8Table {
         scaling[3] = DEFAULT_SCALING8[1];
         scaling[4] = DEFAULT_SCALING8[1];
         scaling[5] = DEFAULT_SCALING8[1];
-        Self::new(&scaling)
+        Self::new(&scaling, 8, false)
     }
 }
 
@@ -158,7 +207,11 @@ impl Dequant8Table {
 /// same result as `dequant_4x4_flat`: `level * INIT << (qp/6)`.
 pub fn dequant_4x4(coeffs: &mut [i16; 16], dequant: &[u32; 16]) {
     for i in 0..16 {
-        coeffs[i] = ((coeffs[i] as i32 * dequant[i] as i32 + 32) >> 6) as i16;
+        // FFmpeg relies on C i32 wraparound here; debug builds must not panic.
+        coeffs[i] = ((coeffs[i] as i32)
+            .wrapping_mul(dequant[i] as i32)
+            .wrapping_add(32)
+            >> 6) as i16;
     }
 }
 
@@ -175,7 +228,11 @@ pub fn dequant_4x4(coeffs: &mut [i16; 16], dequant: &[u32; 16]) {
 /// massive overflow in the IDCT and garbled output.
 pub fn dequant_8x8(coeffs: &mut [i16; 64], dequant: &[u32; 64]) {
     for i in 0..64 {
-        coeffs[i] = ((coeffs[i] as i32 * dequant[i] as i32 + 32) >> 6) as i16;
+        // FFmpeg relies on C i32 wraparound here; debug builds must not panic.
+        coeffs[i] = ((coeffs[i] as i32)
+            .wrapping_mul(dequant[i] as i32)
+            .wrapping_add(32)
+            >> 6) as i16;
     }
 }
 
@@ -209,7 +266,7 @@ pub fn dequant_4x4_flat(coeffs: &mut [i16; 16], qp: u8) {
     let scale = &DEQUANT4_COEFF_INIT[qp_rem];
     for i in 0..16 {
         let s = scale[POS_CLASS[i]] as i32;
-        coeffs[i] = ((coeffs[i] as i32 * s) << qp_per) as i16;
+        coeffs[i] = ((coeffs[i] as i32).wrapping_mul(s).wrapping_shl(qp_per)) as i16;
     }
 }
 

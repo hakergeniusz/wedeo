@@ -120,6 +120,12 @@ pub struct TileDecodeContext<'a> {
     pub prev_cols_4x4: usize,
     /// Sign bias per reference frame (from header).
     pub sign_bias: [bool; 3],
+    /// Current frame's segmentation map, one byte per 4×4 luma block.
+    /// Mirrors `s->s.frames[CUR_FRAME].segmentation_map` (vp9block.c:140).
+    pub seg_map: &'a mut [u8],
+    /// Retained segmentation map from an earlier frame, used when
+    /// `segmentation.update_map` is 0 or temporal prediction is signalled.
+    pub ref_seg_map: Option<&'a [u8]>,
 }
 
 impl<'a> TileDecodeContext<'a> {
@@ -134,11 +140,17 @@ impl<'a> TileDecodeContext<'a> {
         cur_mv_grid: &'a mut [MvRefPair],
         prev_mv_grid: Option<&'a [MvRefPair]>,
         prev_cols_4x4: usize,
+        seg_map: &'a mut [u8],
+        ref_seg_map: Option<&'a [u8]>,
     ) -> Self {
         let width = header.width as usize;
         let height = header.height as usize;
-        let cols_4x4 = width.div_ceil(4);
-        let rows_4x4 = height.div_ceil(4);
+        // FFmpeg's frame dimensions are 8x8-grid based: cols = (w+7)>>3,
+        // rows = (h+7)>>3. Express the grid in 4x4 units (x2) so that
+        // partition checks, MV clamping and coefficient end_x/end_y all
+        // agree with FFmpeg for widths/heights not divisible by 8.
+        let cols_4x4 = width.div_ceil(8) * 2;
+        let rows_4x4 = height.div_ceil(8) * 2;
         let sb_cols = cols_4x4.div_ceil(16);
         let sb_rows = rows_4x4.div_ceil(16);
         Self {
@@ -157,6 +169,8 @@ impl<'a> TileDecodeContext<'a> {
             prev_mv_grid,
             prev_cols_4x4,
             sign_bias: header.sign_bias,
+            seg_map,
+            ref_seg_map,
         }
     }
 }
@@ -311,14 +325,66 @@ fn decode_block(
     let is_kf = td.header.frame_type == FrameType::KeyFrame || td.header.intra_only;
 
     // --- Segment ID ---
-    let segment_id: u8 = if td.header.segmentation.enabled && td.header.segmentation.update_map {
-        td.bd.get_tree(
-            &crate::data::SEGMENTATION_TREE,
-            &td.header.segmentation.prob,
-        ) as u8
-    } else {
+    // FFmpeg vp9block.c:98-141. Three cases:
+    //   1. keyframe/intra-only: 0 or read from the tree (update_map).
+    //   2. inter frame with no map update, or temporal prediction signalled:
+    //      take the minimum segment id from the retained segmentation map.
+    //   3. otherwise: read from the tree.
+    let seg = &td.header.segmentation;
+    let seg_w = BWH_TAB[0][bs as usize][0] as usize;
+    let seg_h = BWH_TAB[0][bs as usize][1] as usize;
+    let seg_row7 = (row >> 1) & 7;
+    let pred_rows = seg_h.div_ceil(2); // 8x8 rows covered by this 4x4-unit height
+    let segment_id: u8 = if !seg.enabled {
         0
+    } else if is_kf {
+        if seg.update_map {
+            td.bd.get_tree(&crate::data::SEGMENTATION_TREE, &seg.prob) as u8
+        } else {
+            0
+        }
+    } else if !seg.update_map
+        || (seg.temporal
+            && td.bd.get_prob(
+                seg.pred_prob[td.above.seg_id[col] as usize + td.left.seg_id[seg_row7] as usize],
+            ))
+    {
+        let mut pred = 8u8;
+        if let Some(map) = td.ref_seg_map {
+            let w = seg_w.min(td.cols_4x4.saturating_sub(col));
+            let h = seg_h.min(td.rows_4x4.saturating_sub(row));
+            for y in row..row + h {
+                for x in col..col + w {
+                    pred = pred.min(map[y * td.cols_4x4 + x]);
+                }
+            }
+        }
+        let pred = if pred < 8 { pred } else { 0 };
+        let end_c = (col + seg_w).min(td.above.seg_id.len());
+        td.above.seg_id[col..end_c].fill(1);
+        let end_r = (seg_row7 + pred_rows).min(td.left.seg_id.len());
+        td.left.seg_id[seg_row7..end_r].fill(1);
+        pred
+    } else {
+        let id = td.bd.get_tree(&crate::data::SEGMENTATION_TREE, &seg.prob) as u8;
+        let end_c = (col + seg_w).min(td.above.seg_id.len());
+        td.above.seg_id[col..end_c].fill(0);
+        let end_r = (seg_row7 + pred_rows).min(td.left.seg_id.len());
+        td.left.seg_id[seg_row7..end_r].fill(0);
+        id
     };
+
+    // Keep the current frame's segmentation map for the next frame. FFmpeg
+    // writes it whenever a new map is decoded (vp9block.c:140-142).
+    if seg.enabled && (seg.update_map || is_kf) {
+        let end_c = (col + seg_w).min(td.cols_4x4);
+        let end_r = (row + seg_h).min(td.rows_4x4);
+        for y in row..end_r {
+            for x in col..end_c {
+                td.seg_map[y * td.cols_4x4 + x] = segment_id;
+            }
+        }
+    }
 
     // --- Skip flag ---
     let skip = if td.header.segmentation.enabled
@@ -980,8 +1046,6 @@ fn decode_inter_mode(
         filter_id = 0;
     }
 
-
-
     // --- MV search context ---
     // MV clamping bounds: cols_4x4/rows_4x4 and col/row are in 4×4 units,
     // so bw4/bh4 must also be in 4×4 units (BWH_TAB[0], not BWH_TAB[1]).
@@ -1460,9 +1524,11 @@ fn update_mv_ctx(
                 td.above.mv[ac + 1] = mv3;
             }
         } else {
-            // >=8×8: broadcast mv[3] across w4*2 above and h4*2 left
+            // >=8×8: broadcast mv[3] across the block's full 4x4-column
+            // footprint. `w4` is in 8x8 units, so the block covers `2*w4`
+            // 4x4 columns; above.mv has two entries per 4x4 column.
             let mv3 = mv[3];
-            for n in 0..w4 * 2 {
+            for n in 0..w4 * 4 {
                 let idx = col * 2 + n;
                 if idx < td.above.mv.len() {
                     td.above.mv[idx] = mv3;
@@ -1477,15 +1543,33 @@ fn update_mv_ctx(
         }
     }
 
-    // MV grid update: write MvRefPair to cur_mv_grid for each 4×4 in the block.
-    // Use BWH_TAB[0] (luma dimensions in 4×4 units) since our grid has 4×4
-    // granularity, unlike the above/left context arrays which use BWH_TAB[1].
-    let grid_w4 = BWH_TAB[0][bs as usize][0] as usize;
-    let grid_h4 = BWH_TAB[0][bs as usize][1] as usize;
+    // MV grid update: write MvRefPair to cur_mv_grid for each 4×4 cell in the
+    // block's footprint.  FFmpeg indexes its MV grid in 8×8 MI units and
+    // stores b->mv[3] once per MI; our grid has 4×4 granularity, so a
+    // sub-8×8 partition (one 8×8 MI) must fill all four 4×4 cells with the
+    // same mv[3] value.  Writing only BWH_TAB[0][bs] cells (e.g. [1,1] for
+    // BS_4x4) leaves stale neighbour MVs that corrupt later MV prediction.
+    let (grid_w4, grid_h4) = if is_sub8x8 {
+        (2, 2)
+    } else {
+        (
+            BWH_TAB[0][bs as usize][0] as usize,
+            BWH_TAB[0][bs as usize][1] as usize,
+        )
+    };
     for y in 0..grid_h4 {
         let grid_row = row + y;
         for x in 0..grid_w4 {
             let grid_col = col + x;
+            // FFmpeg indexes the MV grid with a superblock-aligned stride
+            // (`s->sb_cols * 8` MI columns), which is wider than the frame's
+            // `s->cols`.  Wedeo uses `cols_4x4` as the stride, so an unbounded
+            // write for a block that extends past the frame's right edge
+            // wraps into the next row and corrupts another block's MV
+            // prediction.  Skip cells outside the frame instead.
+            if grid_col >= td.cols_4x4 || grid_row >= td.rows_4x4 {
+                continue;
+            }
             let idx = grid_row * td.cols_4x4 + grid_col;
             if idx < td.cur_mv_grid.len() {
                 if is_intra {

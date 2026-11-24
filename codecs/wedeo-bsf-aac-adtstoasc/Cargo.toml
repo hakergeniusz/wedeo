@@ -1,0 +1,17 @@
+[package]
+name = "wedeo-bsf-aac-adtstoasc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MPEG-2/4 AAC ADTS to MPEG-4 Audio Specific Configuration bitstream filter"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+
+[lints]
+workspace = true

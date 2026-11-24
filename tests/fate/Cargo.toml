@@ -37,5 +37,37 @@ tracing-subscriber = { workspace = true }
 adler2 = "2.0.1"
 md-5 = "0.10.6"
 
+wedeo-filter-graph = { workspace = true }
+wedeo-filter-copy = { workspace = true }
+wedeo-filter-format = { workspace = true }
+wedeo-filter-crop = { workspace = true }
+wedeo-filter-hflip = { workspace = true }
+wedeo-filter-vflip = { workspace = true }
+wedeo-filter-pad = { workspace = true }
+wedeo-filter-transpose = { workspace = true }
+wedeo-filter-fps = { workspace = true }
+wedeo-format-ivf-mux = { workspace = true }
+wedeo-format-flv-demux = { workspace = true }
+wedeo-format-flv-mux = { workspace = true }
+wedeo-format-avi-demux = { workspace = true }
+wedeo-format-mpegts-demux = { workspace = true }
+wedeo-format-mpegts-mux = { workspace = true }
+wedeo-format-matroska-mux = { workspace = true }
+wedeo-format-ogg = { workspace = true }
+wedeo-bsf-h264-mp4toannexb = { workspace = true }
+wedeo-bsf-hevc-mp4toannexb = { workspace = true }
+wedeo-bsf-aac-adtstoasc = { workspace = true }
+wedeo-codec-flac-native = { workspace = true }
+wedeo-codec-mpegvideo = { workspace = true }
+wedeo-codec-mpeg12 = { workspace = true }
+wedeo-codec-vp8 = { workspace = true }
+wedeo-codec-hevc-ps = { workspace = true }
+wedeo-codec-hevc-cabac = { workspace = true }
+wedeo-codec-hevc-dsp = { workspace = true }
+wedeo-codec-hevc-refs = { workspace = true }
+wedeo-codec-hevc = { workspace = true }
+
+wedeo-format-hevc = { workspace = true }
+
 [lints]
 workspace = true

@@ -163,6 +163,9 @@ impl Muxer for Mp4Muxer {
                 CodecId::Av1 if track.extradata.is_empty() => {
                     return Err(Error::InvalidArgument);
                 }
+                CodecId::Hevc if track.extradata.is_empty() => {
+                    return Err(Error::InvalidArgument);
+                }
                 CodecId::Aac if track.extradata.is_empty() => {
                     return Err(Error::InvalidArgument);
                 }
@@ -334,6 +337,7 @@ fn is_supported_codec(codec_id: CodecId) -> bool {
     matches!(
         codec_id,
         CodecId::H264
+            | CodecId::Hevc
             | CodecId::Av1
             | CodecId::Aac
             | CodecId::PcmS16be
@@ -377,6 +381,7 @@ mod tests {
     use wedeo_codec::decoder::CodecParameters;
     use wedeo_core::buffer::Buffer;
     use wedeo_core::rational::Rational;
+    use wedeo_format::demuxer::Demuxer;
     use wedeo_format::io::{BufferedIo, FileIo};
 
     /// Roundtrip test: create a minimal H.264 MP4, verify it has the expected
@@ -963,6 +968,179 @@ mod tests {
         let boxes = parse_top_level_boxes(&data);
         let box_types: Vec<&str> = boxes.iter().map(|(t, _, _)| t.as_str()).collect();
         assert_eq!(box_types, vec!["ftyp", "mdat", "moov"]);
+    }
+
+    /// Minimal hvcC record (configurationVersion = 1, Main profile, level 30).
+    /// Length satisfies the >= 23-byte hvcC detection threshold.
+    fn test_hvcc() -> Vec<u8> {
+        let mut v = vec![
+            0x01, 0x01, 0x60, 0x00, 0x00, 0x00, // config version, profile
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // constraint flags
+            0x1e, // level 30
+            0xf0, 0x00, 0xfc, 0xfd, 0xf8, 0xf8, // reserved + chroma/bitdepth
+            0x00, 0x00, 0x00, // avgFrameRate + frame rate flags
+            0x01, // numOfArrays
+        ];
+        v.resize(32, 0);
+        v
+    }
+
+    #[test]
+    fn test_hevc_hvc1_roundtrip() {
+        let tmp_path = "/tmp/wedeo_test_hevc_hvc1.mp4";
+        let mut params = CodecParameters::new(CodecId::Hevc, MediaType::Video);
+        params.width = 320;
+        params.height = 240;
+        params.time_base = Rational::new(1, 25);
+        params.extradata = test_hvcc();
+        let stream = Stream::new(0, params);
+
+        let mut muxer = Mp4Muxer::new();
+        let file_io = FileIo::create(tmp_path).unwrap();
+        let mut io = BufferedIo::new(Box::new(file_io));
+        muxer.write_header(&mut io, &[stream]).unwrap();
+        for i in 0..3 {
+            let mut pkt = Packet::new();
+            pkt.data = Buffer::from_slice(&[i as u8; 64]);
+            pkt.stream_index = 0;
+            pkt.pts = i as i64;
+            pkt.dts = i as i64;
+            pkt.duration = 1;
+            if i == 0 {
+                pkt.flags = PacketFlags::KEY;
+            }
+            muxer.write_packet(&mut io, &pkt).unwrap();
+        }
+        muxer.write_trailer(&mut io).unwrap();
+        drop(io);
+
+        let data = std::fs::read(tmp_path).unwrap();
+        assert!(
+            data.windows(4).any(|w| w == b"hvc1"),
+            "missing hvc1 sample entry"
+        );
+        assert!(data.windows(4).any(|w| w == b"hvcC"), "missing hvcC box");
+
+        // Demux with wedeo's MP4 demuxer and verify codec/width/height.
+        {
+            let mut demuxer = crate::demuxer::Mp4Demuxer::new();
+            let file_io = FileIo::open(tmp_path).unwrap();
+            let mut io = BufferedIo::new(Box::new(file_io));
+            let header = demuxer.read_header(&mut io).unwrap();
+            assert_eq!(header.streams.len(), 1);
+            assert_eq!(header.streams[0].codec_params.codec_id, CodecId::Hevc);
+            assert_eq!(header.streams[0].codec_params.width, 320);
+            assert_eq!(header.streams[0].codec_params.height, 240);
+            let mut count = 0;
+            while demuxer.read_packet(&mut io).is_ok() {
+                count += 1;
+            }
+            assert_eq!(count, 3);
+        }
+        std::fs::remove_file(tmp_path).ok();
+    }
+
+    #[test]
+    fn test_chunking_and_ctts() {
+        let tmp_path = "/tmp/wedeo_test_chunk_ctts.mp4";
+        let mut params = CodecParameters::new(CodecId::H264, MediaType::Video);
+        params.width = 160;
+        params.height = 120;
+        params.time_base = Rational::new(1, 25);
+        params.extradata = test_avcc();
+        let stream = Stream::new(0, params);
+
+        let mut muxer = Mp4Muxer::new();
+        let file_io = FileIo::create(tmp_path).unwrap();
+        let mut io = BufferedIo::new(Box::new(file_io));
+        muxer.write_header(&mut io, &[stream]).unwrap();
+        // IBBP pattern: dts monotonic, pts jumps around (B-frames => ctts).
+        let pts_dts = [(0, 0), (2, 1), (3, 2), (1, 3), (4, 4)];
+        for (pts, dts) in pts_dts {
+            let mut pkt = Packet::new();
+            pkt.data = Buffer::from_slice(&[0xABu8; 48]);
+            pkt.stream_index = 0;
+            pkt.pts = pts;
+            pkt.dts = dts;
+            pkt.duration = 1;
+            if pts == 0 || pts == 4 {
+                pkt.flags = PacketFlags::KEY;
+            }
+            muxer.write_packet(&mut io, &pkt).unwrap();
+        }
+        muxer.write_trailer(&mut io).unwrap();
+        drop(io);
+
+        let data = std::fs::read(tmp_path).unwrap();
+        assert!(data.windows(4).any(|w| w == b"ctts"), "missing ctts box");
+        assert!(data.windows(4).any(|w| w == b"stss"), "missing stss box");
+        // All five 48-byte samples are contiguous -> one chunk of 5 samples.
+        let stsc_pos = data.windows(4).position(|w| w == b"stsc").unwrap();
+        // stsc box type at stsc_pos, then version/flags(4), entry_count(4),
+        // first_chunk(4), samples_per_chunk(4).
+        let samples_per_chunk =
+            u32::from_be_bytes(data[stsc_pos + 16..stsc_pos + 20].try_into().unwrap());
+        assert_eq!(
+            samples_per_chunk, 5,
+            "contiguous samples should form one chunk"
+        );
+
+        // Roundtrip all packets through the demuxer with correct PTS offsets.
+        let mut demuxer = crate::demuxer::Mp4Demuxer::new();
+        let file_io = FileIo::open(tmp_path).unwrap();
+        let mut io = BufferedIo::new(Box::new(file_io));
+        demuxer.read_header(&mut io).unwrap();
+        let mut out = Vec::new();
+        while let Ok(pkt) = demuxer.read_packet(&mut io) {
+            out.push((pkt.pts, pkt.dts));
+        }
+        assert_eq!(out, pts_dts.to_vec());
+        std::fs::remove_file(tmp_path).ok();
+    }
+
+    #[test]
+    fn test_audio_video_two_tracks() {
+        let tmp_path = "/tmp/wedeo_test_av_tracks.mp4";
+        let mut vparams = CodecParameters::new(CodecId::H264, MediaType::Video);
+        vparams.width = 160;
+        vparams.height = 120;
+        vparams.time_base = Rational::new(1, 25);
+        vparams.extradata = test_avcc();
+        let mut aparams = CodecParameters::new(CodecId::Aac, MediaType::Audio);
+        aparams.sample_rate = 44100;
+        aparams.channel_layout.nb_channels = 2;
+        aparams.extradata = vec![0x12, 0x10];
+        let streams = [Stream::new(0, vparams), Stream::new(1, aparams)];
+
+        let mut muxer = Mp4Muxer::new();
+        let file_io = FileIo::create(tmp_path).unwrap();
+        let mut io = BufferedIo::new(Box::new(file_io));
+        muxer.write_header(&mut io, &streams).unwrap();
+        let mut pkt = Packet::new();
+        pkt.data = Buffer::from_slice(&[0u8; 100]);
+        pkt.stream_index = 0;
+        pkt.pts = 0;
+        pkt.dts = 0;
+        pkt.duration = 1;
+        pkt.flags = PacketFlags::KEY;
+        muxer.write_packet(&mut io, &pkt).unwrap();
+        let mut apkt = Packet::new();
+        apkt.data = Buffer::from_slice(&[0u8; 64]);
+        apkt.stream_index = 1;
+        apkt.pts = 0;
+        apkt.dts = 0;
+        apkt.duration = 1024;
+        apkt.flags = PacketFlags::KEY;
+        muxer.write_packet(&mut io, &apkt).unwrap();
+        muxer.write_trailer(&mut io).unwrap();
+        drop(io);
+
+        let data = std::fs::read(tmp_path).unwrap();
+        let trak_count = data.windows(4).filter(|w| *w == b"trak").count();
+        assert_eq!(trak_count, 2);
+        assert!(data.windows(4).any(|w| w == b"mp4a"));
+        assert!(data.windows(4).any(|w| w == b"avc1"));
+        std::fs::remove_file(tmp_path).ok();
     }
 
     /// Parse top-level MP4 boxes from raw data (handles extended size).

@@ -21,6 +21,18 @@ pub const PROGRESS_COMPLETE: i32 = i32::MAX;
 // BufferPool — reuse PictureBuffer allocations across frames
 // ---------------------------------------------------------------------------
 
+/// Geometry and sample format requested from the buffer pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PictureFormat {
+    pub width: u32,
+    pub height: u32,
+    pub mb_width: u32,
+    pub mb_height: u32,
+    pub uv_fill: u8,
+    pub bit_depth: u8,
+    pub chroma_format_idc: u8,
+}
+
 /// Pool of reusable PictureBuffers to avoid per-frame malloc/free.
 ///
 /// Lives on `H264Decoder`. On resolution change, the pool is flushed
@@ -29,6 +41,8 @@ pub struct BufferPool {
     free: Vec<PictureBuffer>,
     width: u32,
     height: u32,
+    bit_depth: u8,
+    chroma_format_idc: u8,
 }
 
 impl Default for BufferPool {
@@ -43,47 +57,94 @@ impl BufferPool {
             free: Vec::new(),
             width: 0,
             height: 0,
+            bit_depth: 8,
+            chroma_format_idc: 1,
         }
     }
 
     /// Acquire a buffer of the given dimensions, pre-filled with `y_fill` / `uv_fill`.
     /// Returns a pooled buffer if one is available and dimensions match;
     /// otherwise allocates fresh.
-    pub fn acquire(
-        &mut self,
-        width: u32,
-        height: u32,
-        mb_width: u32,
-        mb_height: u32,
-        uv_fill: u8,
-    ) -> PictureBuffer {
-        // Resolution change: flush all pooled buffers
-        if width != self.width || height != self.height {
+    pub fn acquire(&mut self, format: PictureFormat) -> PictureBuffer {
+        let PictureFormat {
+            width,
+            height,
+            mb_width,
+            mb_height,
+            uv_fill,
+            bit_depth,
+            chroma_format_idc,
+        } = format;
+
+        // Resolution or sample-format change: flush all pooled buffers.
+        if width != self.width
+            || height != self.height
+            || bit_depth != self.bit_depth
+            || chroma_format_idc != self.chroma_format_idc
+        {
             self.free.clear();
             self.width = width;
             self.height = height;
+            self.bit_depth = bit_depth;
+            self.chroma_format_idc = chroma_format_idc;
         }
+
+        // Chroma geometry from H.264 Table 6-1. 4:2:2 has full chroma height;
+        // 4:4:4 has full chroma width as well.
+        let (shift_w, shift_h) = match chroma_format_idc {
+            1 => (1, 1),
+            2 => (1, 0),
+            3 => (0, 0),
+            _ => (1, 1),
+        };
+        let uv_stride = (width >> shift_w) as usize;
+        let uv_height = (height >> shift_h) as usize;
+
+        // Mid-grey for high bit depth is 1 << (bit_depth - 1), not 128.
+        let uv_fill16 = if bit_depth > 8 {
+            1u16 << (bit_depth - 1)
+        } else {
+            u16::from(uv_fill)
+        };
 
         if let Some(mut buf) = self.free.pop() {
             // Reuse: fill with zeros (luma) and uv_fill (chroma)
             buf.y.fill(0);
             buf.u.fill(uv_fill);
             buf.v.fill(uv_fill);
+            if buf.is_high_depth() {
+                buf.y16.fill(0);
+                buf.u16.fill(uv_fill16);
+                buf.v16.fill(uv_fill16);
+            }
             buf
         } else {
-            // Fresh allocation
+            // Fresh allocation. High bit depths also get full-precision planes.
             let y_stride = width as usize;
-            let uv_stride = (width / 2) as usize;
+            let (y16, u16, v16) = if bit_depth > 8 {
+                (
+                    vec![0u16; y_stride * height as usize],
+                    vec![uv_fill16; uv_stride * uv_height],
+                    vec![uv_fill16; uv_stride * uv_height],
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
             PictureBuffer {
                 y: vec![0u8; y_stride * height as usize],
-                u: vec![uv_fill; uv_stride * (height / 2) as usize],
-                v: vec![uv_fill; uv_stride * (height / 2) as usize],
+                u: vec![uv_fill; uv_stride * uv_height],
+                v: vec![uv_fill; uv_stride * uv_height],
+                y16,
+                u16,
+                v16,
                 y_stride,
                 uv_stride,
                 width,
                 height,
                 mb_width,
                 mb_height,
+                bit_depth,
+                chroma_format_idc,
             }
         }
     }
@@ -91,7 +152,12 @@ impl BufferPool {
     /// Return a buffer to the pool for reuse.
     pub fn reclaim(&mut self, buf: PictureBuffer) {
         // Only keep buffers that match current dimensions
-        if buf.width == self.width && buf.height == self.height && !buf.y.is_empty() {
+        if buf.width == self.width
+            && buf.height == self.height
+            && buf.bit_depth == self.bit_depth
+            && buf.chroma_format_idc == self.chroma_format_idc
+            && !buf.y.is_empty()
+        {
             self.free.push(buf);
         }
     }
@@ -102,6 +168,11 @@ impl BufferPool {
 /// SAFETY: Concurrent access is mediated by `row_progress`:
 /// - Writer has exclusive access to rows > row_progress
 /// - Readers may access rows <= row_progress.load(Acquire)
+///
+/// The `UnsafeCell` is needed because the decoder writes individual rows and
+/// publishes progress while reference-frame readers consume published rows on
+/// other threads. Every access goes through the `unsafe fn` accessors below,
+/// which document the row-level contract callers must uphold.
 pub struct SharedPicture {
     data: UnsafeCell<PictureBuffer>,
     row_progress: AtomicI32,
@@ -113,9 +184,15 @@ pub struct SharedPicture {
     return_to: Option<Arc<Mutex<BufferPool>>>,
 }
 
-// SAFETY: Concurrent access is mediated by `row_progress` atomic.
-// Writer has exclusive access to rows > row_progress; readers only
-// access rows <= row_progress.load(Acquire).
+// SAFETY: `PictureBuffer` contains only owned `Vec`s and integer fields, so
+// it is itself `Send + Sync`. The `UnsafeCell<PictureBuffer>` is reachable
+// only through `data()` / `data_mut()`, which are `unsafe fn` with an explicit
+// row-level contract: the writer publishes rows with a `Release` store and
+// readers observe them with `Acquire` loads (or block on the condvar), so no
+// two threads ever touch the same byte concurrently. `Mutex`, `Condvar` and
+// `Arc<Mutex<BufferPool>>` are thread-safe by construction. The known
+// whole-struct aliasing limitation of this design is recorded in
+// docs/SAFETY_AUDIT.md.
 unsafe impl Sync for SharedPicture {}
 
 impl SharedPicture {
@@ -149,9 +226,19 @@ impl SharedPicture {
     /// # Safety
     ///
     /// Caller must only access pixel rows that have been published
-    /// (rows <= self.row_progress). For fully-complete pictures
-    /// (PROGRESS_COMPLETE), all access is safe.
+    /// (rows <= self.row_progress.load(Ordering::Acquire)). For fully-complete
+    /// pictures (PROGRESS_COMPLETE), all access is safe.
+    ///
+    /// `UnsafeCell::get()` on a live `&self` returns a non-null, aligned
+    /// pointer to the initialized `PictureBuffer` owned by this allocation;
+    /// the borrow of `self` keeps it alive for as long as the returned
+    /// reference can be used. The returned `&PictureBuffer` must not coexist
+    /// with a `&mut PictureBuffer` from `data_mut()` on the same picture.
     pub unsafe fn data(&self) -> &PictureBuffer {
+        // SAFETY: `self.data.get()` is never null and the pointee was fully
+        // initialized by `new` / `new_pooled`. The caller upholds the row
+        // protocol above, and the borrow checker ties the reference to
+        // `&self`, so the buffer cannot be freed while it is in use.
         unsafe { &*self.data.get() }
     }
 
@@ -163,8 +250,18 @@ impl SharedPicture {
     /// Only the decode thread for this picture should call this.
     /// This returns `&mut` from `&self` via `UnsafeCell`, which is the
     /// standard interior mutability pattern for concurrent data structures.
+    ///
+    /// The pointer is non-null and aligned because the buffer is owned by
+    /// `self`. The returned `&mut PictureBuffer` must not overlap any live
+    /// `&PictureBuffer` obtained from `data()` on the same picture.
+    // Justification: returning `&mut` from `&self` is the documented
+    // sole-writer capability for the row-level decode protocol. The method is
+    // `unsafe`, so callers explicitly opt into that contract.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn data_mut(&self) -> &mut PictureBuffer {
+        // SAFETY: as above. `UnsafeCell` is the only legal way to hand out
+        // mutable access through a shared reference; the caller guarantees
+        // no other shared or mutable reference to this buffer is live.
         unsafe { &mut *self.data.get() }
     }
 
@@ -216,8 +313,11 @@ impl SharedPicture {
 impl Drop for SharedPicture {
     fn drop(&mut self) {
         if let Some(pool) = self.return_to.take() {
-            // SAFETY: &mut self in drop() guarantees exclusive access.
-            // No other references exist (Arc refcount hit 0).
+            // SAFETY: `Drop` runs only after the last `Arc` reference is
+            // gone, so `&mut self` is exclusive and no `data()` /
+            // `data_mut()` borrow can be live. `UnsafeCell::get_mut` is safe
+            // with `&mut self`, and `PictureBuffer::empty()` leaves the cell
+            // holding a valid value.
             let buf = std::mem::replace(self.data.get_mut(), PictureBuffer::empty());
             if let Ok(mut pool) = pool.lock() {
                 pool.reclaim(buf);
@@ -279,18 +379,21 @@ impl Deref for PicHandle {
     type Target = PictureBuffer;
 
     fn deref(&self) -> &PictureBuffer {
-        // SAFETY: During decode, only one PicHandle exists per frame, and the
-        // decode thread is the sole writer. Deref for read access is safe because
-        // no other thread accesses this picture's data until it's published.
+        // SAFETY: During decode, only one PicHandle exists per frame and the
+        // decode thread is the sole writer. The frame is not yet in any DPB
+        // reference list, so no other thread can call `data()` on it. The
+        // `Arc<SharedPicture>` keeps the storage alive for as long as the
+        // returned reference can be used (bounded by `&self`).
         unsafe { self.shared.data() }
     }
 }
 
 impl DerefMut for PicHandle {
     fn deref_mut(&mut self) -> &mut PictureBuffer {
-        // SAFETY: PicHandle has exclusive ownership semantics — only one exists
-        // per frame, and &mut self guarantees no concurrent borrows. The decode
-        // thread is the sole writer to this picture's data.
+        // SAFETY: `&mut self` guarantees this is the only live borrow of this
+        // PicHandle, and there is exactly one PicHandle per frame. The frame
+        // has not been published to the DPB yet, so no reader thread can be
+        // observing it through `data()`. The `Arc` keeps the storage alive.
         unsafe { self.shared.data_mut() }
     }
 }

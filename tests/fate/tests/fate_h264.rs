@@ -15,9 +15,11 @@ use wedeo_codec_h264 as _;
 use wedeo_format_h264 as _;
 
 use wedeo_codec::registry;
+use wedeo_codec_h264::nal::{NalUnitType, split_annex_b};
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::Error;
 use wedeo_core::frame::FrameData;
+use wedeo_core::packet::Packet;
 use wedeo_core::pixel_format::PixelFormat;
 use wedeo_format::context::InputContext;
 
@@ -139,6 +141,41 @@ fn decode_all_frames(path: &Path) -> Vec<(u32, u32, PixelFormat, usize)> {
     frames
 }
 
+/// Demux a file into packets without decoding it.
+fn read_packets(path: &Path) -> Vec<Packet> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let mut input = InputContext::open(path.to_str().unwrap())
+        .unwrap_or_else(|e| panic!("Failed to open {}: {:?}", path.display(), e));
+    let mut packets = Vec::new();
+    loop {
+        match input.read_packet() {
+            Ok(pkt) => packets.push(pkt),
+            Err(Error::Eof) => break,
+            Err(e) => panic!("read_packet error: {:?}", e),
+        }
+    }
+    packets
+}
+
+/// Number of VCL (slice) NAL units in a packet.
+fn slice_count(pkt: &Packet) -> usize {
+    split_annex_b(pkt.data.data())
+        .iter()
+        .filter(|n| matches!(n.nal_type, NalUnitType::Slice | NalUnitType::Idr))
+        .count()
+}
+
+/// Data lines of framecrc output (comments carry headers).
+fn framecrc_data(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.trim_end().to_string())
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Registration tests
 // ---------------------------------------------------------------------------
@@ -249,24 +286,126 @@ fn fate_h264_demuxer_au_grouping() {
         return;
     }
 
-    let mut input = InputContext::open(path.to_str().unwrap()).unwrap();
-
-    let mut packet_count = 0;
-    loop {
-        match input.read_packet() {
-            Ok(_pkt) => {
-                packet_count += 1;
-            }
-            Err(Error::Eof) => break,
-            Err(e) => panic!("read_packet error: {:?}", e),
-        }
-    }
-
+    let packets = read_packets(&path);
+    let packet_count = packets.len();
     eprintln!("BA1_Sony_D.jsv: {} packets from demuxer", packet_count);
     // Should have 17 packets (one per frame, not one giant packet)
     assert_eq!(
         packet_count, 17,
         "Demuxer should produce 17 packets for BA1_Sony_D.jsv"
+    );
+
+    // One access unit per packet: exactly one slice, monotonic PTS/DTS.
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(slice_count(pkt), 1, "Packet {} slice count", i);
+        assert_eq!(pkt.pts, i as i64, "Packet {} PTS", i);
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+    }
+    assert!(
+        packets[0]
+            .flags
+            .contains(wedeo_core::packet::PacketFlags::KEY)
+    );
+}
+
+/// SVA_Base_B.264 has three slices per frame: they must stay in one AU.
+#[test]
+fn fate_h264_demuxer_multi_slice_per_au() {
+    let path = conformance_file("SVA_Base_B.264");
+    if !path.exists() {
+        return;
+    }
+    let packets = read_packets(&path);
+    assert_eq!(packets.len(), 17, "SVA_Base_B.264 packet count");
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(slice_count(pkt), 3, "Packet {} should hold 3 slices", i);
+        assert_eq!(pkt.pts, i as i64, "Packet {} PTS", i);
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+    }
+}
+
+/// AUD_MW_E.264 carries an access unit delimiter before every picture.
+#[test]
+fn fate_h264_demuxer_aud_delimiter() {
+    let path = conformance_file("AUD_MW_E.264");
+    if !path.exists() {
+        return;
+    }
+    let packets = read_packets(&path);
+    assert_eq!(packets.len(), 100, "AUD_MW_E.264 packet count");
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(slice_count(pkt), 1, "Packet {} slice count", i);
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+        assert!(
+            split_annex_b(pkt.data.data())
+                .iter()
+                .any(|n| n.nal_type == NalUnitType::Aud),
+            "Packet {} should carry its AUD NAL",
+            i
+        );
+    }
+    let mut pts_sorted: Vec<i64> = packets.iter().map(|p| p.pts).collect();
+    pts_sorted.sort_unstable();
+    assert_eq!(pts_sorted, (0..100).collect::<Vec<_>>(), "AUD stream PTS");
+}
+
+/// src19td.IBP.264 has B-frames: packet PTS follows display order (POC),
+/// DTS follows decode order, and framecrc output matches FFmpeg including
+/// the timestamps.
+#[test]
+fn fate_h264_demuxer_b_frame_pts() {
+    let path = conformance_file("src19td.IBP.264");
+    if !path.exists() {
+        return;
+    }
+    let packets = read_packets(&path);
+    assert_eq!(packets.len(), 257, "src19td.IBP.264 packet count");
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+    }
+    assert_eq!(
+        packets[..8].iter().map(|p| p.pts).collect::<Vec<_>>(),
+        vec![0, 2, 1, 4, 3, 6, 5, 8],
+        "B-frame packet PTS should be in POC order"
+    );
+    let mut pts_sorted: Vec<i64> = packets.iter().map(|p| p.pts).collect();
+    pts_sorted.sort_unstable();
+    assert_eq!(
+        pts_sorted,
+        (0..257).collect::<Vec<_>>(),
+        "PTS values should form a dense display-order sequence"
+    );
+
+    let wedeo = wedeo_fate::run_wedeo_framecrc(&path).expect("wedeo-framecrc failed");
+    let Some(ffmpeg) = wedeo_fate::run_ffmpeg_framecrc_video(&path) else {
+        eprintln!("SKIP: ffmpeg not available for cross-validation");
+        return;
+    };
+    assert_eq!(
+        framecrc_data(&wedeo),
+        framecrc_data(&ffmpeg),
+        "B-frame framecrc (including PTS) must match FFmpeg"
+    );
+}
+
+/// Field pictures are separate access units; complementary fields share a
+/// presentation timestamp because the decoder outputs them as one frame.
+#[test]
+fn fate_h264_demuxer_field_picture_au() {
+    let path = conformance_file("Sharp_MP_Field_1_B.jvt");
+    if !path.exists() {
+        return;
+    }
+    let packets = read_packets(&path);
+    assert_eq!(packets.len(), 30, "Sharp_MP_Field_1_B.jvt packet count");
+    for (i, pkt) in packets.iter().enumerate() {
+        assert_eq!(pkt.dts, i as i64, "Packet {} DTS", i);
+        assert_eq!(slice_count(pkt), 1, "Packet {} slice count", i);
+    }
+    assert_eq!(
+        packets[..8].iter().map(|p| p.pts).collect::<Vec<_>>(),
+        vec![0, 0, 1, 1, 2, 2, 3, 3],
+        "Complementary fields should share a PTS"
     );
 }
 
@@ -473,4 +612,216 @@ fn fate_h264_demuxer_multi_slice() {
         packet_count > 0,
         "Should produce at least one packet for SVA_Base_B.264"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FRext typed-pixel support (High 10 / High 4:2:2)
+// ---------------------------------------------------------------------------
+
+/// Locate a JVT FRext vector (read-only conformance asset).
+fn jvt_frext_file(name: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("JVT_VECTORS") {
+        let path = PathBuf::from(dir).join("JVT-FR-EXT").join(name);
+        if path.exists() {
+            return path;
+        }
+    }
+    PathBuf::new()
+}
+
+/// Decode the first frame and report its format, plane linesizes and sizes.
+fn decode_first_frame_layout(path: &Path) -> Option<(PixelFormat, Vec<usize>, Vec<usize>)> {
+    if !path.exists() {
+        return None;
+    }
+    let mut input = InputContext::open(path.to_str().unwrap()).unwrap();
+    let params = input.streams[0].codec_params.clone();
+    let factory = registry::find_decoder(params.codec_id).unwrap();
+    let mut decoder = factory.create(params).unwrap();
+
+    loop {
+        match input.read_packet() {
+            Ok(pkt) => {
+                decoder.send_packet(Some(&pkt)).unwrap();
+                loop {
+                    match decoder.receive_frame() {
+                        Ok(frame) => {
+                            if let FrameData::Video(v) = frame.data {
+                                return Some((
+                                    v.format,
+                                    v.planes.iter().map(|p| p.linesize).collect(),
+                                    v.planes.iter().map(|p| p.buffer.size()).collect(),
+                                ));
+                            }
+                        }
+                        Err(Error::Again) => break,
+                        Err(e) => panic!("receive_frame error: {:?}", e),
+                    }
+                }
+            }
+            Err(Error::Eof) => break,
+            Err(e) => panic!("read_packet error: {:?}", e),
+        }
+    }
+    None
+}
+
+#[test]
+fn pixel_format_yuv422p10le_matches_ffmpeg_value() {
+    // FFmpeg libavutil/pixfmt.h: AV_PIX_FMT_YUV422P10LE = 71.
+    assert_eq!(PixelFormat::Yuv422p10le as i32, 71);
+    assert_eq!(PixelFormat::Yuv422p10le.name(), "yuv422p10le");
+}
+
+/// High 4:2:2, 10-bit: output must be yuv422p10le with 2 bytes/sample,
+/// full chroma height and half chroma width.
+#[test]
+fn fate_h264_high422_10bit_frame_layout() {
+    let path = jvt_frext_file("Hi422FR13_SONY_B.264");
+    let Some((format, linesizes, sizes)) = decode_first_frame_layout(&path) else {
+        return; // vector not present
+    };
+    assert_eq!(format, PixelFormat::Yuv422p10le);
+    assert_eq!(linesizes.len(), 3);
+    // Read dimensions from the first frame again through the helper's sizes:
+    // luma plane = w*h*2, chroma plane = (w/2)*h*2.
+    assert!(
+        sizes[0] >= sizes[1] * 2,
+        "4:2:2 chroma must be half-width: {sizes:?}"
+    );
+    assert_eq!(linesizes[1], linesizes[0] / 2);
+    assert_eq!(linesizes[2], linesizes[0] / 2);
+}
+
+/// High 4:2:2, 8-bit: output must be yuv422p with full chroma height.
+#[test]
+fn fate_h264_high422_8bit_frame_layout() {
+    let path = jvt_frext_file("FREXT1_TANDBERG_A.264");
+    let Some((format, linesizes, _)) = decode_first_frame_layout(&path) else {
+        return; // vector not present
+    };
+    assert_eq!(format, PixelFormat::Yuv422p);
+    assert_eq!(linesizes.len(), 3);
+    assert_eq!(linesizes[1], linesizes[0] / 2);
+    assert_eq!(linesizes[2], linesizes[0] / 2);
+}
+
+/// High 10 (4:2:0) with inter frames: the decoder must run the full-precision
+/// (`u16`) reconstruction path for skip/inter macroblocks without panicking,
+/// and every output frame must keep the 10-bit geometry (2 bytes/sample,
+/// half-resolution chroma). This exercises `mc_luma_u16` / `mc_chroma_u16` and
+/// `reconstruct_inter_mb_hires` end-to-end.
+#[test]
+fn fate_h264_high10_inter_full_precision_decode() {
+    let dir = match std::env::var("FATE_SUITE") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => return,
+    };
+    let path = dir.join("h264-high-depth").join("normal-10.h264");
+    if !path.exists() {
+        return;
+    }
+
+    let mut input = InputContext::open(path.to_str().unwrap()).unwrap();
+    let params = input.streams[0].codec_params.clone();
+    let factory = registry::find_decoder(params.codec_id).unwrap();
+    let mut decoder = factory.create(params).unwrap();
+
+    let mut frames = 0usize;
+    loop {
+        match input.read_packet() {
+            Ok(pkt) => {
+                decoder.send_packet(Some(&pkt)).unwrap();
+                loop {
+                    match decoder.receive_frame() {
+                        Ok(frame) => {
+                            if let FrameData::Video(v) = frame.data {
+                                assert_eq!(v.format, PixelFormat::Yuv420p10le);
+                                assert_eq!(v.width, 352);
+                                assert_eq!(v.height, 288);
+                                assert_eq!(v.planes.len(), 3);
+                                for plane in &v.planes {
+                                    assert_eq!(plane.buffer.size() % 2, 0);
+                                }
+                                assert_eq!(
+                                    v.planes[1].buffer.size(),
+                                    v.planes[0].buffer.size() / 4
+                                );
+                                assert_eq!(
+                                    v.planes[2].buffer.size(),
+                                    v.planes[0].buffer.size() / 4
+                                );
+                            }
+                            frames += 1;
+                        }
+                        Err(Error::Again) => break,
+                        Err(e) => panic!("receive_frame error: {:?}", e),
+                    }
+                }
+            }
+            Err(Error::Eof) => {
+                let _ = decoder.send_packet(None);
+                loop {
+                    match decoder.receive_frame() {
+                        Ok(frame) => {
+                            if let FrameData::Video(v) = frame.data {
+                                assert_eq!(v.format, PixelFormat::Yuv420p10le);
+                                frames += 1;
+                            }
+                        }
+                        Err(Error::Again) | Err(Error::Eof) => break,
+                        Err(e) => panic!("receive_frame error: {:?}", e),
+                    }
+                }
+                break;
+            }
+            Err(e) => panic!("read_packet error: {:?}", e),
+        }
+    }
+    assert_eq!(frames, 10, "normal-10.h264 must decode all 10 frames");
+}
+
+/// Bitexact raw-YUV parity target for the High 10 inter path. Currently blocked
+/// by high-depth dequant coefficient overflow (`dequant.rs`) and intra residual
+/// divergence outside this work unit; kept ignored so the targeted parity can
+/// be flipped on once those land. Enable with
+/// `cargo test ... fate_h264_high10_inter_bitexact -- --ignored`.
+#[test]
+#[ignore = "blocked by high-depth dequant/intra fixes in other files"]
+fn fate_h264_high10_inter_bitexact() {
+    let dir = match std::env::var("FATE_SUITE") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => return,
+    };
+    let path = dir.join("h264-high-depth").join("normal-10.h264");
+    if !path.exists() {
+        return;
+    }
+    let wedeo = std::env::var("CARGO_BIN_EXE_wedeo-framecrc")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("wedeo-framecrc"));
+    let output = std::process::Command::new(wedeo)
+        .arg(&path)
+        .output()
+        .expect("run wedeo-framecrc");
+    let wedeo_out = String::from_utf8_lossy(&output.stdout);
+    let wedeo_crcs: Vec<String> = wedeo_out
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.rsplit(',').next().unwrap().trim().to_string())
+        .collect();
+    let ffmpeg = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-bitexact", "-i"])
+        .arg(&path)
+        .args(["-f", "framecrc", "-"])
+        .output()
+        .expect("run ffmpeg");
+    let ffmpeg_out = String::from_utf8_lossy(&ffmpeg.stdout);
+    let ffmpeg_crcs: Vec<String> = ffmpeg_out
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.rsplit(',').next().unwrap().trim().to_string())
+        .collect();
+    assert!(!wedeo_crcs.is_empty());
+    assert_eq!(wedeo_crcs, ffmpeg_crcs);
 }

@@ -1,0 +1,20 @@
+[package]
+name = "wedeo-format-hevc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "HEVC Annex B raw bitstream demuxer for wedeo"
+repository.workspace = true
+publish = false
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-format = { workspace = true }
+wedeo-codec = { workspace = true }
+wedeo-codec-hevc-ps = { workspace = true }
+inventory = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

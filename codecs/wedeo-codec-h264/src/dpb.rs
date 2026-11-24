@@ -378,6 +378,7 @@ mod tests {
                 height: 16,
                 mb_width: 1,
                 mb_height: 1,
+                ..PictureBuffer::empty()
             }),
             poc,
             frame_num,
