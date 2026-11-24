@@ -19,6 +19,7 @@ pub use builtin::PassThrough;
 pub use graph::{Graph, Link, LinkId, Node, NodeId};
 // Re-exported so the FATE harness can query the registry without adding a
 // direct dependency on the framework crate.
+pub use wedeo_filter::formats::{FilterFormat, FilterFormats, FormatsConfig, PadFormats};
 pub use wedeo_filter::graph::FilterLinkConfig;
 pub use wedeo_filter::registry::{FilterFactory, filters, find_filter_by_name};
 pub use wedeo_filter::{

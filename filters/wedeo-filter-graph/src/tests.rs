@@ -11,6 +11,7 @@ use wedeo_core::media_type::MediaType;
 use wedeo_core::pixel_format::PixelFormat;
 use wedeo_core::rational::Rational;
 use wedeo_core::sample_format::SampleFormat;
+use wedeo_filter::formats::{FilterFormat, FilterFormats, FormatsConfig};
 use wedeo_filter::graph::FilterLinkConfig;
 
 use crate::{Graph, filters, find_filter_by_name};
@@ -23,6 +24,9 @@ use crate::{Graph, filters, find_filter_by_name};
 struct DummyState {
     activated: AtomicBool,
     calls: AtomicUsize,
+    query_formats_calls: AtomicUsize,
+    flush_calls: AtomicUsize,
+    tail_emitted: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -32,6 +36,8 @@ struct DummyFilter {
     state: Arc<DummyState>,
     multiply: usize,
     drop_frames: bool,
+    formats: Option<&'static [PixelFormat]>,
+    tail: Option<i64>,
 }
 
 impl DummyFilter {
@@ -42,6 +48,8 @@ impl DummyFilter {
             state: Arc::new(DummyState::default()),
             multiply: 1,
             drop_frames: false,
+            formats: None,
+            tail: None,
         }
     }
 
@@ -54,6 +62,18 @@ impl DummyFilter {
         self.drop_frames = true;
         self
     }
+
+    /// Restrict the formats advertised by `query_formats()`.
+    fn with_formats(mut self, formats: &'static [PixelFormat]) -> Self {
+        self.formats = Some(formats);
+        self
+    }
+
+    /// Emit one tail frame at EOS from `flush()`.
+    fn with_tail(mut self, pts: i64) -> Self {
+        self.tail = Some(pts);
+        self
+    }
 }
 
 impl wedeo_filter::Filter for DummyFilter {
@@ -63,6 +83,16 @@ impl wedeo_filter::Filter for DummyFilter {
 
     fn activate(&mut self) -> wedeo_core::error::Result<()> {
         self.state.activated.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn query_formats(&self, cfg: &mut FormatsConfig) -> wedeo_core::error::Result<()> {
+        self.state
+            .query_formats_calls
+            .fetch_add(1, Ordering::SeqCst);
+        if let Some(formats) = self.formats {
+            cfg.set_common_pixel_formats(formats);
+        }
         Ok(())
     }
 
@@ -79,6 +109,19 @@ impl wedeo_filter::Filter for DummyFilter {
             out.push(frame);
         }
         Ok(out)
+    }
+
+    fn flush(&mut self) -> wedeo_core::error::Result<Vec<Frame>> {
+        self.state.flush_calls.fetch_add(1, Ordering::SeqCst);
+        let Some(pts) = self.tail else {
+            return Ok(Vec::new());
+        };
+        if self.state.tail_emitted.swap(true, Ordering::SeqCst) {
+            return Ok(Vec::new());
+        }
+        let mut frame = video_frame(pts);
+        frame.metadata.set("chain", self.tag);
+        Ok(vec![frame])
     }
 }
 
@@ -546,4 +589,140 @@ fn process_requires_exactly_one_source() {
     g.link(a, 0, sink, 0, VIDEO_CFG).unwrap();
     let _ = b;
     assert!(g.process(video_frame(0)).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Format negotiation and EOF flush
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_drives_query_formats_on_every_node() {
+    let mut g = Graph::new();
+    let mut states = Vec::new();
+    for (name, desc, tag) in [
+        ("src", &DUMMY_V0O1, "S"),
+        ("a", &DUMMY_V1O1, "A"),
+        ("sink", &DUMMY_V1O0, "K"),
+    ] {
+        let filter = DummyFilter::new(desc, tag);
+        states.push(filter.state.clone());
+        g.add_node(name, Box::new(filter)).unwrap();
+    }
+    let src = g.node_id_by_name("src").unwrap();
+    let a = g.node_id_by_name("a").unwrap();
+    let sink = g.node_id_by_name("sink").unwrap();
+    let first = g.link(src, 0, a, 0, VIDEO_CFG).unwrap();
+    let second = g.link(a, 0, sink, 0, VIDEO_CFG).unwrap();
+
+    assert!(
+        states
+            .iter()
+            .all(|s| s.query_formats_calls.load(Ordering::SeqCst) == 0)
+    );
+    g.config().unwrap();
+    assert!(
+        states
+            .iter()
+            .all(|s| s.query_formats_calls.load(Ordering::SeqCst) == 1)
+    );
+
+    // Default query_formats() leaves every pad unrestricted; the intersection
+    // of two unrestricted lists is still unrestricted.
+    assert!(g.node_formats(a).unwrap().inputs[0].formats.is_any());
+    assert!(g.link_formats(first).unwrap().is_any());
+    assert!(g.link_formats(second).unwrap().is_any());
+}
+
+#[test]
+fn config_narrows_link_formats_to_intersection() {
+    let mut g = Graph::new();
+    let src = g
+        .add_node(
+            "src",
+            Box::new(
+                DummyFilter::new(&DUMMY_V0O1, "S")
+                    .with_formats(&[PixelFormat::Yuv420p, PixelFormat::Nv12]),
+            ),
+        )
+        .unwrap();
+    let mid = g
+        .add_node(
+            "mid",
+            Box::new(DummyFilter::new(&DUMMY_V1O1, "M").with_formats(&[PixelFormat::Nv12])),
+        )
+        .unwrap();
+    let sink = g
+        .add_node("sink", Box::new(DummyFilter::new(&DUMMY_V1O0, "K")))
+        .unwrap();
+    let link = g.link(src, 0, mid, 0, VIDEO_CFG).unwrap();
+    g.link(mid, 0, sink, 0, VIDEO_CFG).unwrap();
+
+    g.config().unwrap();
+    let nv12 = FilterFormats::from_pixels([PixelFormat::Nv12]);
+    assert_eq!(g.link_formats(link), Some(&nv12));
+    assert_eq!(g.node_formats(src).unwrap().outputs[0].formats, nv12);
+    assert_eq!(g.node_formats(mid).unwrap().inputs[0].formats, nv12);
+    // The unlinked input/output pads keep their own configured lists.
+    assert_eq!(
+        g.node_formats(src).unwrap().outputs[0].formats,
+        FilterFormats::from_pixels([PixelFormat::Nv12])
+    );
+    assert_eq!(g.node_formats(sink).unwrap().inputs[0].formats, nv12);
+    assert!(
+        g.link_formats(link)
+            .unwrap()
+            .contains(FilterFormat::Pixel(PixelFormat::Nv12))
+    );
+    assert!(
+        !g.link_formats(link)
+            .unwrap()
+            .contains(FilterFormat::Pixel(PixelFormat::Yuv420p))
+    );
+}
+
+#[test]
+fn config_fails_when_linked_pads_have_no_common_format() {
+    let mut g = Graph::new();
+    let src = g
+        .add_node(
+            "src",
+            Box::new(DummyFilter::new(&DUMMY_V0O1, "S").with_formats(&[PixelFormat::Yuv420p])),
+        )
+        .unwrap();
+    let sink = g
+        .add_node(
+            "sink",
+            Box::new(DummyFilter::new(&DUMMY_V1O0, "K").with_formats(&[PixelFormat::Nv12])),
+        )
+        .unwrap();
+    g.link(src, 0, sink, 0, VIDEO_CFG).unwrap();
+    let err = g.config().unwrap_err();
+    assert!(err.to_string().contains("no common format"), "{err}");
+}
+
+#[test]
+fn close_flushes_filter_tails_to_the_graph_sink() {
+    let mut g = Graph::new();
+    let src = g
+        .add_node("src", Box::new(DummyFilter::new(&DUMMY_V0O1, "S")))
+        .unwrap();
+    let sink_filter = DummyFilter::new(&DUMMY_V1O0, "K").with_tail(99);
+    let sink_state = sink_filter.state.clone();
+    let sink = g.add_node("sink", Box::new(sink_filter)).unwrap();
+    g.link(src, 0, sink, 0, VIDEO_CFG).unwrap();
+    g.config().unwrap();
+
+    g.push(src, video_frame(1)).unwrap();
+    g.close().unwrap();
+    let frames = g.drain();
+    assert_eq!(
+        frames.iter().map(|f| f.pts).collect::<Vec<_>>(),
+        vec![1, 99]
+    );
+    assert_eq!(sink_state.flush_calls.load(Ordering::SeqCst), 1);
+
+    assert_eq!(g.flush().unwrap(), 0, "second flush emits no tail");
+    assert_eq!(sink_state.flush_calls.load(Ordering::SeqCst), 2);
+    assert!(g.drain().is_empty());
+    let _ = sink;
 }

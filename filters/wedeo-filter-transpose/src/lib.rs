@@ -13,7 +13,9 @@ use wedeo_core::error::{Error, Result};
 use wedeo_core::frame::{Frame, FramePlane, VIDEO_MAX_PLANES};
 use wedeo_core::media_type::MediaType;
 use wedeo_core::pixel_format::PixelFormat;
+pub use wedeo_filter::formats::{FilterFormat, FilterFormats, FormatsConfig, PadFormats};
 use wedeo_filter::registry::FilterFactory;
+pub use wedeo_filter::registry::{create_filter_with_options, find_filter_by_name};
 use wedeo_filter::{
     Filter, FilterDescriptor, FilterFlags, FilterPadDescriptor, FilterPadDirection,
 };
@@ -110,6 +112,50 @@ fn plane_layout(format: PixelFormat) -> Result<PlaneLayout> {
         planes,
     })
 }
+
+/// Formats advertised by `query_formats()`.
+///
+/// FFmpeg:
+/// ```c
+/// for (fmt = 0; desc = av_pix_fmt_desc_get(fmt); fmt++) {
+///     if (!(desc->flags & AV_PIX_FMT_FLAG_PAL ||
+///           desc->flags & AV_PIX_FMT_FLAG_HWACCEL ||
+///           desc->flags & AV_PIX_FMT_FLAG_BITSTREAM ||
+///           desc->log2_chroma_w != desc->log2_chroma_h) &&
+///         (ret = ff_add_format(&pix_fmts, fmt)) < 0)
+///         return ret;
+/// }
+/// return ff_set_common_formats2(ctx, cfg_in, cfg_out, pix_fmts);
+/// ```
+///
+/// This is the same set for which the local `plane_layout()` above returns a
+/// layout (paletted, bitstream and non-planar 4:2:2 formats are excluded).
+const SUPPORTED_FORMATS: &[PixelFormat] = &[
+    PixelFormat::Gray8,
+    PixelFormat::Gray16be,
+    PixelFormat::Gray16le,
+    PixelFormat::Rgb24,
+    PixelFormat::Bgr24,
+    PixelFormat::Argb,
+    PixelFormat::Rgba,
+    PixelFormat::Abgr,
+    PixelFormat::Bgra,
+    PixelFormat::Rgb48be,
+    PixelFormat::Rgb48le,
+    PixelFormat::Yuv420p,
+    PixelFormat::Yuvj420p,
+    PixelFormat::Yuv444p,
+    PixelFormat::Yuvj444p,
+    PixelFormat::Yuv410p,
+    PixelFormat::Yuv420p10le,
+    PixelFormat::Yuv420p10be,
+    PixelFormat::Yuv420p16le,
+    PixelFormat::Yuv420p16be,
+    PixelFormat::Yuv422p10le,
+    PixelFormat::Yuv422p10be,
+    PixelFormat::Yuv444p10le,
+    PixelFormat::Yuv444p10be,
+];
 
 /// `AV_CEIL_RSHIFT(a, b)`
 const fn ceil_shift(a: u32, b: u32) -> u32 {
@@ -230,6 +276,13 @@ impl Filter for TransposeFilter {
         Ok(())
     }
 
+    fn query_formats(&self, cfg: &mut FormatsConfig) -> Result<()> {
+        // FFmpeg: ff_set_common_formats2() with every non-palette, non-bitstream
+        // format whose chroma shifts match. Both pads get the same list.
+        cfg.set_common_pixel_formats(SUPPORTED_FORMATS);
+        Ok(())
+    }
+
     fn filter_frame(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         let (in_w, in_h, format, in_planes) = {
             let video = frame.video().ok_or(Error::InvalidArgument)?;
@@ -320,6 +373,22 @@ impl Filter for TransposeFilter {
     }
 }
 
+/// Parse FFmpeg's `dir` AVOption: the four symbolic constants or their
+/// integer values. The deprecated values 4..7 are deliberately rejected, as
+/// in [`TransposeDirection::from_int`].
+fn parse_dir_option(value: &str) -> Result<TransposeDirection> {
+    let dir = match value {
+        "cclock_flip" => TransposeDirection::CClockFlip,
+        "clock" => TransposeDirection::Clock,
+        "cclock" => TransposeDirection::CClock,
+        "clock_flip" => TransposeDirection::ClockFlip,
+        _ => {
+            TransposeDirection::from_int(value.parse::<i32>().map_err(|_| Error::InvalidArgument)?)?
+        }
+    };
+    Ok(dir)
+}
+
 /// FFmpeg: `AVFILTER_DEFINE_CLASS(transpose)` + `ff_vf_transpose` registration.
 pub struct TransposeFactory;
 
@@ -330,6 +399,21 @@ impl FilterFactory for TransposeFactory {
 
     fn create(&self) -> Result<Box<dyn Filter>> {
         Ok(Box::new(TransposeFilter::default()))
+    }
+
+    // FFmpeg applies private options with av_opt_set() before graph
+    // configuration. Only `dir` is implemented; `passthrough` is reported as
+    // an interface gap in the final deliverable.
+    fn create_with_options(&self, options: &[(&str, &str)]) -> Result<Box<dyn Filter>> {
+        let mut dir = TransposeDirection::default();
+        for &(key, value) in options {
+            match key {
+                "dir" => dir = parse_dir_option(value)?,
+                // av_opt_set() rejects unknown option names.
+                _ => return Err(Error::InvalidArgument),
+            }
+        }
+        Ok(Box::new(TransposeFilter::new(dir)))
     }
 }
 
@@ -549,5 +633,61 @@ mod tests {
         assert_eq!(factory.descriptor().name, "transpose");
         let filter = factory.create().unwrap();
         assert_eq!(filter.descriptor().name, "transpose");
+    }
+
+    #[test]
+    fn query_formats_advertises_plane_layout_formats() {
+        let filter = TransposeFilter::default();
+        let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+        filter.query_formats(&mut cfg).unwrap();
+
+        let expected = FilterFormats::from_pixels(SUPPORTED_FORMATS.iter().copied());
+        assert_eq!(cfg.inputs[0].formats, expected);
+        assert_eq!(cfg.outputs[0].formats, expected);
+        for &format in SUPPORTED_FORMATS {
+            assert!(plane_layout(format).is_ok(), "{format:?} lacks a layout");
+        }
+        // FFmpeg rejects palette, bitstream and packed 4:2:2 formats.
+        for format in [
+            PixelFormat::None,
+            PixelFormat::Pal8,
+            PixelFormat::MonoWhite,
+            PixelFormat::Yuyv422,
+            PixelFormat::Uyvy422,
+            PixelFormat::Yuv422p,
+        ] {
+            assert!(!cfg.outputs[0].accepts(FilterFormat::Pixel(format)));
+        }
+    }
+
+    #[test]
+    fn factory_options_reach_the_transpose_filter() {
+        let factory = TransposeFactory;
+        // Symbolic and numeric `dir` values select the same rotation.
+        for &(name, number) in &[
+            ("cclock_flip", "0"),
+            ("clock", "1"),
+            ("cclock", "2"),
+            ("clock_flip", "3"),
+        ] {
+            let mut named = factory.create_with_options(&[("dir", name)]).unwrap();
+            let mut numeric = factory.create_with_options(&[("dir", number)]).unwrap();
+            let a = named
+                .filter_frame(gray_frame(2, 2, 2, &[b"AB", b"CD"]))
+                .unwrap()
+                .remove(0);
+            let b = numeric
+                .filter_frame(gray_frame(2, 2, 2, &[b"AB", b"CD"]))
+                .unwrap()
+                .remove(0);
+            for row in 0..2 {
+                for col in 0..2 {
+                    assert_eq!(pixel(&a, 0, col, row), pixel(&b, 0, col, row));
+                }
+            }
+        }
+        assert!(factory.create_with_options(&[("dir", "4")]).is_err());
+        assert!(factory.create_with_options(&[("dir", "sideways")]).is_err());
+        assert!(factory.create_with_options(&[("bogus", "1")]).is_err());
     }
 }

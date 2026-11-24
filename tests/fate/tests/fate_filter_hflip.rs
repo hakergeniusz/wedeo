@@ -13,7 +13,7 @@ use std::process::Command;
 use wedeo_core::buffer::Buffer;
 use wedeo_core::frame::{Frame, FramePlane};
 use wedeo_core::pixel_format::PixelFormat;
-use wedeo_filter_hflip::{RegisteredFilter as Filter, registry};
+use wedeo_filter_hflip::{FilterFormat, FormatsConfig, RegisteredFilter as Filter, registry};
 
 fn tmp_dir() -> PathBuf {
     let dir = std::env::temp_dir().join("wedeo-fate-hflip");
@@ -211,4 +211,40 @@ fn hflip_nv12_bitexact_vs_ffmpeg() {
     if let Some(reference) = ffmpeg_hflip("nv12", 4, 1, &input, "nv12") {
         assert_eq!(got, reference, "hflip nv12 differs from FFmpeg");
     }
+}
+
+#[test]
+fn hflip_query_formats_matches_ffmpeg_filter() {
+    let filter = registered_filter();
+    let mut cfg = FormatsConfig::from_descriptor(filter.descriptor());
+    filter.query_formats(&mut cfg).unwrap();
+
+    // Planar 4:2:0 and 4:2:2 (with chroma on separate planes) are accepted.
+    for accepted in [
+        PixelFormat::Yuv420p,
+        PixelFormat::Yuv422p,
+        PixelFormat::Yuv422p10le,
+        PixelFormat::Nv12,
+    ] {
+        assert!(cfg.inputs[0].accepts(FilterFormat::Pixel(accepted)));
+        assert!(cfg.outputs[0].accepts(FilterFormat::Pixel(accepted)));
+    }
+    // AV_PIX_FMT_FLAG_BITSTREAM and packed 4:2:2 (both chroma components on
+    // plane 0) are rejected by vf_hflip.c's query_formats().
+    for rejected in [
+        PixelFormat::None,
+        PixelFormat::MonoWhite,
+        PixelFormat::MonoBlack,
+        PixelFormat::Yuyv422,
+        PixelFormat::Uyvy422,
+    ] {
+        assert!(!cfg.outputs[0].accepts(FilterFormat::Pixel(rejected)));
+    }
+}
+
+#[test]
+fn hflip_factory_rejects_options_as_ffmpeg_does() {
+    let factory = registry::find_filter_by_name("hflip").unwrap();
+    assert!(factory.create_with_options(&[]).is_ok());
+    assert!(factory.create_with_options(&[("dir", "1")]).is_err());
 }
