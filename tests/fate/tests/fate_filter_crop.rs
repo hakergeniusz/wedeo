@@ -81,14 +81,14 @@ fn crop_factory_options_reach_the_filter() {
 
     let mut frame = Frame::new_video(8, 8, PixelFormat::Gray8);
     frame.video_mut().unwrap().planes.push(FramePlane {
-        buffer: Buffer::from_slice(&vec![0u8; 8 * 8]),
+        buffer: Buffer::from_slice(&[0u8; 8 * 8]),
         offset: 0,
         linesize: 8,
     });
     let out = filter.filter_frame(frame).unwrap().remove(0);
     let video = out.video().unwrap();
     assert_eq!((video.width, video.height), (4, 2));
-    assert_eq!(video.planes[0].offset, 1 * 8 + 2);
+    assert_eq!(video.planes[0].offset, 8 + 2);
 
     assert!(create_filter_with_options("crop", &[("bogus", "1")]).is_err());
 }
