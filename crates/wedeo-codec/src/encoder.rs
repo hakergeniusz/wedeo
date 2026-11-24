@@ -68,6 +68,11 @@ pub struct EncoderBuilder {
     pub flags: CodecFlags,
     pub time_base: Rational,
 
+    /// Number of threads the encoder should use. `None` means unspecified
+    /// (let the runtime decide), matching FFmpeg's `AVCodecContext.thread_count`
+    /// default of `0`. `Some(0)` likewise means "auto".
+    pub thread_count: Option<u32>,
+
     // Audio
     pub sample_rate: u32,
     pub sample_format: SampleFormat,
@@ -90,6 +95,7 @@ impl EncoderBuilder {
             bit_rate: 0,
             flags: CodecFlags::empty(),
             time_base: Rational::new(1, 1),
+            thread_count: None,
             sample_rate: 0,
             sample_format: SampleFormat::None,
             channel_layout: ChannelLayout::unspec(0),
@@ -104,6 +110,27 @@ impl EncoderBuilder {
     pub fn option(mut self, key: &str, value: &str) -> Self {
         self.options.set(key, value);
         self
+    }
+
+    /// Set the encoder thread count (`0` = auto).
+    ///
+    /// This is a typed convenience setter for the `thread_count` field; it is
+    /// additive and does not change how any existing encoder is opened.
+    pub fn with_thread_count(mut self, count: u32) -> Self {
+        self.thread_count = Some(count);
+        self
+    }
+
+    /// Resolve the effective thread count for this encoder.
+    ///
+    /// The explicit `thread_count` field takes precedence. When it is unset,
+    /// this falls back to the `threads` codec-private option, which is where
+    /// the CLI currently places `-threads`. This makes `-threads` reachable by
+    /// encoders without any CLI change. `None` means the caller did not specify
+    /// a count and the encoder should let the runtime decide.
+    pub fn effective_thread_count(&self) -> Option<u32> {
+        self.thread_count
+            .or_else(|| self.options.get_thread_count())
     }
 
     pub fn open(self) -> Result<Box<dyn Encoder>> {
@@ -128,4 +155,53 @@ pub struct EncoderDescriptor {
     /// encoders support the same codec_id. Native implementations use 100,
     /// wrapper/adapter implementations use 50.
     pub priority: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn builder() -> EncoderBuilder {
+        EncoderBuilder::new(CodecId::Rawvideo, MediaType::Video)
+    }
+
+    #[test]
+    fn test_builder_defaults() {
+        let enc = builder();
+        assert_eq!(enc.thread_count, None);
+        assert_eq!(enc.effective_thread_count(), None);
+        assert!(enc.options.is_empty());
+    }
+
+    #[test]
+    fn test_with_thread_count_sets_field() {
+        let enc = builder().with_thread_count(4);
+        assert_eq!(enc.thread_count, Some(4));
+        assert_eq!(enc.effective_thread_count(), Some(4));
+
+        // 0 is a valid explicit value meaning "auto".
+        let enc = builder().with_thread_count(0);
+        assert_eq!(enc.thread_count, Some(0));
+        assert_eq!(enc.effective_thread_count(), Some(0));
+    }
+
+    #[test]
+    fn test_thread_count_via_options() {
+        // The CLI currently stores `-threads` as the `threads` codec-private
+        // option; the builder must resolve it without any CLI change.
+        let enc = builder().option("threads", "8");
+        assert_eq!(enc.thread_count, None);
+        assert_eq!(enc.effective_thread_count(), Some(8));
+
+        let mut enc = builder();
+        enc.options.set("threads", "auto");
+        assert_eq!(enc.effective_thread_count(), Some(0));
+    }
+
+    #[test]
+    fn test_explicit_thread_count_takes_precedence_over_options() {
+        let enc = builder().option("threads", "8").with_thread_count(2);
+        assert_eq!(enc.thread_count, Some(2));
+        assert_eq!(enc.effective_thread_count(), Some(2));
+    }
 }
