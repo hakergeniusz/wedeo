@@ -52,6 +52,14 @@ pub struct ParsedHeader<'a> {
     pub coeff_partitions: Vec<&'a [u8]>,
 }
 
+/// FFmpeg's `av_clip_uintp2(a, p)`: clamp `a` to `[0, (1 << p) - 1]`.
+/// Negatives clamp to zero (a plain bitmask would wrap them to the top of
+/// the range).
+#[inline]
+pub(crate) fn av_clip_uintp2(a: i32, p: u32) -> usize {
+    a.clamp(0, (1i32 << p) - 1) as usize
+}
+
 /// Create the default probability table for a keyframe.
 /// Mirrors `vp78_reset_probability_tables` plus the keyframe setup in
 /// `vp8_decode_frame_header`.
@@ -251,7 +259,10 @@ pub fn decode_frame_header<'a>(
         } else {
             yac_qi
         };
-        let clip = |v: i32| (v as u32 & 127) as usize;
+        // A plain `v as u32 & 127` would wrap negative deltas (e.g.
+        // y2ac_delta = -4 became 124), selecting a wildly wrong dequant
+        // multiplier.
+        let clip = |v: i32| av_clip_uintp2(v, 7);
         qmat[i].luma_qmul[0] = DC_QLOOKUP[clip(base_qi + ydc_delta)] as i32;
         qmat[i].luma_qmul[1] = AC_QLOOKUP[clip(base_qi)] as i32;
         qmat[i].luma_dc_qmul[0] = DC_QLOOKUP[clip(base_qi + y2dc_delta)] as i32 * 2;
@@ -395,6 +406,16 @@ mod tests {
         );
         assert_eq!(p.mvc, MV_DEFAULT_PROB);
         assert_eq!(p.pred16x16, PRED16X16_PROB_INTER);
+    }
+
+    #[test]
+    fn av_clip_uintp2_clamps_negatives_and_overflow() {
+        assert_eq!(super::av_clip_uintp2(0, 7), 0);
+        assert_eq!(super::av_clip_uintp2(63, 7), 63);
+        assert_eq!(super::av_clip_uintp2(-4, 7), 0);
+        assert_eq!(super::av_clip_uintp2(130, 7), 127);
+        assert_eq!(super::av_clip_uintp2(-1, 6), 0);
+        assert_eq!(super::av_clip_uintp2(100, 6), 63);
     }
 
     #[test]
