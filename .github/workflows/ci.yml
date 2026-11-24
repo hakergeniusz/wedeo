@@ -20,7 +20,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - run: sudo apt-get install -y nasm libasound2-dev
@@ -37,7 +37,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - run: sudo apt-get install -y nasm libasound2-dev
@@ -48,7 +48,7 @@ jobs:
         run: cargo nextest run --profile ci
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: target/nextest/ci/junit.xml
@@ -60,7 +60,7 @@ jobs:
       matrix: ${{ steps.list.outputs.matrix }}
       count: ${{ steps.list.outputs.count }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - name: List work-unit crates
@@ -89,7 +89,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       # Install unconditionally: the rav1d adapter needs nasm. A shard builds
@@ -111,7 +111,7 @@ jobs:
     name: FATE Regression
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - run: sudo apt-get install -y nasm libasound2-dev ffmpeg
@@ -121,7 +121,7 @@ jobs:
           key: fate-regression
 
       - name: Cache FATE H.264 samples
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         id: fate-cache
         with:
           path: fate-suite/h264-conformance
@@ -166,14 +166,14 @@ jobs:
     name: Deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   jvt-regression:
     name: JVT Regression
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - run: sudo apt-get install -y nasm libasound2-dev
@@ -183,7 +183,7 @@ jobs:
           key: jvt-regression
 
       - name: Cache JVT vectors
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: jvt-vectors
           key: jvt-vectors-${{ hashFiles('test_suites/h264/*.json') }}
