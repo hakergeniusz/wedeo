@@ -664,60 +664,57 @@ impl CtuDecoder<'_, '_> {
                 merge_up = self.cabac.decode_sao_merge_flag() != 0;
             }
         }
-        let mut params = SaoParams::default();
+        // FFmpeg keeps one `SAOParams` object per CTB (`SAOParams *sao =
+        // &CTB(l->sao, rx, ry)`) and fills it component by component. Each
+        // component must therefore see the values decoded for earlier
+        // components: in particular `sao_type_idx[2]` is inferred from
+        // `sao_type_idx[1]`, and `sao_eo_class[2]` from `sao_eo_class[1]`.
+        // Re-creating the struct for every component (or publishing only the
+        // last component) drops the chroma CB/CR state, skips the c_idx=2
+        // residual bins and desynchronises the CABAC stream at the next CU.
+        let mut sao = SaoParams::default();
+        if merge_left && rx > 0 {
+            sao = self.pic.sao[rs - 1].clone();
+        } else if merge_up && ry > 0 {
+            sao = self.pic.sao[rs - self.sps.ctb_width as usize].clone();
+        }
         for c_idx in 0..if self.sps.chroma_format_idc != 0 {
             3
         } else {
             1
         } {
-            let src = if merge_left && rx > 0 {
-                Some(self.pic.sao[rs - 1].clone())
-            } else if merge_up && ry > 0 {
-                Some(self.pic.sao[rs - self.sps.ctb_width as usize].clone())
-            } else {
-                None
-            };
-            let mut cur = src.unwrap_or_default();
             if !self.sh.slice_sample_adaptive_offset_flag[c_idx] {
-                cur.type_idx[c_idx] = SaoType::NotApplied;
-                if c_idx == 0 {
-                    params = cur;
-                }
+                sao.type_idx[c_idx] = SaoType::NotApplied;
                 continue;
             }
             if c_idx == 2 {
-                cur.type_idx[2] = cur.type_idx[1];
-                cur.eo_class[2] = cur.eo_class[1];
-                cur.offset_abs[2] = cur.offset_abs[1];
-                cur.offset_sign[2] = cur.offset_sign[1];
+                sao.type_idx[2] = sao.type_idx[1];
+                sao.eo_class[2] = sao.eo_class[1];
             } else if !merge_left && !merge_up {
-                cur.type_idx[c_idx] = match self.cabac.decode_sao_type_idx() {
+                sao.type_idx[c_idx] = match self.cabac.decode_sao_type_idx() {
                     wedeo_codec_hevc_cabac::SaoType::NotApplied => SaoType::NotApplied,
                     wedeo_codec_hevc_cabac::SaoType::Band => SaoType::Band,
                     wedeo_codec_hevc_cabac::SaoType::Edge => SaoType::Edge,
                 };
             }
-            if cur.type_idx[c_idx] == SaoType::NotApplied {
-                if c_idx == 0 {
-                    params = cur;
-                }
+            if sao.type_idx[c_idx] == SaoType::NotApplied {
                 continue;
             }
             if !merge_left && !merge_up {
                 for i in 0..4 {
-                    cur.offset_abs[c_idx][i] = self.cabac.decode_sao_offset_abs(self.sps.bit_depth);
+                    sao.offset_abs[c_idx][i] = self.cabac.decode_sao_offset_abs(self.sps.bit_depth);
                 }
-                if cur.type_idx[c_idx] == SaoType::Band {
+                if sao.type_idx[c_idx] == SaoType::Band {
                     for i in 0..4 {
-                        cur.offset_sign[c_idx][i] = if cur.offset_abs[c_idx][i] != 0 {
+                        sao.offset_sign[c_idx][i] = if sao.offset_abs[c_idx][i] != 0 {
                             self.cabac.decode_sao_offset_sign() as i32
                         } else {
                             0
                         };
                     }
-                    cur.band_position[c_idx] = self.cabac.decode_sao_band_position() as u8;
+                    sao.band_position[c_idx] = self.cabac.decode_sao_band_position() as u8;
                 } else if c_idx != 2 {
-                    cur.eo_class[c_idx] = self.cabac.decode_sao_eo_class();
+                    sao.eo_class[c_idx] = self.cabac.decode_sao_eo_class();
                 }
             }
             // Inferred offset values.
@@ -726,21 +723,20 @@ impl CtuDecoder<'_, '_> {
             } else {
                 self.pps.log2_sao_offset_scale_chroma
             } as u8;
-            cur.offset_val[c_idx][0] = 0;
+            sao.offset_val[c_idx][0] = 0;
             for i in 0..4 {
-                let mut v = cur.offset_abs[c_idx][i];
-                if cur.type_idx[c_idx] == SaoType::Edge {
+                let mut v = sao.offset_abs[c_idx][i];
+                if sao.type_idx[c_idx] == SaoType::Edge {
                     if i > 1 {
                         v = -v;
                     }
-                } else if cur.offset_sign[c_idx][i] != 0 {
+                } else if sao.offset_sign[c_idx][i] != 0 {
                     v = -v;
                 }
-                cur.offset_val[c_idx][i + 1] = (v << log2_scale) as i16;
+                sao.offset_val[c_idx][i + 1] = (v << log2_scale) as i16;
             }
-            params = cur;
         }
-        self.pic.sao[rs] = params;
+        self.pic.sao[rs] = sao;
         Ok(())
     }
 
