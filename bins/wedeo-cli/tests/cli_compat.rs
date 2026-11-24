@@ -11,8 +11,9 @@
 mod cli;
 
 use cli::{
-    CliOptions, FilterSpec, MapTarget, OptionScope, parse_args_from, parse_filter_chain,
-    parse_frame_rate, parse_map_spec, parse_time,
+    CliOptions, FilterChain, FilterComplexGraph, FilterSpec, MapTarget, OptionScope,
+    parse_args_from, parse_filter_chain, parse_filter_complex, parse_frame_rate, parse_map_spec,
+    parse_time,
 };
 
 fn args(tokens: &[&str]) -> Vec<String> {
@@ -150,14 +151,49 @@ fn global_flags_work_in_any_position() {
 
 #[test]
 fn map_specs_supported_and_rejected() {
-    assert_eq!(parse_map_spec("0"), Ok(MapTarget::All));
-    assert_eq!(parse_map_spec("0:v"), Ok(MapTarget::Video(0)));
-    assert_eq!(parse_map_spec("0:v:0"), Ok(MapTarget::Video(0)));
-    assert_eq!(parse_map_spec("0:v:2"), Ok(MapTarget::Video(2)));
-    assert_eq!(parse_map_spec("0:a"), Ok(MapTarget::Audio(0)));
-    assert_eq!(parse_map_spec("0:a:1"), Ok(MapTarget::Audio(1)));
+    assert_eq!(parse_map_spec("0"), Ok(MapTarget::All { file: 0 }));
+    assert_eq!(
+        parse_map_spec("0:v"),
+        Ok(MapTarget::Video { file: 0, index: 0 })
+    );
+    assert_eq!(
+        parse_map_spec("0:v:0"),
+        Ok(MapTarget::Video { file: 0, index: 0 })
+    );
+    assert_eq!(
+        parse_map_spec("0:v:2"),
+        Ok(MapTarget::Video { file: 0, index: 2 })
+    );
+    assert_eq!(
+        parse_map_spec("0:a"),
+        Ok(MapTarget::Audio { file: 0, index: 0 })
+    );
+    assert_eq!(
+        parse_map_spec("0:a:1"),
+        Ok(MapTarget::Audio { file: 0, index: 1 })
+    );
 
-    for bad in ["1:v", "0:s", "-0:v", "0:v:x", "0:v:1:2", "abc", "0:t:0"] {
+    // Multi-input: any file index is accepted now.
+    assert_eq!(parse_map_spec("1"), Ok(MapTarget::All { file: 1 }));
+    assert_eq!(
+        parse_map_spec("1:v:0"),
+        Ok(MapTarget::Video { file: 1, index: 0 })
+    );
+    assert_eq!(
+        parse_map_spec("2:a:3"),
+        Ok(MapTarget::Audio { file: 2, index: 3 })
+    );
+
+    // `-map [label]` selects a `-filter_complex` output.
+    assert_eq!(parse_map_spec("[v]"), Ok(MapTarget::Label("v".into())));
+    assert_eq!(
+        parse_map_spec("[out_2]"),
+        Ok(MapTarget::Label("out_2".into()))
+    );
+
+    for bad in [
+        "-0:v", "0:s", "0:v:x", "0:v:1:2", "abc", "0:t:0", "[]", "[a b]", "[v", "1.5",
+    ] {
         let e = parse_map_spec(bad).unwrap_err();
         assert!(!e.is_empty(), "empty error for {bad}");
     }
@@ -166,12 +202,157 @@ fn map_specs_supported_and_rejected() {
 #[test]
 fn multiple_maps_are_combined_and_conflicts_rejected() {
     let opts = ok(&["-i", "in.mp4", "-map", "0:v:0", "-map", "0:a:1", "out.mkv"]);
-    assert_eq!(opts.maps, vec![MapTarget::Video(0), MapTarget::Audio(1)]);
+    assert_eq!(
+        opts.maps,
+        vec![
+            MapTarget::Video { file: 0, index: 0 },
+            MapTarget::Audio { file: 0, index: 1 },
+        ]
+    );
+
+    // Different files may be mapped independently.
+    let opts = ok(&[
+        "-i", "a.mp4", "-i", "b.mp4", "-map", "0:v:0", "-map", "1:v:0", "out.mkv",
+    ]);
+    assert_eq!(
+        opts.maps,
+        vec![
+            MapTarget::Video { file: 0, index: 0 },
+            MapTarget::Video { file: 1, index: 0 },
+        ]
+    );
 
     let msg = err(&["-i", "in.mp4", "-map", "0:v:0", "-map", "0:v:1", "out.mkv"]);
     assert!(msg.contains("Only one video stream"), "{msg}");
     let msg = err(&["-i", "in.mp4", "-map", "0", "-map", "0:a:2", "out.mkv"]);
     assert!(msg.contains("Only one audio stream"), "{msg}");
+}
+
+#[test]
+fn multiple_inputs_are_parsed() {
+    let opts = ok(&[
+        "-i", "a.mp4", "-ss", "1", "-i", "b.mp4", "-map", "1:v:0", "-c", "copy", "out.mkv",
+    ]);
+    assert_eq!(opts.inputs, vec!["a.mp4", "b.mp4"]);
+    assert_eq!(opts.maps, vec![MapTarget::Video { file: 1, index: 0 }]);
+    assert!(opts.copy_video && opts.copy_audio);
+
+    // Options after the last `-i` are output options; earlier ones stay input
+    // scoped (fftools/ffmpeg_opt.c).
+    assert_eq!(opts.input_option("-ss"), Some("1"));
+    assert!(
+        opts.scoped_options
+            .iter()
+            .any(|o| o.key == "-ss" && o.scope == OptionScope::Input(1))
+    );
+    assert!(
+        opts.scoped_options
+            .iter()
+            .any(|o| o.key == "-map" && o.scope == OptionScope::Output)
+    );
+}
+
+#[test]
+fn filter_complex_graphs_are_parsed() {
+    // Input labels, filters and output labels on one chain.
+    let graph = parse_filter_complex("[0:v]hflip[v]").unwrap();
+    assert_eq!(
+        graph,
+        FilterComplexGraph {
+            chains: vec![FilterChain {
+                inputs: vec!["0:v".into()],
+                filters: vec![FilterSpec {
+                    name: "hflip".into(),
+                    args: Vec::new(),
+                }],
+                outputs: vec!["v".into()],
+            }],
+        }
+    );
+    assert_eq!(graph.output_labels(), vec!["v"]);
+
+    // Several chains separated by `;`, filters with named options.
+    let graph = parse_filter_complex("[0:a]anull,acopy[a];[0:v]crop=320:240").unwrap();
+    assert_eq!(graph.chains.len(), 2);
+    assert_eq!(graph.chains[0].inputs, vec!["0:a"]);
+    assert_eq!(
+        graph.chains[0].filters,
+        vec![
+            FilterSpec {
+                name: "anull".into(),
+                args: Vec::new(),
+            },
+            FilterSpec {
+                name: "acopy".into(),
+                args: Vec::new(),
+            },
+        ]
+    );
+    assert_eq!(graph.chains[0].outputs, vec!["a"]);
+    assert_eq!(graph.chains[1].inputs, vec!["0:v"]);
+    assert_eq!(graph.chains[1].outputs, Vec::<String>::new());
+    assert_eq!(
+        graph.chains[1].filters,
+        vec![FilterSpec {
+            name: "crop".into(),
+            args: vec![("w".into(), "320".into()), ("h".into(), "240".into())],
+        }]
+    );
+    assert_eq!(graph.output_labels(), vec!["a"]);
+
+    // A chain may end with several output labels.
+    let graph = parse_filter_complex("null[o1][o2]").unwrap();
+    assert_eq!(graph.chains[0].filters.len(), 1);
+    assert_eq!(graph.chains[0].outputs, vec!["o1", "o2"]);
+    assert_eq!(graph.output_labels(), vec!["o1", "o2"]);
+
+    for bad in [
+        "",
+        ";;",
+        "[a",
+        "hflip,",
+        "[a]null[",
+        "[]x",
+        "hflip[v]garbage",
+    ] {
+        assert!(
+            parse_filter_complex(bad).is_err(),
+            "accepted bad filter graph {bad:?}"
+        );
+    }
+}
+
+#[test]
+fn filter_complex_is_wired_into_cli_options() {
+    let opts = ok(&[
+        "-i",
+        "in.mp4",
+        "-filter_complex",
+        "[0:v]hflip[v];[0:a]anull[a]",
+        "-map",
+        "[v]",
+        "out.mp4",
+    ]);
+    let graph = opts.filter_complex.as_ref().unwrap();
+    assert_eq!(graph.output_labels(), vec!["v", "a"]);
+    assert_eq!(opts.maps, vec![MapTarget::Label("v".into())]);
+
+    // `-lavfi` is an alias of `-filter_complex`.
+    let opts = ok(&["-i", "in.mp4", "-lavfi", "anull", "out.wav"]);
+    assert_eq!(opts.filter_complex.as_ref().unwrap().chains.len(), 1);
+    assert!(err(&["-i", "in.mp4", "-filter_complex", "[0", "out.mp4"]).contains("filter graph"));
+}
+
+#[test]
+fn threads_option_sets_typed_thread_count() {
+    let opts = ok(&["-i", "in.mp4", "-threads", "4", "out.mp4"]);
+    assert_eq!(opts.thread_count, Some(4));
+    let opts = ok(&["-i", "in.mp4", "-threads", "auto", "out.mp4"]);
+    assert_eq!(opts.thread_count, Some(0));
+    let opts = ok(&["-i", "in.mp4", "out.mp4"]);
+    assert_eq!(opts.thread_count, None);
+    let msg = err(&["-i", "in.mp4", "-threads", "many", "out.mp4"]);
+    assert!(msg.contains("threads"), "{msg}");
 }
 
 #[test]

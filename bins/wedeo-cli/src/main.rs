@@ -5,11 +5,14 @@
 //   wedeo-cli -i input.mp4 output.wav                   (transcode)
 //   wedeo-cli -i input.mp4 -c:v av1 output.mp4          (transcode with codec selection)
 //   wedeo-cli -i input.mp4 -c copy -y output.mkv        (remux, bit-exact)
+//   wedeo-cli -i a.mp4 -i b.mp4 -map 1:v:0 -c copy out.mkv (multi-input mapping)
+//   wedeo-cli -i in.mp4 -filter_complex '[0:v]hflip[v]' -map '[v]' out.mp4
 //   wedeo-cli -ss 1 -t 2 -vf hflip -i input.mp4 out.mp4 (time window + filters)
 //   wedeo-cli -codecs / -formats                        (list registered codecs/formats)
 //
-// Reference: FFmpeg fftools/ffmpeg_opt.c option table and opt_map(),
-// fftools/cmdutils.c parse_time(), fftools/ffmpeg_filter.c graph setup.
+// Reference: FFmpeg fftools/ffmpeg_opt.c option table, opt_map() and
+// opt_filter_complex(), fftools/cmdutils.c parse_time(),
+// fftools/ffmpeg_filter.c graph setup.
 
 use std::env;
 use std::io;
@@ -59,8 +62,8 @@ use wedeo_rav1d as _;
 use wedeo_rav1e as _;
 use wedeo_symphonia as _;
 
-use wedeo_codec::decoder::DecoderBuilder;
-use wedeo_codec::encoder::{CodecFlags, EncoderBuilder};
+use wedeo_codec::decoder::{Decoder, DecoderBuilder};
+use wedeo_codec::encoder::{CodecFlags, Encoder, EncoderBuilder};
 use wedeo_codec::registry as codec_registry;
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::Error;
@@ -96,15 +99,31 @@ pub struct ScopedOption {
     pub value: String,
 }
 
-/// `-map 0[:spec]` stream selector. Only input 0 is supported.
+/// `-map [-]file_id[:stream_specifier]` stream selector, or a labelled
+/// `-filter_complex` output link such as `[v]` (FFmpeg opt_map(),
+/// fftools/ffmpeg_opt.c:562).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MapTarget {
-    /// The Nth video stream of input 0.
-    Video(u32),
-    /// The Nth audio stream of input 0.
-    Audio(u32),
-    /// "0": the default (first video and first audio) streams.
-    All,
+    /// The Nth video stream of the given input file.
+    Video { file: usize, index: u32 },
+    /// The Nth audio stream of the given input file.
+    Audio { file: usize, index: u32 },
+    /// A bare file id: the default (first video and first audio) streams.
+    All { file: usize },
+    /// A labelled output of `-filter_complex`, e.g. `[v]`.
+    Label(String),
+}
+
+impl MapTarget {
+    /// Input file index for stream-based maps, `None` for filter labels.
+    pub fn file(&self) -> Option<usize> {
+        match self {
+            MapTarget::Video { file, .. }
+            | MapTarget::Audio { file, .. }
+            | MapTarget::All { file } => Some(*file),
+            MapTarget::Label(_) => None,
+        }
+    }
 }
 
 /// One filter in a comma-separated `-vf` / `-af` chain, with named options.
@@ -112,6 +131,32 @@ pub enum MapTarget {
 pub struct FilterSpec {
     pub name: String,
     pub args: Vec<(String, String)>,
+}
+
+/// One `[in]filter[,filter...][out]` chain of a `-filter_complex` graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterChain {
+    /// Input link labels, e.g. `0:v` or a previously defined output label.
+    pub inputs: Vec<String>,
+    pub filters: Vec<FilterSpec>,
+    /// Output link labels, e.g. `v` for a later `-map [v]`.
+    pub outputs: Vec<String>,
+}
+
+/// Parsed `-filter_complex` graph (semicolon-separated chains).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterComplexGraph {
+    pub chains: Vec<FilterChain>,
+}
+
+impl FilterComplexGraph {
+    /// All labelled outputs available to `-map [label]`.
+    pub fn output_labels(&self) -> Vec<&str> {
+        self.chains
+            .iter()
+            .flat_map(|chain| chain.outputs.iter().map(String::as_str))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +194,10 @@ pub struct CliOptions {
     pub frame_rate: Option<String>,
     pub video_filters: Vec<FilterSpec>,
     pub audio_filters: Vec<FilterSpec>,
+    /// Parsed graph description from `-filter_complex` / `-lavfi`.
+    pub filter_complex: Option<FilterComplexGraph>,
+    /// `-threads`: `None` means auto (let the encoder decide).
+    pub thread_count: Option<u32>,
     pub maps: Vec<MapTarget>,
     pub metadata: Vec<(String, String)>,
     pub movflags: Vec<String>,
@@ -192,6 +241,8 @@ impl CliOptions {
             frame_rate: None,
             video_filters: Vec::new(),
             audio_filters: Vec::new(),
+            filter_complex: None,
+            thread_count: None,
             maps: Vec::new(),
             metadata: Vec::new(),
             movflags: Vec::new(),
@@ -244,6 +295,17 @@ impl Default for CliOptions {
     }
 }
 
+/// Scope of the option at value index `i`: options followed by another `-i`
+/// belong to the input being opened, everything after the final input is an
+/// output option (fftools/ffmpeg_opt.c).
+fn scope_at(args: &[String], i: usize, input_index: usize) -> OptionScope {
+    if args[i + 1..].iter().any(|a| a == "-i") {
+        OptionScope::Input(input_index)
+    } else {
+        OptionScope::Output
+    }
+}
+
 /// Parse arguments without ever exiting; errors are reported in
 /// `CliOptions::parse_error` so they can be asserted in unit tests.
 pub fn parse_args_from(args: &[String]) -> CliOptions {
@@ -264,13 +326,6 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
 
     while i < args.len() {
         let arg = args[i].as_str();
-        let scope = || {
-            if input_index == 0 {
-                OptionScope::Input(0)
-            } else {
-                OptionScope::Output
-            }
-        };
 
         // Positional argument: the output file.
         if arg == "-" || !arg.starts_with('-') {
@@ -293,17 +348,17 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
 
             "-c:v" | "-vcodec" | "-codec:v" | "-c:V" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 set_codec(&mut opts, MediaType::Video, &value);
             }
             "-c:a" | "-acodec" | "-codec:a" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 set_codec(&mut opts, MediaType::Audio, &value);
             }
             "-c:s" | "-scodec" | "-codec:s" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 if value == "copy" {
                     opts.subtitle_codec = Some("copy".to_string());
                 } else {
@@ -312,31 +367,31 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
             }
             "-c" | "-codec" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 set_codec(&mut opts, MediaType::Video, &value);
                 set_codec(&mut opts, MediaType::Audio, &value);
             }
 
             "-f" | "-format" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 opts.format = Some(value);
             }
 
             "-b:v" | "-vb" | "-b" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 opts.bitrate_video = Some(parse_bitrate(&value));
             }
             "-b:a" | "-ab" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 opts.bitrate_audio = Some(parse_bitrate(&value));
             }
 
             "-q:v" | "-qscale:v" | "-q" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 // FFmpeg stores qscale as a codec option; `qp` is the name
                 // used by the AV1 encoder adapter in Wedeo.
                 opts.codec_options.push(("q:v".into(), value.clone()));
@@ -344,37 +399,43 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
             }
             "-q:a" | "-qscale:a" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 opts.codec_options.push(("q:a".into(), value));
             }
             "-crf" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 opts.codec_options.push(("crf".into(), value.clone()));
                 opts.codec_options.push(("qp".into(), value));
             }
             "-preset" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 opts.codec_options.push(("preset".into(), value));
             }
             "-threads" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
-                let value = if value == "auto" {
+                opts.record(scope_at(args, i, input_index), arg, &value);
+                let normalized = if value == "auto" {
                     "0".to_string()
-                } else if value.parse::<u32>().is_err() {
-                    opts.fail(format!("Invalid threads value: '{value}'"));
-                    return opts;
                 } else {
-                    value
+                    value.clone()
                 };
-                opts.codec_options.push(("threads".into(), value));
+                match normalized.parse::<u32>() {
+                    Ok(count) => opts.thread_count = Some(count),
+                    Err(_) => {
+                        opts.fail(format!("Invalid threads value: '{value}'"));
+                        return opts;
+                    }
+                }
+                // Keep the codec-private option too: encoders that read
+                // `options.get_thread_count()` still see `-threads`.
+                opts.codec_options.push(("threads".into(), normalized));
             }
 
             "-frames:v" | "-vframes" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 match value.parse::<u64>() {
                     Ok(n) => opts.frames_video = Some(n),
                     Err(_) => {
@@ -386,7 +447,7 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
 
             "-r" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 if let Err(e) = parse_frame_rate(&value) {
                     opts.fail(format!("Invalid frame rate for option -r: {e}"));
                     return opts;
@@ -395,7 +456,7 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
             }
             "-ss" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 match parse_time(&value) {
                     Ok(us) => opts.seek_us = Some(us),
                     Err(e) => {
@@ -406,7 +467,7 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
             }
             "-t" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 match parse_time(&value) {
                     Ok(us) => opts.duration_us = Some(us),
                     Err(e) => {
@@ -418,7 +479,7 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
 
             "-vf" | "-filter:v" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 match parse_filter_chain(&value, true) {
                     Ok(specs) => opts.video_filters.extend(specs),
                     Err(e) => {
@@ -429,7 +490,7 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
             }
             "-af" | "-filter:a" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 match parse_filter_chain(&value, false) {
                     Ok(specs) => opts.audio_filters.extend(specs),
                     Err(e) => {
@@ -441,7 +502,7 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
 
             "-map" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 match parse_map_spec(&value) {
                     Ok(target) => opts.maps.push(target),
                     Err(e) => {
@@ -451,9 +512,23 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
                 }
             }
 
+            // FFmpeg treats -lavfi as an alias of -filter_complex
+            // (fftools/ffmpeg_opt.c option table).
+            "-filter_complex" | "-lavfi" => {
+                let value = take_value!(arg);
+                opts.record(scope_at(args, i, input_index), arg, &value);
+                match parse_filter_complex(&value) {
+                    Ok(graph) => opts.filter_complex = Some(graph),
+                    Err(e) => {
+                        opts.fail(format!("Invalid filter graph for {arg}: {e}"));
+                        return opts;
+                    }
+                }
+            }
+
             "-metadata" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 match value.split_once('=') {
                     Some((k, v)) if !k.is_empty() => {
                         opts.metadata.push((k.to_string(), v.to_string()));
@@ -468,7 +543,7 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
             }
             "-movflags" => {
                 let value = take_value!(arg);
-                opts.record(scope(), arg, &value);
+                opts.record(scope_at(args, i, input_index), arg, &value);
                 opts.movflags.extend(
                     value
                         .split('+')
@@ -497,19 +572,19 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
                 opts.stats = true;
             }
             "-vn" => {
-                opts.record(scope(), arg, "1");
+                opts.record(scope_at(args, i, input_index), arg, "1");
                 opts.video_disabled = true;
             }
             "-an" => {
-                opts.record(scope(), arg, "1");
+                opts.record(scope_at(args, i, input_index), arg, "1");
                 opts.audio_disabled = true;
             }
             "-sn" => {
-                opts.record(scope(), arg, "1");
+                opts.record(scope_at(args, i, input_index), arg, "1");
                 opts.subtitle_disabled = true;
             }
             "-shortest" => {
-                opts.record(scope(), arg, "1");
+                opts.record(scope_at(args, i, input_index), arg, "1");
                 opts.shortest = true;
             }
             "-v" | "-loglevel" => {
@@ -542,7 +617,7 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
                     return opts;
                 }
                 let value = args[i].clone();
-                opts.record(scope(), other, &value);
+                opts.record(scope_at(args, i, input_index), other, &value);
                 opts.codec_options.push((key, value));
             }
 
@@ -554,49 +629,56 @@ pub fn parse_args_from(args: &[String]) -> CliOptions {
         i += 1;
     }
 
-    // At most one video and one audio stream can be mapped for now.
-    let mut mapped_video: Option<u32> = None;
-    let mut mapped_audio: Option<u32> = None;
-    for target in &opts.maps {
+    // At most one video and one audio stream can be mapped per input file.
+    let mut mapped_video: Vec<(usize, u32)> = Vec::new();
+    let mut mapped_audio: Vec<(usize, u32)> = Vec::new();
+    let maps = opts.maps.clone();
+    for target in &maps {
         match target {
-            MapTarget::Video(n) => {
-                if let Some(prev) = mapped_video
-                    && prev != *n
-                {
-                    opts.fail("Only one video stream can be mapped with -map");
+            MapTarget::Video { file, index } => {
+                if !note_mapped(&mut mapped_video, *file, *index, "video", &mut opts) {
                     return opts;
                 }
-                mapped_video = Some(*n);
             }
-            MapTarget::Audio(n) => {
-                if let Some(prev) = mapped_audio
-                    && prev != *n
-                {
-                    opts.fail("Only one audio stream can be mapped with -map");
+            MapTarget::Audio { file, index } => {
+                if !note_mapped(&mut mapped_audio, *file, *index, "audio", &mut opts) {
                     return opts;
                 }
-                mapped_audio = Some(*n);
             }
-            MapTarget::All => {
-                if let Some(prev) = mapped_video
-                    && prev != 0
-                {
-                    opts.fail("Only one video stream can be mapped with -map");
+            MapTarget::All { file } => {
+                // A bare file id maps the first video and first audio streams.
+                if !note_mapped(&mut mapped_video, *file, 0, "video", &mut opts) {
                     return opts;
                 }
-                if let Some(prev) = mapped_audio
-                    && prev != 0
-                {
-                    opts.fail("Only one audio stream can be mapped with -map");
+                if !note_mapped(&mut mapped_audio, *file, 0, "audio", &mut opts) {
                     return opts;
                 }
-                mapped_video = Some(0);
-                mapped_audio = Some(0);
             }
+            MapTarget::Label(_) => {}
         }
     }
 
     opts
+}
+
+/// Record `(file, index)` for one kind of stream map, rejecting a second,
+/// different stream for the same file.
+fn note_mapped(
+    maps: &mut Vec<(usize, u32)>,
+    file: usize,
+    index: u32,
+    kind: &str,
+    opts: &mut CliOptions,
+) -> bool {
+    if let Some(prev) = maps.iter().find(|(f, _)| *f == file) {
+        if prev.1 != index {
+            opts.fail(format!("Only one {kind} stream can be mapped with -map"));
+            return false;
+        }
+        return true; // Same file and stream: already mapped.
+    }
+    maps.push((file, index));
+    true
 }
 
 fn set_codec(opts: &mut CliOptions, media_type: MediaType, value: &str) {
@@ -725,23 +807,34 @@ pub fn parse_frame_rate(s: &str) -> Result<Rational, String> {
     Ok(Rational::new(num, den))
 }
 
-/// FFmpeg `-map [-]file_id[:stream_specifier]`. Only input 0 and video/audio
-/// stream specifiers are supported.
+/// FFmpeg `-map [-]file_id[:stream_specifier]`, or a labelled output of
+/// `-filter_complex` such as `[v]` (FFmpeg opt_map(),
+/// fftools/ffmpeg_opt.c:562).
 pub fn parse_map_spec(spec: &str) -> Result<MapTarget, String> {
     if spec.starts_with('-') {
         return Err(format!(
             "negative stream mapping is not supported: '{spec}'"
         ));
     }
+    if let Some(inner) = spec.strip_prefix('[') {
+        let inner = inner
+            .strip_suffix(']')
+            .ok_or_else(|| format!("invalid -map label in '{spec}'"))?;
+        if inner.is_empty()
+            || inner
+                .chars()
+                .any(|c| "[] ,;:".contains(c) || c.is_whitespace())
+        {
+            return Err(format!("invalid -map label in '{spec}'"));
+        }
+        return Ok(MapTarget::Label(inner.to_string()));
+    }
     let parts: Vec<&str> = spec.split(':').collect();
-    let file: u32 = parts[0]
+    let file: usize = parts[0]
         .parse()
         .map_err(|_| format!("invalid input file index in -map: '{spec}'"))?;
-    if file != 0 {
-        return Err(format!("only input file 0 is supported in -map: '{spec}'"));
-    }
     match parts.len() {
-        1 => Ok(MapTarget::All),
+        1 => Ok(MapTarget::All { file }),
         2 | 3 => {
             let index = if parts.len() == 3 {
                 parts[2]
@@ -751,8 +844,8 @@ pub fn parse_map_spec(spec: &str) -> Result<MapTarget, String> {
                 0
             };
             match parts[1] {
-                "v" => Ok(MapTarget::Video(index)),
-                "a" => Ok(MapTarget::Audio(index)),
+                "v" => Ok(MapTarget::Video { file, index }),
+                "a" => Ok(MapTarget::Audio { file, index }),
                 "s" => Err(format!(
                     "subtitle stream mapping is not supported: '{spec}'"
                 )),
@@ -776,10 +869,6 @@ pub fn parse_filter_chain(chain: &str, video: bool) -> Result<Vec<FilterSpec>, S
         if element.is_empty() {
             return Err(format!("empty filter in chain: '{chain}'"));
         }
-        let (name, rest) = match element.split_once('=') {
-            Some((n, r)) => (n.trim(), Some(r.trim())),
-            None => (element, None),
-        };
         let allowed_video = [
             "hflip",
             "vflip",
@@ -797,79 +886,192 @@ pub fn parse_filter_chain(chain: &str, video: bool) -> Result<Vec<FilterSpec>, S
         } else {
             &allowed_audio[..]
         };
-        if !allowed.contains(&name) {
+        let spec = parse_filter_spec(element)?;
+        if !allowed.contains(&spec.name.as_str()) {
             return Err(format!(
-                "no such {}filter '{name}' in chain '{chain}'",
-                if video { "video " } else { "audio " }
+                "no such {}filter '{}' in chain '{chain}'",
+                if video { "video " } else { "audio " },
+                spec.name
             ));
         }
-
-        let values: Vec<&str> = match rest {
-            None => Vec::new(),
-            Some("") => return Err(format!("empty arguments for filter '{name}'")),
-            Some(r) => r.split(':').map(str::trim).collect(),
-        };
-        let named = |keys: &[&str]| -> Result<Vec<(String, String)>, String> {
-            if values.len() > keys.len() {
-                return Err(format!(
-                    "too many arguments for filter '{name}': expected at most {}",
-                    keys.len()
-                ));
-            }
-            if values.iter().all(|v| v.contains('=')) {
-                let mut out = Vec::new();
-                for value in &values {
-                    let (k, v) = value.split_once('=').expect("checked above");
-                    let k = k.trim();
-                    if !keys.contains(&k) {
-                        return Err(format!("unknown option '{k}' for filter '{name}'"));
-                    }
-                    out.push((k.to_string(), v.trim().to_string()));
-                }
-                Ok(out)
-            } else {
-                Ok(keys
-                    .iter()
-                    .zip(values.iter())
-                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-                    .collect())
-            }
-        };
-
-        let args = match name {
-            "hflip" | "vflip" | "copy" | "null" | "anull" => {
-                if !values.is_empty() {
-                    return Err(format!("filter '{name}' takes no arguments"));
-                }
-                Vec::new()
-            }
-            "crop" => named(&["w", "h", "x", "y"])?,
-            "pad" => named(&["w", "h", "x", "y", "color"])?,
-            "transpose" => {
-                let args = named(&["dir"])?;
-                if let Some((_, value)) = args.first()
-                    && value.parse::<i32>().is_err()
-                {
-                    return Err(format!("invalid transpose direction '{value}'"));
-                }
-                args
-            }
-            "fps" => {
-                let args = named(&["fps"])?;
-                if let Some((_, value)) = args.first() {
-                    parse_frame_rate(value).map_err(|e| format!("invalid fps value: {e}"))?;
-                }
-                args
-            }
-            "format" => named(&["pix_fmts"])?,
-            _ => unreachable!("validated above"),
-        };
-        specs.push(FilterSpec {
-            name: name.to_string(),
-            args,
-        });
+        specs.push(spec);
     }
     Ok(specs)
+}
+
+/// Parse one filter instance `name[:arg=value...]` or `name=arg...` with
+/// positional `name:arg` values, used by `-vf`/`-af` chains and by
+/// `-filter_complex` chains (FFmpeg `avfilter_graph_parse2`,
+/// libavfilter/graphparser.c).
+fn parse_filter_spec(element: &str) -> Result<FilterSpec, String> {
+    let element = element.trim();
+    if element.is_empty() {
+        return Err("empty filter name".to_string());
+    }
+    let (name, rest) = match element.split_once('=') {
+        Some((n, r)) => (n.trim(), Some(r.trim())),
+        None => (element, None),
+    };
+
+    let values: Vec<&str> = match rest {
+        None => Vec::new(),
+        Some("") => return Err(format!("empty arguments for filter '{name}'")),
+        Some(r) => r.split(':').map(str::trim).collect(),
+    };
+    let named = |keys: &[&str]| -> Result<Vec<(String, String)>, String> {
+        if values.len() > keys.len() {
+            return Err(format!(
+                "too many arguments for filter '{name}': expected at most {}",
+                keys.len()
+            ));
+        }
+        if values.iter().all(|v| v.contains('=')) {
+            let mut out = Vec::new();
+            for value in &values {
+                let (k, v) = value.split_once('=').expect("checked above");
+                let k = k.trim();
+                if !keys.contains(&k) {
+                    return Err(format!("unknown option '{k}' for filter '{name}'"));
+                }
+                out.push((k.to_string(), v.trim().to_string()));
+            }
+            Ok(out)
+        } else {
+            Ok(keys
+                .iter()
+                .zip(values.iter())
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect())
+        }
+    };
+
+    let args = match name {
+        "hflip" | "vflip" | "copy" | "null" | "anull" => {
+            if !values.is_empty() {
+                return Err(format!("filter '{name}' takes no arguments"));
+            }
+            Vec::new()
+        }
+        "crop" => named(&["w", "h", "x", "y"])?,
+        "pad" => named(&["w", "h", "x", "y", "color"])?,
+        "transpose" => {
+            let args = named(&["dir"])?;
+            if let Some((_, value)) = args.first()
+                && value.parse::<i32>().is_err()
+            {
+                return Err(format!("invalid transpose direction '{value}'"));
+            }
+            args
+        }
+        "fps" => {
+            let args = named(&["fps"])?;
+            if let Some((_, value)) = args.first() {
+                parse_frame_rate(value).map_err(|e| format!("invalid fps value: {e}"))?;
+            }
+            args
+        }
+        "format" => named(&["pix_fmts"])?,
+        // Filters outside the `-vf`/`-af` allowlists are parsed generically:
+        // named `key=value` pairs keep their keys, positional values are kept
+        // keyed by index so nothing is lost.
+        _ => named_any(&values),
+    };
+    Ok(FilterSpec {
+        name: name.to_string(),
+        args,
+    })
+}
+
+fn named_any(values: &[&str]) -> Vec<(String, String)> {
+    if !values.is_empty() && values.iter().all(|v| v.contains('=')) {
+        values
+            .iter()
+            .filter_map(|v| v.split_once('='))
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .collect()
+    } else {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i.to_string(), v.trim().to_string()))
+            .collect()
+    }
+}
+
+/// Parse a `-filter_complex` graph: chains separated by `;`, each chain
+/// `[in]filter[,filter...][out]` (FFmpeg opt_filter_complex(),
+/// fftools/ffmpeg_opt.c:441).
+pub fn parse_filter_complex(graph: &str) -> Result<FilterComplexGraph, String> {
+    let mut chains = Vec::new();
+    for raw in graph.split(';') {
+        let chain = raw.trim();
+        if chain.is_empty() {
+            return Err(format!("empty filter chain in '{graph}'"));
+        }
+        chains.push(parse_filter_complex_chain(chain)?);
+    }
+    if chains.is_empty() {
+        return Err("empty filter graph".to_string());
+    }
+    Ok(FilterComplexGraph { chains })
+}
+
+/// Scan a `[label]` starting at byte offset `i`, returning the label and the
+/// offset just past the closing bracket.
+fn scan_chain_label(s: &str, i: usize) -> Result<Option<(String, usize)>, String> {
+    if !s[i..].starts_with('[') {
+        return Ok(None);
+    }
+    let rest = &s[i + 1..];
+    let Some(end) = rest.find(']') else {
+        return Err(format!("unterminated label in '{s}'"));
+    };
+    let label = &rest[..end];
+    if label.is_empty() || label.contains(['[', ']', ',', ';']) {
+        return Err(format!("invalid label '[{label}]' in '{s}'"));
+    }
+    Ok(Some((label.to_string(), i + 1 + end + 1)))
+}
+
+fn parse_filter_complex_chain(chain: &str) -> Result<FilterChain, String> {
+    let mut inputs: Vec<String> = Vec::new();
+    let mut outputs: Vec<String> = Vec::new();
+    let mut filters: Vec<FilterSpec> = Vec::new();
+
+    // Leading input labels, e.g. `0:v`.
+    let mut i = 0usize;
+    while let Some((label, end)) = scan_chain_label(chain, i)? {
+        inputs.push(label);
+        i = end;
+    }
+    // Filters run up to the next `[`; output labels follow them.
+    let filter_end = chain[i..].find('[').map(|p| i + p).unwrap_or(chain.len());
+    let filter_section = chain[i..filter_end].trim();
+    if !filter_section.is_empty() {
+        for element in filter_section.split(',') {
+            if element.trim().is_empty() {
+                return Err(format!("empty filter in chain: '{chain}'"));
+            }
+            filters.push(parse_filter_spec(element)?);
+        }
+    }
+    // Trailing output labels, e.g. `v` for a later `-map [v]`.
+    let mut j = filter_end;
+    while let Some((label, end)) = scan_chain_label(chain, j)? {
+        outputs.push(label);
+        j = end;
+    }
+    if j != chain.len() {
+        return Err(format!("unexpected text in filter chain '{chain}'"));
+    }
+    if filters.is_empty() {
+        return Err(format!("empty filter chain: '{chain}'"));
+    }
+    Ok(FilterChain {
+        inputs,
+        filters,
+        outputs,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -977,10 +1179,12 @@ fn print_usage() {
     println!("  -h, -help, --help      show this help");
     println!();
     println!("Input / output options:");
-    println!("  -i <file>              input file (more than one input is not yet supported)");
+    println!("  -i <file>              input file (repeatable for multiple inputs)");
     println!("  -ss <time>             start at time (seconds, HH:MM:SS, or Ns/Nm/Nh/Nms)");
     println!("  -t <duration>          stop after duration");
-    println!("  -map <spec>            map input stream: 0, 0:v[:N], 0:a[:N]");
+    println!("  -map <spec>            map input stream: file[:v[:N]|a[:N]], or [label]");
+    println!("  -filter_complex <gr>   build a filter graph; use -map [label] to select outputs");
+    println!("  -lavfi <gr>            alias of -filter_complex");
     println!("  -c, -codec <codec>     select encoder for all streams ('copy' to remux)");
     println!("  -c:v, -vcodec <codec>  select video encoder ('copy' to remux video)");
     println!("  -c:a, -acodec <codec>  select audio encoder ('copy' to remux audio)");
@@ -1125,72 +1329,108 @@ fn nth_stream(input: &InputContext, media_type: MediaType, n: u32) -> Option<usi
         .map(|s| s.index)
 }
 
+/// One input file selected for the output, with its chosen streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputSelection {
+    /// Index into `CliOptions::inputs` and `cmd_transcode`'s open inputs.
+    pub file: usize,
+    pub video: Option<usize>,
+    pub audio: Option<usize>,
+}
+
+/// Resolve `-map` targets to per-file stream selections, or apply the default
+/// first-video/first-audio streams when no `-map` was given (FFmpeg with no
+/// mappings, fftools/ffmpeg_opt.c: opt_map()).
 fn select_streams(
     opts: &CliOptions,
-    input: &InputContext,
-) -> wedeo_core::Result<(Option<usize>, Option<usize>)> {
-    let mut video = None;
-    let mut audio = None;
+    inputs: &[InputContext],
+) -> wedeo_core::Result<Vec<InputSelection>> {
+    let mut selections = Vec::new();
+    for (file, input) in inputs.iter().enumerate() {
+        let mut video = None;
+        let mut audio = None;
 
-    if opts.maps.is_empty() {
-        for stream in &input.streams {
-            match stream.codec_params.media_type {
-                MediaType::Video if !opts.video_disabled && video.is_none() => {
-                    video = Some(stream.index);
+        let file_maps: Vec<&MapTarget> = opts
+            .maps
+            .iter()
+            .filter(|m| m.file() == Some(file))
+            .collect();
+
+        if !file_maps.is_empty() {
+            for target in file_maps {
+                match target {
+                    MapTarget::Video { index, .. } => {
+                        if opts.video_disabled {
+                            return Err(Error::Other(
+                                "video stream mapped with -map but disabled with -vn".into(),
+                            ));
+                        }
+                        let idx = nth_stream(input, MediaType::Video, *index).ok_or_else(|| {
+                            Error::Other(format!(
+                                "Stream specifier '{file}:v:{index}' matches no streams"
+                            ))
+                        })?;
+                        if video.is_some() && video != Some(idx) {
+                            return Err(Error::Other("Only one video stream can be mapped".into()));
+                        }
+                        video = Some(idx);
+                    }
+                    MapTarget::Audio { index, .. } => {
+                        if opts.audio_disabled {
+                            return Err(Error::Other(
+                                "audio stream mapped with -map but disabled with -an".into(),
+                            ));
+                        }
+                        let idx = nth_stream(input, MediaType::Audio, *index).ok_or_else(|| {
+                            Error::Other(format!(
+                                "Stream specifier '{file}:a:{index}' matches no streams"
+                            ))
+                        })?;
+                        if audio.is_some() && audio != Some(idx) {
+                            return Err(Error::Other("Only one audio stream can be mapped".into()));
+                        }
+                        audio = Some(idx);
+                    }
+                    MapTarget::All { .. } => {
+                        if !opts.video_disabled && video.is_none() {
+                            video = nth_stream(input, MediaType::Video, 0);
+                        }
+                        if !opts.audio_disabled && audio.is_none() {
+                            audio = nth_stream(input, MediaType::Audio, 0);
+                        }
+                    }
+                    // Labelled `-map [label]` entries have no input stream;
+                    // they resolve against `-filter_complex` outputs.
+                    MapTarget::Label(_) => {}
                 }
-                MediaType::Audio if !opts.audio_disabled && audio.is_none() => {
-                    audio = Some(stream.index);
+            }
+        } else if opts.maps.is_empty() {
+            // No -map anywhere: default to the first video/audio stream of
+            // every input, like FFmpeg with default mappings.
+            for stream in &input.streams {
+                match stream.codec_params.media_type {
+                    MediaType::Video if !opts.video_disabled && video.is_none() => {
+                        video = Some(stream.index);
+                    }
+                    MediaType::Audio if !opts.audio_disabled && audio.is_none() => {
+                        audio = Some(stream.index);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
-    } else {
-        for target in &opts.maps {
-            match target {
-                MapTarget::Video(n) => {
-                    if opts.video_disabled {
-                        return Err(Error::Other(
-                            "video stream mapped with -map but disabled with -vn".into(),
-                        ));
-                    }
-                    let idx = nth_stream(input, MediaType::Video, *n).ok_or_else(|| {
-                        Error::Other(format!("Stream specifier '0:v:{n}' matches no streams"))
-                    })?;
-                    if video.is_some() && video != Some(idx) {
-                        return Err(Error::Other("Only one video stream can be mapped".into()));
-                    }
-                    video = Some(idx);
-                }
-                MapTarget::Audio(n) => {
-                    if opts.audio_disabled {
-                        return Err(Error::Other(
-                            "audio stream mapped with -map but disabled with -an".into(),
-                        ));
-                    }
-                    let idx = nth_stream(input, MediaType::Audio, *n).ok_or_else(|| {
-                        Error::Other(format!("Stream specifier '0:a:{n}' matches no streams"))
-                    })?;
-                    if audio.is_some() && audio != Some(idx) {
-                        return Err(Error::Other("Only one audio stream can be mapped".into()));
-                    }
-                    audio = Some(idx);
-                }
-                MapTarget::All => {
-                    if !opts.video_disabled && video.is_none() {
-                        video = nth_stream(input, MediaType::Video, 0);
-                    }
-                    if !opts.audio_disabled && audio.is_none() {
-                        audio = nth_stream(input, MediaType::Audio, 0);
-                    }
-                }
-            }
+        // When -map was given but nothing targets this file, no streams are
+        // selected from it, matching FFmpeg.
+
+        if video.is_some() || audio.is_some() {
+            selections.push(InputSelection { file, video, audio });
         }
     }
 
-    if video.is_none() && audio.is_none() {
+    if selections.is_empty() {
         return Err(Error::Other("No streams selected for output".into()));
     }
-    Ok((video, audio))
+    Ok(selections)
 }
 
 fn stream_duration_us(stream: &Stream, fallback_us: i64) -> i64 {
@@ -1324,8 +1564,11 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
         )));
     }
 
-    // Open input
-    let mut input = InputContext::open(&opts.inputs[0])?;
+    // Open all inputs.
+    let mut inputs: Vec<InputContext> = Vec::with_capacity(opts.inputs.len());
+    for path in &opts.inputs {
+        inputs.push(InputContext::open(path)?);
+    }
 
     // Determine output format
     let format_name = if let Some(ref f) = opts.format {
@@ -1338,8 +1581,7 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
         })?
     };
 
-    let (video_stream_idx, audio_stream_idx) = select_streams(opts, &input)?;
-    let window = time_window(opts, &input, video_stream_idx, audio_stream_idx);
+    let selections = select_streams(opts, &inputs)?;
 
     // Video filters: -r behaves like an implicit fps filter on transcode.
     let mut video_filter_specs = opts.video_filters.clone();
@@ -1379,14 +1621,70 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
         );
     }
 
-    // Build decoders and encoders for selected streams
+    // Build the muxer stream list and the per-input pipelines.
+    let mut output_streams: Vec<Stream> = Vec::new();
+    let mut pipelines: Vec<SelectionPipeline> = Vec::with_capacity(selections.len());
+    for sel in &selections {
+        pipelines.push(build_pipeline(
+            opts,
+            &format_name,
+            &video_filter_specs,
+            &inputs[sel.file],
+            sel,
+            &mut output_streams,
+        )?);
+    }
+
+    // Open output
+    let mut output = OutputContext::create(output_path, &format_name, &output_streams)?;
+
+    // Demux -> decode -> (filter) -> encode -> mux, one input at a time.
+    let mut total_video_frames = 0u64;
+    for pipeline in &mut pipelines {
+        total_video_frames +=
+            run_pipeline(opts, &mut inputs[pipeline.file], pipeline, &mut output)?;
+    }
+
+    output.finish()?;
+
+    eprintln!("Output: {output_path}");
+    if pipelines.iter().any(|p| p.video_stream_idx.is_some()) {
+        eprintln!("  Video: {total_video_frames} frames");
+    }
+
+    Ok(())
+}
+
+/// Everything needed to process one selected input file: decoders/encoders
+/// for its selected streams plus the graphs for `-vf` / `-af`.
+struct SelectionPipeline {
+    file: usize,
+    video_stream_idx: Option<usize>,
+    audio_stream_idx: Option<usize>,
+    video_decoder: Option<Box<dyn Decoder>>,
+    video_encoder: Option<Box<dyn Encoder>>,
+    audio_decoder: Option<Box<dyn Decoder>>,
+    audio_encoder: Option<Box<dyn Encoder>>,
+    video_graph: Option<Graph>,
+    audio_graph: Option<Graph>,
+}
+
+/// Create decoders/encoders for one selection's streams and append their
+/// output streams to `output_streams`.
+fn build_pipeline(
+    opts: &CliOptions,
+    format_name: &str,
+    video_filter_specs: &[FilterSpec],
+    input: &InputContext,
+    sel: &InputSelection,
+    output_streams: &mut Vec<Stream>,
+) -> wedeo_core::Result<SelectionPipeline> {
+    let video_stream_idx = sel.video;
+    let audio_stream_idx = sel.audio;
     let mut video_decoder = None;
     let mut video_encoder = None;
     let mut audio_decoder = None;
     let mut audio_encoder = None;
-
-    // Output stream list for the muxer
-    let mut output_streams: Vec<Stream> = Vec::new();
 
     // --- Video ---
     if let Some(idx) = video_stream_idx {
@@ -1407,8 +1705,8 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
                 CodecId::from_name(name)
                     .ok_or_else(|| Error::Other(format!("Unknown video codec: '{name}'")))?
             } else {
-                let muxer_factory = format_registry::find_muxer_by_name(&format_name)
-                    .ok_or(Error::MuxerNotFound)?;
+                let muxer_factory =
+                    format_registry::find_muxer_by_name(format_name).ok_or(Error::MuxerNotFound)?;
                 let default_codec = muxer_factory.descriptor().video_codec;
                 if default_codec == CodecId::None {
                     return Err(Error::Other(format!(
@@ -1423,13 +1721,18 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
             enc_builder.height = in_params.height;
             enc_builder.pixel_format = in_params.pixel_format;
             enc_builder.time_base = in_stream.time_base;
+            // Honor `EncoderBuilder::with_thread_count`; `-threads` also keeps
+            // its codec-private entry, which the builder reads as a fallback.
+            if let Some(count) = opts.thread_count {
+                enc_builder = enc_builder.with_thread_count(count);
+            }
 
             if let Some(br) = opts.bitrate_video {
                 enc_builder.bit_rate = br;
             }
 
             // Check if muxer needs GLOBAL_HEADER
-            if let Some(muxer_factory) = format_registry::find_muxer_by_name(&format_name) {
+            if let Some(muxer_factory) = format_registry::find_muxer_by_name(format_name) {
                 let mflags = muxer_factory.descriptor().flags;
                 if mflags.contains(wedeo_format::muxer::OutputFormatFlags::GLOBALHEADER) {
                     enc_builder.flags |= CodecFlags::GLOBAL_HEADER;
@@ -1476,8 +1779,8 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
                 CodecId::from_name(name)
                     .ok_or_else(|| Error::Other(format!("Unknown audio codec: '{name}'")))?
             } else {
-                let muxer_factory = format_registry::find_muxer_by_name(&format_name)
-                    .ok_or(Error::MuxerNotFound)?;
+                let muxer_factory =
+                    format_registry::find_muxer_by_name(format_name).ok_or(Error::MuxerNotFound)?;
                 let default_codec = muxer_factory.descriptor().audio_codec;
                 if default_codec == CodecId::None {
                     return Err(Error::Other(format!(
@@ -1492,6 +1795,9 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
             enc_builder.sample_format = in_params.sample_format;
             enc_builder.channel_layout = in_params.channel_layout.clone();
             enc_builder.time_base = in_stream.time_base;
+            if let Some(count) = opts.thread_count {
+                enc_builder = enc_builder.with_thread_count(count);
+            }
 
             if let Some(br) = opts.bitrate_audio {
                 enc_builder.bit_rate = br;
@@ -1513,28 +1819,49 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
         }
     }
 
-    let mut video_graph = match video_stream_idx {
+    let video_graph = match video_stream_idx {
         Some(idx) if !opts.copy_video => {
-            build_graph(&video_filter_specs, input.streams[idx].time_base, true)?
+            build_graph(video_filter_specs, input.streams[idx].time_base, true)?
         }
         _ => None,
     };
-    let mut audio_graph = match audio_stream_idx {
+    let audio_graph = match audio_stream_idx {
         Some(idx) if !opts.copy_audio && !opts.audio_filters.is_empty() => {
             build_graph(&opts.audio_filters, input.streams[idx].time_base, false)?
         }
         _ => None,
     };
 
-    // Open output
-    let mut output = OutputContext::create(output_path, &format_name, &output_streams)?;
+    Ok(SelectionPipeline {
+        file: sel.file,
+        video_stream_idx,
+        audio_stream_idx,
+        video_decoder,
+        video_encoder,
+        audio_decoder,
+        audio_encoder,
+        video_graph,
+        audio_graph,
+    })
+}
 
-    // --- Main processing loop ---
-    let started = Instant::now();
+/// Demux -> decode -> (filter) -> encode -> mux for one selected input,
+/// draining filters, decoders and encoders at EOF. Returns the video frame
+/// count for the final `Output:` summary.
+fn run_pipeline(
+    opts: &CliOptions,
+    input: &mut InputContext,
+    pipeline: &mut SelectionPipeline,
+    output: &mut OutputContext,
+) -> wedeo_core::Result<u64> {
+    let video_stream_idx = pipeline.video_stream_idx;
+    let audio_stream_idx = pipeline.audio_stream_idx;
+    let window = time_window(opts, input, video_stream_idx, audio_stream_idx);
     let mut video_frames_out = 0u64;
     let mut packets_out = 0u64;
     let mut last_time_us = 0i64;
     let frame_limit = opts.frames_video.unwrap_or(u64::MAX);
+    let started = Instant::now();
 
     // Demux -> decode -> (filter) -> encode -> mux
     loop {
@@ -1575,18 +1902,20 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
                 output.write_packet(&packet)?;
                 video_frames_out += 1;
                 packets_out += 1;
-            } else if let (Some(dec), Some(enc)) = (&mut video_decoder, &mut video_encoder) {
+            } else if let (Some(dec), Some(enc)) =
+                (&mut pipeline.video_decoder, &mut pipeline.video_encoder)
+            {
                 dec.send_packet(Some(&packet))?;
                 loop {
                     match dec.receive_frame() {
                         Ok(frame) => {
-                            let frames = filter_frames(video_graph.as_mut(), frame)?;
+                            let frames = filter_frames(pipeline.video_graph.as_mut(), frame)?;
                             for frame in frames {
                                 if video_frames_out >= frame_limit {
                                     break;
                                 }
                                 enc.send_frame(Some(&frame))?;
-                                drain_encoder_to_output(&mut **enc, &mut output)?;
+                                drain_encoder_to_output(&mut **enc, output)?;
                                 video_frames_out += 1;
                                 packets_out += 1;
                             }
@@ -1613,15 +1942,17 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
             if opts.copy_audio {
                 output.write_packet(&packet)?;
                 packets_out += 1;
-            } else if let (Some(dec), Some(enc)) = (&mut audio_decoder, &mut audio_encoder) {
+            } else if let (Some(dec), Some(enc)) =
+                (&mut pipeline.audio_decoder, &mut pipeline.audio_encoder)
+            {
                 dec.send_packet(Some(&packet))?;
                 loop {
                     match dec.receive_frame() {
                         Ok(frame) => {
-                            let frames = filter_frames(audio_graph.as_mut(), frame)?;
+                            let frames = filter_frames(pipeline.audio_graph.as_mut(), frame)?;
                             for frame in frames {
                                 enc.send_frame(Some(&frame))?;
-                                drain_encoder_to_output(&mut **enc, &mut output)?;
+                                drain_encoder_to_output(&mut **enc, output)?;
                                 packets_out += 1;
                             }
                         }
@@ -1643,29 +1974,29 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
     }
 
     // Drain filters, decoders and encoders.
-    if let Some(graph) = video_graph.as_mut() {
+    if let Some(graph) = pipeline.video_graph.as_mut() {
         graph.close()?;
         for frame in graph.drain() {
             if video_frames_out < frame_limit
-                && let Some(enc) = video_encoder.as_mut()
+                && let Some(enc) = pipeline.video_encoder.as_mut()
             {
                 enc.send_frame(Some(&frame))?;
-                drain_encoder_to_output(&mut **enc, &mut output)?;
+                drain_encoder_to_output(&mut **enc, output)?;
                 video_frames_out += 1;
                 packets_out += 1;
             }
         }
     }
-    if let (Some(dec), Some(enc)) = (&mut video_decoder, &mut video_encoder) {
+    if let (Some(dec), Some(enc)) = (&mut pipeline.video_decoder, &mut pipeline.video_encoder) {
         dec.send_packet(None)?;
         loop {
             match dec.receive_frame() {
                 Ok(frame) => {
-                    let frames = filter_frames(video_graph.as_mut(), frame)?;
+                    let frames = filter_frames(pipeline.video_graph.as_mut(), frame)?;
                     for frame in frames {
                         if video_frames_out < frame_limit {
                             enc.send_frame(Some(&frame))?;
-                            drain_encoder_to_output(&mut **enc, &mut output)?;
+                            drain_encoder_to_output(&mut **enc, output)?;
                             video_frames_out += 1;
                             packets_out += 1;
                         }
@@ -1676,28 +2007,28 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
             }
         }
         enc.send_frame(None)?;
-        drain_encoder_to_output(&mut **enc, &mut output)?;
+        drain_encoder_to_output(&mut **enc, output)?;
     }
 
-    if let Some(graph) = audio_graph.as_mut() {
+    if let Some(graph) = pipeline.audio_graph.as_mut() {
         graph.close()?;
         for frame in graph.drain() {
-            if let Some(enc) = audio_encoder.as_mut() {
+            if let Some(enc) = pipeline.audio_encoder.as_mut() {
                 enc.send_frame(Some(&frame))?;
-                drain_encoder_to_output(&mut **enc, &mut output)?;
+                drain_encoder_to_output(&mut **enc, output)?;
                 packets_out += 1;
             }
         }
     }
-    if let (Some(dec), Some(enc)) = (&mut audio_decoder, &mut audio_encoder) {
+    if let (Some(dec), Some(enc)) = (&mut pipeline.audio_decoder, &mut pipeline.audio_encoder) {
         dec.send_packet(None)?;
         loop {
             match dec.receive_frame() {
                 Ok(frame) => {
-                    let frames = filter_frames(audio_graph.as_mut(), frame)?;
+                    let frames = filter_frames(pipeline.audio_graph.as_mut(), frame)?;
                     for frame in frames {
                         enc.send_frame(Some(&frame))?;
-                        drain_encoder_to_output(&mut **enc, &mut output)?;
+                        drain_encoder_to_output(&mut **enc, output)?;
                         packets_out += 1;
                     }
                 }
@@ -1706,7 +2037,7 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
             }
         }
         enc.send_frame(None)?;
-        drain_encoder_to_output(&mut **enc, &mut output)?;
+        drain_encoder_to_output(&mut **enc, output)?;
     }
 
     print_stats(
@@ -1716,14 +2047,7 @@ fn cmd_transcode(opts: &CliOptions) -> wedeo_core::Result<()> {
         started,
         last_time_us,
     );
-    output.finish()?;
-
-    eprintln!("Output: {output_path}");
-    if video_stream_idx.is_some() {
-        eprintln!("  Video: {video_frames_out} frames");
-    }
-
-    Ok(())
+    Ok(video_frames_out)
 }
 
 fn filter_frames(graph: Option<&mut Graph>, frame: Frame) -> wedeo_core::Result<Vec<Frame>> {
