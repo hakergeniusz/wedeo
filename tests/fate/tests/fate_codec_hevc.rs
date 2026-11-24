@@ -163,6 +163,51 @@ fn hevc_chroma_predicted_when_all_cbf_zero() {
     );
 }
 
+/// Regression for the SAO component-state bug in `hls_sao_param`. FFmpeg
+/// keeps a single `SAOParams` per CTB and infers `sao_type_idx[2]` /
+/// `sao_eo_class[2]` from the CB component. Wedeo previously constructed a
+/// fresh struct for every component, so the CR component saw a default
+/// `NotApplied` type, skipped all of its CABAC bins and desynchronised the
+/// decoder at the very first `split_cu_flag` (first TU became 16x16/mode 34
+/// with all CBFs zero instead of the expected 64x64 CU with cbf_l/cb/cr=1).
+///
+/// Ground truth extracted from debug FFmpeg (`ffmpeg_g`, bitexact): the first
+/// four luma samples of this 4:4:4 64x64 vector are 82 83 84 84. The
+/// desynchronised decoder produced 80 80 80 80.
+#[test]
+fn hevc_sao_chroma_state_keeps_first_ctu_cabac_in_sync() {
+    let data = match std::fs::read(fate_path("cbf_cr_cb_TUDepth_4_circle.h265")) {
+        Ok(d) => d,
+        Err(_) => return, // sample not installed in this shard
+    };
+    let mut decoder = match DecoderBuilder::new(codec_params(data.clone())).open() {
+        Ok(d) => d,
+        Err(e) => panic!("failed to open HEVC decoder: {e}"),
+    };
+    let mut packet = Packet::from_slice(&data);
+    packet.pts = 0;
+    let _ = decoder.send_packet(Some(&packet));
+    let _ = decoder.send_packet(None);
+    loop {
+        match decoder.receive_frame() {
+            Ok(frame) => {
+                let Some(video) = frame.video() else { continue };
+                let plane = &video.planes[0];
+                let start = plane.offset;
+                assert_eq!(
+                    &plane.buffer.data()[start..start + 4],
+                    &[0x82, 0x83, 0x84, 0x84],
+                    "first luma samples disagree with FFmpeg after SAO decoding"
+                );
+                return;
+            }
+            Err(wedeo_core::Error::Again) | Err(wedeo_core::Error::Eof) => break,
+            Err(_) => break,
+        }
+    }
+    panic!("no frame decoded from cbf_cr_cb_TUDepth_4_circle.h265");
+}
+
 #[test]
 fn hevc_decoder_decodes_fate_vectors() {
     let cases = ["pir.hevc", "flush-reuse.hevc", "atc-sei-reset.hevc"];
