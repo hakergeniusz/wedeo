@@ -705,3 +705,123 @@ fn fate_h264_high422_8bit_frame_layout() {
     assert_eq!(linesizes[1], linesizes[0] / 2);
     assert_eq!(linesizes[2], linesizes[0] / 2);
 }
+
+/// High 10 (4:2:0) with inter frames: the decoder must run the full-precision
+/// (`u16`) reconstruction path for skip/inter macroblocks without panicking,
+/// and every output frame must keep the 10-bit geometry (2 bytes/sample,
+/// half-resolution chroma). This exercises `mc_luma_u16` / `mc_chroma_u16` and
+/// `reconstruct_inter_mb_hires` end-to-end.
+#[test]
+fn fate_h264_high10_inter_full_precision_decode() {
+    let dir = match std::env::var("FATE_SUITE") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => return,
+    };
+    let path = dir.join("h264-high-depth").join("normal-10.h264");
+    if !path.exists() {
+        return;
+    }
+
+    let mut input = InputContext::open(path.to_str().unwrap()).unwrap();
+    let params = input.streams[0].codec_params.clone();
+    let factory = registry::find_decoder(params.codec_id).unwrap();
+    let mut decoder = factory.create(params).unwrap();
+
+    let mut frames = 0usize;
+    loop {
+        match input.read_packet() {
+            Ok(pkt) => {
+                decoder.send_packet(Some(&pkt)).unwrap();
+                loop {
+                    match decoder.receive_frame() {
+                        Ok(frame) => {
+                            if let FrameData::Video(v) = frame.data {
+                                assert_eq!(v.format, PixelFormat::Yuv420p10le);
+                                assert_eq!(v.width, 352);
+                                assert_eq!(v.height, 288);
+                                assert_eq!(v.planes.len(), 3);
+                                for plane in &v.planes {
+                                    assert_eq!(plane.buffer.size() % 2, 0);
+                                }
+                                assert_eq!(
+                                    v.planes[1].buffer.size(),
+                                    v.planes[0].buffer.size() / 4
+                                );
+                                assert_eq!(
+                                    v.planes[2].buffer.size(),
+                                    v.planes[0].buffer.size() / 4
+                                );
+                            }
+                            frames += 1;
+                        }
+                        Err(Error::Again) => break,
+                        Err(e) => panic!("receive_frame error: {:?}", e),
+                    }
+                }
+            }
+            Err(Error::Eof) => {
+                let _ = decoder.send_packet(None);
+                loop {
+                    match decoder.receive_frame() {
+                        Ok(frame) => {
+                            if let FrameData::Video(v) = frame.data {
+                                assert_eq!(v.format, PixelFormat::Yuv420p10le);
+                                frames += 1;
+                            }
+                        }
+                        Err(Error::Again) | Err(Error::Eof) => break,
+                        Err(e) => panic!("receive_frame error: {:?}", e),
+                    }
+                }
+                break;
+            }
+            Err(e) => panic!("read_packet error: {:?}", e),
+        }
+    }
+    assert_eq!(frames, 10, "normal-10.h264 must decode all 10 frames");
+}
+
+/// Bitexact raw-YUV parity target for the High 10 inter path. Currently blocked
+/// by high-depth dequant coefficient overflow (`dequant.rs`) and intra residual
+/// divergence outside this work unit; kept ignored so the targeted parity can
+/// be flipped on once those land. Enable with
+/// `cargo test ... fate_h264_high10_inter_bitexact -- --ignored`.
+#[test]
+#[ignore = "blocked by high-depth dequant/intra fixes in other files"]
+fn fate_h264_high10_inter_bitexact() {
+    let dir = match std::env::var("FATE_SUITE") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => return,
+    };
+    let path = dir.join("h264-high-depth").join("normal-10.h264");
+    if !path.exists() {
+        return;
+    }
+    let wedeo = std::env::var("CARGO_BIN_EXE_wedeo-framecrc")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("wedeo-framecrc"));
+    let output = std::process::Command::new(wedeo)
+        .arg(&path)
+        .output()
+        .expect("run wedeo-framecrc");
+    let wedeo_out = String::from_utf8_lossy(&output.stdout);
+    let wedeo_crcs: Vec<String> = wedeo_out
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.rsplit(',').next().unwrap().trim().to_string())
+        .collect();
+    let ffmpeg = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-bitexact", "-i"])
+        .arg(&path)
+        .args(["-f", "framecrc", "-"])
+        .output()
+        .expect("run ffmpeg");
+    let ffmpeg_out = String::from_utf8_lossy(&ffmpeg.stdout);
+    let ffmpeg_crcs: Vec<String> = ffmpeg_out
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.rsplit(',').next().unwrap().trim().to_string())
+        .collect();
+    assert!(!wedeo_crcs.is_empty());
+    assert_eq!(wedeo_crcs, ffmpeg_crcs);
+}

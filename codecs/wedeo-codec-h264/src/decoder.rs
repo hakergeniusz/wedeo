@@ -74,6 +74,30 @@ pub(crate) fn pixel_format_for(bit_depth: u8, chroma_format_idc: u8) -> PixelFor
     }
 }
 
+/// Full-precision high-depth reconstruction for an MB that the generic
+/// (`u8`) path has just decoded. `mb` is `Some` when the caller still owns the
+/// parsed macroblock (CABAC / direct CAVLC), which lets us handle I_PCM.
+#[allow(clippy::too_many_arguments)] // matches the decoder's per-MB parameter set
+fn post_decode_mb_hires(
+    fdc: &mut FrameDecodeContext,
+    hdr: &SliceHeader,
+    mb_x: u32,
+    mb_y: u32,
+    ref_pics: &[Arc<SharedPicture>],
+    ref_pics_l1: &[Arc<SharedPicture>],
+    mb: Option<&mut crate::cavlc::Macroblock>,
+) {
+    if !fdc.pic.is_high_depth() {
+        return;
+    }
+    if let Some(mb) = mb
+        && mb.is_pcm
+    {
+        crate::hires::decode_pcm_mb_hires(fdc, mb, mb_x, mb_y);
+    }
+    crate::hires::reconstruct_inter_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1);
+}
+
 // ---------------------------------------------------------------------------
 // Decoder state
 // ---------------------------------------------------------------------------
@@ -1636,6 +1660,7 @@ impl H264Decoder {
                     } else {
                         mb::decode_skip_mb(fdc, hdr, skip_x, skip_y, ref_pics, ref_pics_l1);
                     }
+                    post_decode_mb_hires(fdc, hdr, skip_x, skip_y, ref_pics, ref_pics_l1, None);
                     mb_addr += 1;
                     mbs_decoded += 1;
                     // Inline deblock + publish with 1-row delay
@@ -1691,6 +1716,7 @@ impl H264Decoder {
                 ref_pics,
                 ref_pics_l1,
             )?;
+            post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, None);
             mb_addr += 1;
             mbs_decoded += 1;
             // Inline deblock + publish with 1-row delay
@@ -1850,6 +1876,7 @@ impl H264Decoder {
                         } else {
                             mb::decode_skip_mb(fdc, hdr, mb_x, cur_y, ref_pics, ref_pics_l1);
                         }
+                        post_decode_mb_hires(fdc, hdr, mb_x, cur_y, ref_pics, ref_pics_l1, None);
                         mbs_decoded += 1;
                         continue; // next pair_pos
                     }
@@ -1877,6 +1904,7 @@ impl H264Decoder {
                     && fdc.slice_table[(mb_addr - mb_width) as usize] == fdc.current_slice;
 
                 mb::decode_macroblock(fdc, br, hdr, sps, pps, mb_x, cur_y, ref_pics, ref_pics_l1)?;
+                post_decode_mb_hires(fdc, hdr, mb_x, cur_y, ref_pics, ref_pics_l1, None);
                 mbs_decoded += 1;
             }
 
@@ -2036,6 +2064,7 @@ impl H264Decoder {
                         } else {
                             mb::decode_skip_mb(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1);
                         }
+                        post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, None);
                         fdc.last_qscale_diff = 0;
 
                         // Update CABAC neighbor context for skip MB
@@ -2111,6 +2140,7 @@ impl H264Decoder {
 
                 // Apply entropy-agnostic processing (dequant, IDCT, pred, MC, neighbor update)
                 mb::apply_macroblock(fdc, &mut mb, hdr, pps, mb_x, mb_y, ref_pics, ref_pics_l1)?;
+                post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, Some(&mut mb));
 
                 // Write back MVD/ref from scan8 cache to flat storage, then update scalar fields
                 cache.write_back(&mut cabac_nb, mb_idx);
@@ -2358,6 +2388,7 @@ impl H264Decoder {
                         } else {
                             mb::decode_skip_mb(fdc, hdr, mb_x, cur_y, ref_pics, ref_pics_l1);
                         }
+                        post_decode_mb_hires(fdc, hdr, mb_x, cur_y, ref_pics, ref_pics_l1, None);
                         fdc.last_qscale_diff = 0;
 
                         cabac_nb.update_after_mb(
@@ -2452,6 +2483,7 @@ impl H264Decoder {
                 )?;
 
                 mb::apply_macroblock(fdc, &mut mb, hdr, pps, mb_x, cur_y, ref_pics, ref_pics_l1)?;
+                post_decode_mb_hires(fdc, hdr, mb_x, cur_y, ref_pics, ref_pics_l1, Some(&mut mb));
 
                 cache.write_back(cabac_nb, mb_idx);
                 cabac_nb.update_after_mb(
