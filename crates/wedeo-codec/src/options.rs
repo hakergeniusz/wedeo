@@ -45,6 +45,20 @@ impl CodecOptions {
         self.get(key).and_then(|v| v.parse().ok())
     }
 
+    /// Get the `threads` option parsed as a thread count (`u32`).
+    ///
+    /// Returns `None` when the option is absent or cannot be parsed. The value
+    /// `"auto"` maps to `0`, matching the CLI (which converts `-threads auto`
+    /// to `"0"`) and FFmpeg's convention that a zero count means "let the
+    /// runtime decide".
+    pub fn get_thread_count(&self) -> Option<u32> {
+        match self.get("threads") {
+            Some("auto") => Some(0),
+            Some(value) => value.parse::<u32>().ok(),
+            None => None,
+        }
+    }
+
     /// Get an option parsed as `bool`.
     ///
     /// Recognizes "1", "true", "yes" as true and "0", "false", "no" as false,
@@ -109,6 +123,24 @@ mod tests {
         assert_eq!(opts.get_bool("disabled"), Some(false));
         assert_eq!(opts.get_i64("bad_int"), None);
         assert_eq!(opts.get_i64("missing"), None);
+    }
+
+    #[test]
+    fn test_get_thread_count() {
+        let mut opts = CodecOptions::new();
+        assert_eq!(opts.get_thread_count(), None);
+
+        opts.set("threads", "4");
+        assert_eq!(opts.get_thread_count(), Some(4));
+
+        opts.set("threads", "auto");
+        assert_eq!(opts.get_thread_count(), Some(0));
+
+        opts.set("threads", "0");
+        assert_eq!(opts.get_thread_count(), Some(0));
+
+        opts.set("threads", "bogus");
+        assert_eq!(opts.get_thread_count(), None);
     }
 
     #[test]
