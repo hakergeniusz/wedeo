@@ -226,7 +226,9 @@ pub fn filter_level_for_mb(header: &HeaderInfo, mb: &MacroblockState) -> FilterS
         filter_level += header.lf_delta.ref_delta[mb.ref_frame.index()] as i32;
         filter_level += header.lf_delta.mode[mb.mode as usize] as i32;
     }
-    filter_level = (filter_level as u32 & 63) as i32; // av_clip_uintp2(..., 6)
+    // av_clip_uintp2(filter_level, 6) clamps to [0, 63]; a bitmask would
+    // wrap negative per-MB deltas into large filter strengths instead.
+    filter_level = crate::header::av_clip_uintp2(filter_level, 6) as i32;
 
     let mut interior_limit = filter_level;
     if header.filter_sharpness != 0 {
