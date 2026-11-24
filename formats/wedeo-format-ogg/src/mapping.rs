@@ -929,9 +929,7 @@ impl OggStream {
                 }
             }
         }
-        if self.psize > 0 {
-            self.pduration = 1;
-        }
+        self.pduration = 1;
         Ok(0)
     }
 
