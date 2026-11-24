@@ -5,10 +5,10 @@
 //!   MPEG-2 elementary stream (I and P frames, no B frames);
 //! * decodes the available FATE MPEG-2 samples and reports per-sample
 //!   conformance counts. Frame-picture streams (I/P and B), complementary
-//!   field pictures and 4:2:2 chroma are all bitexact. The field-encoding
-//!   sample is bitexact except for its final, truncated access unit, where
-//!   FFmpeg's error concealment fills slices missing from the sample; only a
-//!   conformance floor is asserted for it.
+//!   field pictures and 4:2:2 chroma are all bitexact. The final access unit
+//!   of the field-encoding sample is truncated; its missing slices are filled
+//!   from FFmpeg's recycled picture buffer, just as FFmpeg does for field
+//!   pictures (which skip error resilience).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -228,7 +228,7 @@ fn test_frame_picture_bitexact_framecrc() {
 fn test_fate_mpeg2_sample_conformance() {
     let mut checked = 0usize;
     let mut t_mpg_bitexact = None;
-    let mut field_conformance = None;
+    let mut field_bitexact = None;
     for &relative in MPEG2_SAMPLES {
         let Some(path) = wedeo_fate::fate_sample(relative) else {
             eprintln!("Skipping missing FATE sample: {relative}");
@@ -260,9 +260,11 @@ fn test_fate_mpeg2_sample_conformance() {
             // Second-field DMV macroblocks must perform both field
             // predictions; dropping the second one leaves smooth residual
             // errors that accumulate through the GOP. The final access unit
-            // is truncated in the sample, so FFmpeg's error concealment makes
-            // that one frame non-bitexact; assert a floor instead.
-            field_conformance = Some((wedeo.len(), ffmpeg.len(), matching));
+            // is truncated in the sample: FFmpeg does not conceal errors in
+            // field pictures, so its missing rows show the contents of the
+            // recycled frame buffer (frame N-3). Wedeo reproduces that by
+            // starting each field pair from the same recycled picture.
+            field_bitexact = Some((wedeo.len(), ffmpeg.len(), matching));
         }
         assert!(!frames.is_empty(), "{relative}: decoded no frames");
         checked += 1;
@@ -275,15 +277,14 @@ fn test_fate_mpeg2_sample_conformance() {
         assert_eq!(wedeo_len, ffmpeg_len, "t.mpg: frame count mismatch");
         assert_eq!(matching, ffmpeg_len, "t.mpg: every frame must be bitexact");
     }
-    if let Some((wedeo_len, ffmpeg_len, matching)) = field_conformance {
+    if let Some((wedeo_len, ffmpeg_len, matching)) = field_bitexact {
         assert_eq!(
             wedeo_len, ffmpeg_len,
             "field-encoding sample: frame count mismatch"
         );
-        assert!(
-            matching >= 29,
-            "field-encoding sample: expected at least 29/{} bitexact, got {matching}",
-            ffmpeg_len
+        assert_eq!(
+            matching, ffmpeg_len,
+            "field-encoding sample: every frame must be bitexact"
         );
     }
 }

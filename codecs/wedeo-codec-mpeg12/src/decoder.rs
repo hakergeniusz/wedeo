@@ -171,6 +171,13 @@ pub struct Mpeg12Decoder {
     next_pic: Option<Picture>,
     cur_pic: Option<Picture>,
     picture_in_progress: bool,
+    /// FFmpeg recycles the oldest reference picture's buffer for each new
+    /// frame. MPEG-2 field pictures skip error resilience entirely
+    /// (`er_supported()` in error_resilience.c rejects `field_picture`), so
+    /// slices missing from a truncated field leave that buffer's previous
+    /// contents visible. Keep the last three finished frames to reproduce
+    /// those bytes: at frame N the recycled buffer held frame N-3.
+    recycled_pics: VecDeque<Picture>,
 
     // Bitstream accumulation / streaming parser
     buf: Vec<u8>,
@@ -262,6 +269,7 @@ impl Mpeg12Decoder {
             next_pic: None,
             cur_pic: None,
             picture_in_progress: false,
+            recycled_pics: VecDeque::new(),
             buf: Vec::new(),
             pending_code: None,
             pending_start: 0,
@@ -335,6 +343,10 @@ impl Mpeg12Decoder {
             && self.first_field
             && let Some(pic) = self.cur_pic.take()
         {
+            self.recycled_pics.push_back(pic.clone());
+            while self.recycled_pics.len() > 3 {
+                self.recycled_pics.pop_front();
+            }
             let frame = self.picture_to_frame(&pic, self.pair_pts, self.pair_pict_type);
             self.enqueue_frame(self.pair_temporal, self.pair_pict_type, frame);
             self.first_field = false;
@@ -631,6 +643,13 @@ impl Mpeg12Decoder {
         if pic.pict_type != 3 {
             self.next_pic = Some(pic.clone());
         }
+        // Keep the three most recently finished pictures: at the start of
+        // frame N, FFmpeg's buffer pool hands out the buffer last used by
+        // frame N-3 (the reference released when frame N-1 started).
+        self.recycled_pics.push_back(pic.clone());
+        while self.recycled_pics.len() > 3 {
+            self.recycled_pics.pop_front();
+        }
         let frame = self.picture_to_frame(&pic, self.pair_pts, self.pair_pict_type);
         self.enqueue_frame(self.pair_temporal, self.pair_pict_type, frame);
         Ok(())
@@ -656,7 +675,20 @@ impl Mpeg12Decoder {
         if self.first_field || !field_pic {
             let coded_w = self.mb_width * 16;
             let coded_h = self.mb_height * 16;
-            let pic = Picture::new(coded_w, coded_h, self.chroma_format, self.pict_type);
+            // ff_mpv_frame_start() allocates a new picture from FFmpeg's
+            // buffer pool. MPEG-2 field pictures do not get error
+            // concealment (error_resilience.c:er_supported() rejects them),
+            // so slices missing from a truncated field leave the recycled
+            // buffer's previous contents visible. The oldest live reference
+            // at frame N is frame N-3; start from that picture so unwritten
+            // rows match FFmpeg instead of staying zero.
+            let mut pic = if field_pic {
+                self.recycled_pics.front().cloned()
+            } else {
+                None
+            }
+            .unwrap_or_else(|| Picture::new(coded_w, coded_h, self.chroma_format, self.pict_type));
+            pic.pict_type = self.pict_type;
             // FFmpeg's ff_mpv_frame_start(): for I/P frames the previous
             // future reference becomes the past reference, and the new
             // picture becomes the future reference for subsequent B frames.
@@ -1692,6 +1724,7 @@ impl Decoder for Mpeg12Decoder {
         self.cur_pic = None;
         self.last_pic = None;
         self.next_pic = None;
+        self.recycled_pics.clear();
         self.pict_type = 0;
         self.first_field = false;
         self.pair_pts = wedeo_core::timestamp::NOPTS_VALUE;
