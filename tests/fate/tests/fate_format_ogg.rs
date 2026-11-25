@@ -283,6 +283,6 @@ fn test_framecrc_bitexact() {
         }
         checked += 1;
     }
-    assert!(checked > 0, "no FATE Ogg samples available");
+    wedeo_fate::skip_if_no_samples!(checked, "Ogg");
     assert_eq!(failed, 0, "{failed} of {checked} Ogg samples diverged");
 }

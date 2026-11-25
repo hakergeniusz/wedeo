@@ -165,6 +165,11 @@ jobs:
   deny:
     name: Deny
     runs-on: ubuntu-latest
+    env:
+      # The cargo-deny-action image only ships Rust 1.85.0. RUSTUP_TOOLCHAIN
+      # outranks rust-toolchain.toml (channel = stable), avoiding a needless
+      # stable download inside the container.
+      RUSTUP_TOOLCHAIN: "1.85.0"
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2

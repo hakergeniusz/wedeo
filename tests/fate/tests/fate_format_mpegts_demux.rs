@@ -243,10 +243,7 @@ fn fate_payload_md5_matches_ffmpeg() {
         );
         tested += 1;
     }
-    assert!(
-        tested > 0,
-        "no FATE MPEG-TS payload MD5 references available"
-    );
+    wedeo_fate::skip_if_no_samples!(tested, "MPEG-TS payload MD5");
 }
 
 #[test]

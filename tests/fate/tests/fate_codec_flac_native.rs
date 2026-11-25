@@ -239,10 +239,7 @@ fn test_flac_decode_bitexact_and_framecrc() {
         compare_sample(relative, &sample, sample_fmt, pcm_codec);
         checked += 1;
     }
-    assert!(
-        checked > 0,
-        "no FATE FLAC samples were available; set FATE_SUITE to a Fate suite directory"
-    );
+    wedeo_fate::skip_if_no_samples!(checked, "FLAC");
 }
 
 /// Synthetic streams covering subframe/decorrelation variants absent from FATE:

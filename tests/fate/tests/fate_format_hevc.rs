@@ -189,7 +189,7 @@ fn packet_crcs_match_ffmpeg_copy_for_fate_vectors() {
         packets += actual.len();
         compared += 1;
     }
-    assert!(compared > 0, "no runnable FATE HEVC packet vectors");
+    wedeo_fate::skip_if_no_samples!(compared, "HEVC packet CRC");
     eprintln!("PACKET_CONFORMANCE compared={compared} packets={packets}");
 }
 
@@ -237,7 +237,7 @@ fn all_fate_hevc_packet_crcs_match_ffmpeg() {
         }
     }
     eprintln!("PACKET_SURVEY total={total} matched={matched} packets={packets}");
-    assert!(total > 0, "no FATE HEVC vectors were available");
+    wedeo_fate::skip_if_no_samples!(total, "HEVC packet survey");
     assert!(
         mismatched.is_empty(),
         "{} of {total} HEVC vectors mismatched: {}",

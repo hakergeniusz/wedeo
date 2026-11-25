@@ -128,7 +128,7 @@ fn fate_hevc_parameter_sets() {
         }
         checked += 1;
     }
-    assert!(checked > 0, "no FATE HEVC vectors were available");
+    wedeo_fate::skip_if_no_samples!(checked, "HEVC parameter sets");
     assert!(
         slice_headers_checked > 0,
         "no real slice headers were parsed"

@@ -5,10 +5,9 @@
 all-features = true
 
 [advisories]
-ignore = [
-    { id = "RUSTSEC-2024-0384", reason = "instant is transitive via minifb — no upgrade available" },
-    { id = "RUSTSEC-2024-0436", reason = "paste is transitive via rav1d — no upgrade available" },
-]
+# All advisories that previously needed ignores have semver-compatible fixes;
+# Cargo.lock is updated to those versions. Keep this list empty.
+ignore = []
 
 [licenses]
 confidence-threshold = 0.8

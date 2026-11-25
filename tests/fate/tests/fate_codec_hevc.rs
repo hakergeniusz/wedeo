@@ -260,5 +260,5 @@ fn hevc_decoder_decodes_fate_vectors() {
         }
         checked += 1;
     }
-    assert!(checked > 0, "no runnable FATE HEVC vectors were available");
+    wedeo_fate::skip_if_no_samples!(checked, "HEVC decode");
 }

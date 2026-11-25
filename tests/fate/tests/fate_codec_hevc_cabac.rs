@@ -94,7 +94,7 @@ fn fate_hevc_cabac_real_slices() {
             break; // one slice per sample is enough to exercise the engine
         }
     }
-    assert!(slices_checked > 0, "no real FATE HEVC slices were decoded");
+    wedeo_fate::skip_if_no_samples!(slices_checked, "HEVC CABAC slice");
 }
 
 #[test]

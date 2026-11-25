@@ -269,10 +269,7 @@ fn test_fate_mpeg2_sample_conformance() {
         assert!(!frames.is_empty(), "{relative}: decoded no frames");
         checked += 1;
     }
-    assert!(
-        checked > 0,
-        "no FATE MPEG-2 samples available; set FATE_SUITE"
-    );
+    wedeo_fate::skip_if_no_samples!(checked, "MPEG-2");
     if let Some((wedeo_len, ffmpeg_len, matching)) = t_mpg_bitexact {
         assert_eq!(wedeo_len, ffmpeg_len, "t.mpg: frame count mismatch");
         assert_eq!(matching, ffmpeg_len, "t.mpg: every frame must be bitexact");

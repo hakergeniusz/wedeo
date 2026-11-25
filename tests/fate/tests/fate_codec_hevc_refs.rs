@@ -183,7 +183,7 @@ fn fate_hevc_refs_pipeline() {
         }
     }
 
-    assert!(streams > 0, "no FATE HEVC vectors available");
+    wedeo_fate::skip_if_no_samples!(streams, "HEVC refs");
     assert!(geometry > 0, "no parameter sets parsed");
     assert!(slices > 0, "no non-IRAP slice headers with an RPS parsed");
     assert!(rpl_ok > 0, "no reference list was built from a real RPS");

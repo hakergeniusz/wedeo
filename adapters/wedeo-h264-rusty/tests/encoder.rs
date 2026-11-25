@@ -5,7 +5,7 @@ use wedeo_codec::registry::find_encoder;
 use wedeo_core::buffer::Buffer;
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::Error;
-use wedeo_core::frame::{Frame, FrameData, VideoFrameData};
+use wedeo_core::frame::{Frame, FrameData};
 use wedeo_core::media_type::MediaType;
 use wedeo_core::packet::PacketFlags;
 use wedeo_core::pixel_format::PixelFormat;

@@ -200,8 +200,11 @@ fn probe_fate_flv_samples() {
     let Some(dir) = fate_suite_dir() else { return };
     let factory = find_demuxer_by_name("flv").unwrap();
     let mut checked = 0;
-    for entry in std::fs::read_dir(dir.join("flv")).unwrap() {
-        let path = entry.unwrap().path();
+    let Ok(entries) = std::fs::read_dir(dir.join("flv")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("flv") {
             continue;
         }
@@ -219,7 +222,7 @@ fn probe_fate_flv_samples() {
         );
         checked += 1;
     }
-    assert!(checked > 0, "no FATE FLV samples probed");
+    wedeo_fate::skip_if_no_samples!(checked, "FLV");
 }
 
 // ---------------------------------------------------------------------------
@@ -318,10 +321,14 @@ fn diagnostic_all_flv_samples() {
     if !ffmpeg_available() {
         return;
     }
+    let Some(root) = fate_suite_dir() else { return };
     let mut paths = Vec::new();
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        for e in std::fs::read_dir(dir).unwrap() {
-            let p = e.unwrap().path();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
             if p.is_dir() {
                 walk(&p, out);
             } else if p.extension().and_then(|x| x.to_str()) == Some("flv") {
@@ -329,14 +336,10 @@ fn diagnostic_all_flv_samples() {
             }
         }
     }
-    walk(&fate_suite_dir().unwrap(), &mut paths);
+    walk(&root, &mut paths);
     paths.sort();
     for path in paths {
-        let rel = path
-            .strip_prefix(fate_suite_dir().unwrap())
-            .unwrap()
-            .display()
-            .to_string();
+        let rel = path.strip_prefix(&root).unwrap().display().to_string();
         let out = Command::new("ffmpeg")
             .args(["-v", "error", "-bitexact", "-i"])
             .arg(&path)

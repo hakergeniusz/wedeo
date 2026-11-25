@@ -19,6 +19,24 @@ pub fn fate_sample(relative_path: &str) -> Option<PathBuf> {
     if path.exists() { Some(path) } else { None }
 }
 
+/// Return early from a test when zero optional FATE samples were checked.
+///
+/// Tests that `continue` past missing samples must not fail just because the
+/// FATE suite was not installed (CI has no samples). When at least one sample
+/// was checked, all comparisons still run and still fail normally.
+#[macro_export]
+macro_rules! skip_if_no_samples {
+    ($checked:expr, $what:literal) => {
+        if $checked == 0 {
+            eprintln!(
+                "SKIP: no {} FATE samples available (set FATE_SUITE to enable this test)",
+                $what
+            );
+            return;
+        }
+    };
+}
+
 /// Compute MD5 of a file.
 pub fn md5_file(path: &Path) -> std::io::Result<String> {
     let data = std::fs::read(path)?;
