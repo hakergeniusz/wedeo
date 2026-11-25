@@ -1,8 +1,8 @@
 # Wave I salvage / recovery notes (2026-11-24)
 
 ## State
-- `main` = `4d38b7d` (pushed to fork `main`). VP8 bit-exact (3364/3364), w72 VP9 SIMD, w78 CLI multi-input merged, Theora empty-packet duration fix (`4d38b7d`, bitexact FATE).
-- Gate: `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean (only pre-existing manifest warnings), VP8 + FATE VP8 tests green.
+- `main` = `75fa04c` (pushed to fork `main`). VP8 bit-exact (3364/3364), w72 VP9 SIMD, w78 CLI multi-input merged, Theora duration fix, Ogg cover-art/w79 (`83549e8`/`133fbd9`), H264 MBAFF termination alignment (`f2fa9be`), w85 structured framecrc comparison (`75fa04c`).
+- Gate: `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean (only pre-existing manifest warnings), full `wedeo-fate` suite green. JVT-AVC_V1 78/78 MATCH, JVT-FR-EXT 24/24 MATCH, H264 CAVLC FATE 52/52 BITEXACT. VP9 corpus 165/225 files bitexact (1434/2027 frames).
 - Disk: ~33 GB free on `/`. Guard in `scripts/agent_env.sh` aborts below 3 GB.
 - Subagent provider: **free usage limit reached** - no new subagents until user fixes provider. Main agent still works.
 
@@ -23,12 +23,12 @@
 |---|---|---|
 | agent/w72 | merged | VP9 SIMD (dsp/mc/simd). |
 | agent/w73 | merged | VP8 bit-exact inter prediction. |
-| agent/w77 | 5 files, +124/-397 | wedeo-play seek + stale w70/w71 deletions. Keep only `bins/wedeo-play/src/main.rs`. |
+| agent/w77 | skipped | Seek scaffolding only: adds generation/serial fields without keybinding, `Command::Seek`, flush or `ctx.seek()` call sites; does not compile as-is. Reimplement fresh if seek is wanted. |
 | agent/w78 | merged | CLI multi-input + filter_complex. |
-| agent/w79 | can merge | Ogg tests + cover-art support (102 packets bitexact). Old base; keep only Ogg/test additions. |
+| agent/w79 | merged | Ogg tests + cover-art support (102 packets bitexact), re-applied as `83549e8`/`133fbd9`. |
 | agent/w80 | 5 files, +148/-395 | FLV demux tests. Old base; keep only FLV/test additions. |
 | agent/w81 | 5 files, +176/-395 | AVI demux tests. Old base; keep only AVI/test additions. |
-| agent/w85 | 5 files, +318/-421 | FATE harness. Old base; keep only `tests/fate` additions. |
+| agent/w85 | merged | Structured field-level framecrc comparison (`tests/fate/src/lib.rs`, `75fa04c`), adapted with lifetime + fixture + clippy fixes. |
 
 **Do not merge any branch wholesale.** For pre-w70/w71 branches, re-apply only the files under the agent's ownership; the framework "deletions" are already in `main`.
 
