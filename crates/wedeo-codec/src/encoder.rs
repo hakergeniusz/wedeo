@@ -58,6 +58,14 @@ pub trait Encoder: Send {
 
     /// Flush the encoder (reset internal state).
     fn flush(&mut self);
+
+    /// Codec extradata (e.g. an `avcC` record for H.264 in MP4), if the
+    /// encoder produces any. Muxers that need out-of-band headers must be
+    /// given this before they write their header. Defaults to `None`, so
+    /// existing encoders are unaffected.
+    fn extradata(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// Builder for creating encoders.

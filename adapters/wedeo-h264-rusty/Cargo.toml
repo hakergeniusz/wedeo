@@ -1,0 +1,21 @@
+[package]
+name = "wedeo-h264-rusty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "H.264 encoder adapter for wedeo backed by the pure-Rust rusty_h264 encoder (BSD-2-Clause)"
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+tracing = { workspace = true }
+rusty_h264-encoder = { workspace = true }
+rusty_h264-common = { workspace = true }
+
+[lints]
+workspace = true

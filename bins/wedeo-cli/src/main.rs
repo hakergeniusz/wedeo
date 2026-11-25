@@ -58,6 +58,7 @@ use wedeo_format_mpegts_demux as _;
 use wedeo_format_mpegts_mux as _;
 use wedeo_format_ogg as _;
 use wedeo_format_wav as _;
+use wedeo_h264_rusty as _;
 use wedeo_rav1d as _;
 use wedeo_rav1e as _;
 use wedeo_symphonia as _;
@@ -1745,10 +1746,12 @@ fn build_pipeline(
             }
 
             let enc = enc_builder.open()?;
+            let encoder_extradata = enc.extradata();
             video_encoder = Some(enc);
 
             let mut out_params =
                 wedeo_codec::decoder::CodecParameters::new(out_codec_id, MediaType::Video);
+            out_params.extradata = encoder_extradata.unwrap_or_default();
             out_params.width = in_params.width;
             out_params.height = in_params.height;
             out_params.pixel_format = in_params.pixel_format;

@@ -2730,6 +2730,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rusty_h264-common"
+version = "0.17.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdde0fe62dd8d912ae1cb4a507df37d487c7d3f09c00225688516f2d577e2af1"
+dependencies = [
+ "bytemuck",
+ "once_cell",
+ "portable-atomic",
+ "wide",
+]
+
+[[package]]
+name = "rusty_h264-encoder"
+version = "0.17.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ecf0018e5589cd8ddae29193166022970766c1382377eb2cbbc069b0c0335ca"
+dependencies = [
+ "rusty_h264-common",
+]
+
+[[package]]
+name = "safe_arch"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3834,6 +3864,7 @@ dependencies = [
  "wedeo-format-ogg",
  "wedeo-format-wav",
  "wedeo-format-webm",
+ "wedeo-h264-rusty",
  "wedeo-rav1d",
  "wedeo-rav1e",
  "wedeo-symphonia",
@@ -4291,6 +4322,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wedeo-h264-rusty"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "rusty_h264-common",
+ "rusty_h264-encoder",
+ "tracing",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
 name = "wedeo-limits"
 version = "0.2.0"
 dependencies = [
@@ -4567,6 +4610,16 @@ dependencies = [
  "log",
  "raw-window-handle",
  "web-sys",
+]
+
+[[package]]
+name = "wide"
+version = "0.7.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
 ]
 
 [[package]]
