@@ -1898,7 +1898,7 @@ fn run_pipeline(
     // first picture is emitted. Drain only after a small batch so they can
     // overlap work across frames.
     let mut video_pending = 0u32;
-    const DECODE_BATCH: u32 = 16;
+    const DECODE_BATCH: u32 = 64;
     let started = Instant::now();
 
     // Demux -> decode -> (filter) -> encode -> mux
