@@ -2258,6 +2258,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-mpeg4video"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c672c6a3f66fcb04018cd00cdebe06b0ef2990a5a3ab5da6d51738ef86efa3e3"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "oxideav-prores"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3958,6 +3967,7 @@ dependencies = [
  "wedeo-format-webm",
  "wedeo-h264-rusty",
  "wedeo-h265-oxideav",
+ "wedeo-mpeg4-oxideav",
  "wedeo-prores-oxideav",
  "wedeo-rav1d",
  "wedeo-rav1e",
@@ -4443,6 +4453,17 @@ dependencies = [
 name = "wedeo-limits"
 version = "0.2.0"
 dependencies = [
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-mpeg4-oxideav"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "oxideav-core",
+ "oxideav-mpeg4video",
+ "wedeo-codec",
  "wedeo-core",
 ]
 

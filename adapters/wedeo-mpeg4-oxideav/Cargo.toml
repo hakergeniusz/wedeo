@@ -1,0 +1,20 @@
+[package]
+name = "wedeo-mpeg4-oxideav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "MPEG-4 Part 2 decoder and encoder adapters for wedeo backed by pure-Rust oxideav-mpeg4video (MIT)"
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+oxideav-mpeg4video = { workspace = true }
+oxideav-core = { workspace = true }
+
+[lints]
+workspace = true
