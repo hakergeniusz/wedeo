@@ -1,0 +1,20 @@
+[package]
+name = "wedeo-ffv1-oxideav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "FFV1 decoder and encoder adapters for wedeo backed by pure-Rust oxideav-ffv1 (MIT)"
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+oxideav-ffv1 = { workspace = true }
+oxideav-core = { workspace = true }
+
+[lints]
+workspace = true

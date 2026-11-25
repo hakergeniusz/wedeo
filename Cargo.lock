@@ -2249,6 +2249,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-ffv1"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c74b5a67147199ba46cef6b4571dcb4bc68b7d8068554a49661cd279bcb6472"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "oxideav-h265"
 version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3941,6 +3950,7 @@ dependencies = [
  "wedeo-codec-vp8",
  "wedeo-codec-vp9",
  "wedeo-core",
+ "wedeo-ffv1-oxideav",
  "wedeo-filter-copy",
  "wedeo-filter-crop",
  "wedeo-filter-format",
@@ -4166,6 +4176,17 @@ dependencies = [
  "wedeo-rav1d",
  "wedeo-rav1e",
  "wedeo-symphonia",
+]
+
+[[package]]
+name = "wedeo-ffv1-oxideav"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "oxideav-core",
+ "oxideav-ffv1",
+ "wedeo-codec",
+ "wedeo-core",
 ]
 
 [[package]]

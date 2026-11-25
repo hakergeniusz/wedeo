@@ -38,6 +38,7 @@ use wedeo_codec_mpegvideo as _;
 use wedeo_codec_pcm as _;
 use wedeo_codec_vp8 as _;
 use wedeo_codec_vp9 as _;
+use wedeo_ffv1_oxideav as _;
 use wedeo_filter_copy as _;
 use wedeo_filter_crop as _;
 use wedeo_filter_format as _;

@@ -32,6 +32,7 @@ wedeo-aac-oxideav = { workspace = true }
 wedeo-ac3-oxideav = { workspace = true }
 wedeo-prores-oxideav = { workspace = true }
 wedeo-mpeg4-oxideav = { workspace = true }
+wedeo-ffv1-oxideav = { workspace = true }
 wedeo-codec-vp9 = { workspace = true }
 wedeo-format-ivf = { workspace = true }
 wedeo-format-webm = { workspace = true }

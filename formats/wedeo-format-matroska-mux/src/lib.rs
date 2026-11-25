@@ -113,6 +113,8 @@ fn codec_id_string(codec_id: CodecId, mode: Mode) -> Option<&'static str> {
         CodecId::Mpeg2video => Some("V_MPEG2"),
         CodecId::Mpeg1video => Some("V_MPEG1"),
         CodecId::Mjpeg => Some("V_MJPEG"),
+        CodecId::Ffv1 => Some("V_FFV1"),
+        CodecId::Prores => Some("V_PRORES"),
         CodecId::Rawvideo => Some("V_UNCOMPRESSED"),
         CodecId::Aac => Some("A_AAC"),
         CodecId::Ac3 => Some("A_AC3"),
