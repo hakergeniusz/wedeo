@@ -729,7 +729,9 @@ fn filter_plane_cols(
                                 16,
                             );
                         } else {
-                            loop_filter_edge(plane, ptr, stride, 1, e, ii, h as i32, 8);
+                            // FFmpeg: dsp.loop_filter_8[2][0] == loop_filter_h_16_8_c,
+                            // i.e. one 16-tap-wide edge (mask class 0).
+                            loop_filter_edge(plane, ptr, stride, 1, e, ii, h as i32, 16);
                         }
                     } else if hm2 & x as u8 != 0 {
                         let wd1 = if hmask1[1] & x as u8 != 0 { 8 } else { 4 };
@@ -871,7 +873,8 @@ fn filter_plane_rows(
                                 16,
                             );
                         } else {
-                            loop_filter_edge(plane, ptr, 1, stride as isize, e, ii, h as i32, 8);
+                            // FFmpeg: dsp.loop_filter_8[2][1] == loop_filter_v_16_8_c.
+                            loop_filter_edge(plane, ptr, 1, stride as isize, e, ii, h as i32, 16);
                         }
                     } else if vm & x_next as u8 != 0 {
                         let wd1 = if vmask[1] & x as u8 != 0 { 8 } else { 4 };

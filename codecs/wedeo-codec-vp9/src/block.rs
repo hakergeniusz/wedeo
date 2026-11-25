@@ -331,10 +331,18 @@ fn decode_block(
     //      take the minimum segment id from the retained segmentation map.
     //   3. otherwise: read from the tree.
     let seg = &td.header.segmentation;
-    let seg_w = BWH_TAB[0][bs as usize][0] as usize;
-    let seg_h = BWH_TAB[0][bs as usize][1] as usize;
+    // FFmpeg indexes segmentation_map and the above/left segpred contexts in
+    // 8x8 units (vp9block.c:119-142), even though row/col here are 4x4 units.
+    // A 4x4 block therefore writes/reads a whole 8x8 cell: round the start
+    // down and double the 8x8 block dimensions. Using the raw 4x4 rectangle
+    // leaves sibling 4x4 cells at 0, so temporal prediction picks segment 0
+    // where FFmpeg picks the actual segment id.
+    let seg_w = BWH_TAB[1][bs as usize][0] as usize * 2;
+    let seg_h = BWH_TAB[1][bs as usize][1] as usize * 2;
+    let seg_col0 = col & !1usize;
+    let seg_row0 = row & !1usize;
     let seg_row7 = (row >> 1) & 7;
-    let pred_rows = seg_h.div_ceil(2); // 8x8 rows covered by this 4x4-unit height
+    let pred_rows = seg_h / 2; // 8x8 rows covered by this rounded height
     let segment_id: u8 = if !seg.enabled {
         0
     } else if is_kf {
@@ -346,29 +354,30 @@ fn decode_block(
     } else if !seg.update_map
         || (seg.temporal
             && td.bd.get_prob(
-                seg.pred_prob[td.above.seg_id[col] as usize + td.left.seg_id[seg_row7] as usize],
+                seg.pred_prob
+                    [td.above.seg_id[seg_col0] as usize + td.left.seg_id[seg_row7] as usize],
             ))
     {
         let mut pred = 8u8;
         if let Some(map) = td.ref_seg_map {
-            let w = seg_w.min(td.cols_4x4.saturating_sub(col));
-            let h = seg_h.min(td.rows_4x4.saturating_sub(row));
-            for y in row..row + h {
-                for x in col..col + w {
+            let w = seg_w.min(td.cols_4x4.saturating_sub(seg_col0));
+            let h = seg_h.min(td.rows_4x4.saturating_sub(seg_row0));
+            for y in seg_row0..seg_row0 + h {
+                for x in seg_col0..seg_col0 + w {
                     pred = pred.min(map[y * td.cols_4x4 + x]);
                 }
             }
         }
         let pred = if pred < 8 { pred } else { 0 };
-        let end_c = (col + seg_w).min(td.above.seg_id.len());
-        td.above.seg_id[col..end_c].fill(1);
+        let end_c = (seg_col0 + seg_w).min(td.above.seg_id.len());
+        td.above.seg_id[seg_col0..end_c].fill(1);
         let end_r = (seg_row7 + pred_rows).min(td.left.seg_id.len());
         td.left.seg_id[seg_row7..end_r].fill(1);
         pred
     } else {
         let id = td.bd.get_tree(&crate::data::SEGMENTATION_TREE, &seg.prob) as u8;
-        let end_c = (col + seg_w).min(td.above.seg_id.len());
-        td.above.seg_id[col..end_c].fill(0);
+        let end_c = (seg_col0 + seg_w).min(td.above.seg_id.len());
+        td.above.seg_id[seg_col0..end_c].fill(0);
         let end_r = (seg_row7 + pred_rows).min(td.left.seg_id.len());
         td.left.seg_id[seg_row7..end_r].fill(0);
         id
@@ -377,10 +386,10 @@ fn decode_block(
     // Keep the current frame's segmentation map for the next frame. FFmpeg
     // writes it whenever a new map is decoded (vp9block.c:140-142).
     if seg.enabled && (seg.update_map || is_kf) {
-        let end_c = (col + seg_w).min(td.cols_4x4);
-        let end_r = (row + seg_h).min(td.rows_4x4);
-        for y in row..end_r {
-            for x in col..end_c {
+        let end_c = (seg_col0 + seg_w).min(td.cols_4x4);
+        let end_r = (seg_row0 + seg_h).min(td.rows_4x4);
+        for y in seg_row0..end_r {
+            for x in seg_col0..end_c {
                 td.seg_map[y * td.cols_4x4 + x] = segment_id;
             }
         }

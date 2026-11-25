@@ -523,6 +523,8 @@ pub fn decode_frame_header<F>(
     data: &[u8],
     prob_ctx: &[ProbContext; 4],
     coef_ctx: &[CoefProbArray; 4],
+    prev_seg: &SegmentationParams,
+    prev_lf_delta: ([i8; 4], [i8; 2]),
     ref_dims: F,
 ) -> Result<(FrameHeader, usize)>
 where
@@ -623,10 +625,17 @@ where
     let show_frame = gb.get_bit()?;
     let error_resilient = gb.get_bit()?;
 
-    // Default loop-filter delta values (reset on keyframe/errorres).
-    let mut ref_deltas: [i8; 4] = [1, 0, -1, -1];
-    let mut mode_deltas: [i8; 2] = [0, 0];
-    let mut seg = SegmentationParams::default();
+    // FFmpeg keeps lf_delta.ref/mode in decoder state (vp9.c:704-712):
+    // they are reset only on keyframes, intra-only and error-resilient
+    // frames, and a `delta_update` header with no explicit values leaves
+    // the previous values in place.
+    let (mut ref_deltas, mut mode_deltas) = prev_lf_delta;
+    // FFmpeg keeps `s->s.h.segmentation` in decoder state: per-segment
+    // features persist across inter frames unless a new set is coded, and
+    // are only cleared on keyframes / intra-only / error-resilient frames
+    // (vp9.c:683, 724-746). Starting from defaults here would reset them
+    // on every frame and break vectors that only signal features once.
+    let mut seg = prev_seg.clone();
 
     let mut bit_depth = 8u8;
     let mut color_space = ColorSpace::Unknown;
@@ -1319,17 +1328,27 @@ mod tests {
     fn test_invalid_frame_marker() {
         // First 2 bits must be 0b10. Provide 0b00 instead.
         let data = [0x00u8; 32];
-        let result =
-            decode_frame_header(&data, &Default::default(), &[DEFAULT_COEF_PROBS; 4], |_| {
-                None
-            });
+        let result = decode_frame_header(
+            &data,
+            &Default::default(),
+            &[DEFAULT_COEF_PROBS; 4],
+            &SegmentationParams::default(),
+            ([1, 0, -1, -1], [0, 0]),
+            |_| None,
+        );
         assert!(result.is_err(), "Expected error for bad frame marker");
     }
 
     #[test]
     fn test_empty_data() {
-        let result =
-            decode_frame_header(&[], &Default::default(), &[DEFAULT_COEF_PROBS; 4], |_| None);
+        let result = decode_frame_header(
+            &[],
+            &Default::default(),
+            &[DEFAULT_COEF_PROBS; 4],
+            &SegmentationParams::default(),
+            ([1, 0, -1, -1], [0, 0]),
+            |_| None,
+        );
         assert!(result.is_err());
     }
 

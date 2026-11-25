@@ -28,7 +28,7 @@ use crate::block::{BlockInfo, TileDecodeContext, decode_sb};
 use crate::bool_decoder::BoolDecoder;
 use crate::context::{AboveContext, LeftContext};
 use crate::data::DEFAULT_COEF_PROBS;
-use crate::header::{FrameType, decode_frame_header};
+use crate::header::{FrameType, SegmentationParams, decode_frame_header};
 use crate::loopfilter::loop_filter_frame;
 use crate::prob::{CoefProbArray, CountContext, adapt_probs};
 use crate::recon::{FrameBuffer, reconstruct_inter_block, reconstruct_intra_block};
@@ -66,6 +66,11 @@ pub struct Vp9Decoder {
     last_width: u32,
     /// Previous frame's height.
     last_height: u32,
+    /// Persistent segmentation parameters (`s->s.h.segmentation` in FFmpeg).
+    /// Feature values survive inter frames that do not signal an update.
+    prev_seg: SegmentationParams,
+    /// Persistent loop-filter ref/mode deltas (`s->s.h.lf_delta` in FFmpeg).
+    prev_lf_delta: ([i8; 4], [i8; 2]),
 }
 
 impl Vp9Decoder {
@@ -95,18 +100,26 @@ impl Vp9Decoder {
             last_invisible: true,
             last_width: 0,
             last_height: 0,
+            prev_seg: SegmentationParams::default(),
+            prev_lf_delta: ([1, 0, -1, -1], [0, 0]),
         })
     }
 
     /// Decode one VP9 frame from `data` and push the result to `output_queue`.
     fn decode_frame(&mut self, data: &[u8], pts: i64) -> Result<()> {
         // --- 1. Parse frame header ---
-        let (header, _hdr_bytes) =
-            decode_frame_header(data, &self.prob_ctx, &self.coef_ctx, |i| {
+        let (header, _hdr_bytes) = decode_frame_header(
+            data,
+            &self.prob_ctx,
+            &self.coef_ctx,
+            &self.prev_seg,
+            self.prev_lf_delta,
+            |i| {
                 self.ref_store.slots[i]
                     .as_ref()
                     .map(|rf| (rf.width, rf.height))
-            })?;
+            },
+        )?;
 
         debug!(
             frame_type = ?header.frame_type,
@@ -162,11 +175,23 @@ impl Vp9Decoder {
 
         // On keyframe or error_resilient: reset all probability context slots to
         // defaults. Matches FFmpeg vp9.c:883-893.
-        if header.frame_type == FrameType::KeyFrame || header.error_resilient {
+        // FFmpeg vp9.c:892-907 also resets probability contexts on
+        // intra-only frames with reset_context 2 (current slot) or 3 (all
+        // slots). The hidden altref frames of intra-only test vectors use
+        // reset_context=2; skipping this leaves stale adapted probabilities
+        // for the following shown inter frame.
+        if header.frame_type == FrameType::KeyFrame
+            || header.error_resilient
+            || (header.intra_only && header.reset_context == 3)
+        {
             for slot in &mut self.prob_ctx {
                 *slot = crate::header::default_prob_context();
             }
             self.coef_ctx = [crate::data::DEFAULT_COEF_PROBS; 4];
+        } else if header.intra_only && header.reset_context == 2 {
+            let slot = header.frame_ctx_id as usize;
+            self.prob_ctx[slot] = crate::header::default_prob_context();
+            self.coef_ctx[slot] = crate::data::DEFAULT_COEF_PROBS;
         }
         if header.frame_type == FrameType::KeyFrame {
             self.ref_store.clear();
@@ -440,9 +465,12 @@ impl Vp9Decoder {
         });
         self.ref_store.refresh(header.refresh_ref_mask, ref_frame);
         self.ref_store.rotate_mvpair(cur_mv_grid, cols_4x4);
-        // FFmpeg vp9.c:1669 retains the previous segmentation map unless a
-        // new one is decoded; vp9block.c:140 writes one on keyframes and on
-        // frames with segmentation.update_map set.
+        // FFmpeg vp9.c:1667-1670 retains the previous segmentation map unless
+        // a new one is decoded; vp9block.c:140 writes one on keyframes and on
+        // frames with segmentation.update_map set. At the start of the next
+        // normal inter frame FFmpeg copies CUR_FRAME (this frame's map) into
+        // REF_FRAME_SEGMAP, so even keyframe maps are available for temporal
+        // prediction there.
         if header.segmentation.enabled && (is_kf || header.segmentation.update_map) {
             self.ref_store
                 .update_seg_map(cur_seg_map, rows_4x4, cols_4x4);
@@ -453,6 +481,11 @@ impl Vp9Decoder {
         self.last_invisible = !header.show_frame;
         self.last_width = width;
         self.last_height = height;
+
+        // Persist the parsed segmentation state for the next frame. FFmpeg
+        // keeps `s->s.h.segmentation` across frames (vp9.c:724-746).
+        self.prev_seg = header.segmentation.clone();
+        self.prev_lf_delta = (header.ref_deltas, header.mode_deltas);
 
         // --- 7. Build output Frame (only if show_frame is set) ---
         if header.show_frame {
