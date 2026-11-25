@@ -20,6 +20,47 @@ Modifications made in Wedeo: the API returns `wedeo_core::error::Result`
 instead of `Result<_, String>`, and the crate declares `#![forbid(unsafe_code)]`.
 The safety guards and their arithmetic are otherwise unchanged.
 
+## FFmpeg
+
+Most codec, format, filter and bitstream code is translated directly from
+FFmpeg's C sources under `LGPL-2.1-or-later`. Copyright belongs to the FFmpeg
+contributors; see the `FFmpeg/` source tree for the full list. Each ported
+Rust module names the C file it follows. Wedeo is distributed under the same
+`LGPL-2.1-or-later` license (`LICENSE`, `COPYING.LGPLv2.1`).
+
+## Third-party crates used by Wedeo
+
+No third-party Rust source is copied into this repository: Wedeo depends on
+these projects through Cargo. Attribution is recorded here because their
+algorithms and implementations are essential to the rewrite.
+
+| Project | Used for | License | Integration |
+|---|---|---|---|
+| [rusty_h264-encoder](https://www.mata.network/) / `rusty_h264-common` 0.17.4 | Pure-Rust H.264 encoding | BSD-2-Clause | `adapters/wedeo-h264-rusty` (dependency only; built with `default-features = false`) |
+| [Symphonia](https://github.com/pdeljanov/Symphonia) 0.5.5 | Audio demuxing and decoding (AAC, MP3, Vorbis, FLAC, ALAC, WavPack, ADPCM, PCM) | MPL-2.0 | `adapters/wedeo-symphonia` |
+| [rav1d](https://github.com/memorysafety/rav1d) (git, commit `9d78516`) | AV1 decoding; pure-Rust port of dav1d | BSD-2-Clause | `adapters/wedeo-rav1d`. Its `COPYING` credits VideoLAN, the dav1d authors and the Internet Security Research Group; retain that notice in distributions |
+| [av-bitstream](https://github.com/rust-av/rust-av) 0.2.1 | Exp-Golomb / bit-reader primitives (Luca Barbato, rust-av) | MIT | `crates/wedeo-codec/src/bitstream.rs` |
+| [aligned-vec](https://github.com/sarah-ek/aligned-vec/) 0.6.4 | Aligned picture/sample buffers (`AVec`) | MIT | `crates/wedeo-core` |
+| [rav1e](https://github.com/xiph/rav1e/) 0.8 | AV1 encoding | BSD-2-Clause | `adapters/wedeo-rav1e` |
+| [Rusopus / opus-decoder](https://github.com/TadeuszWolfGang/Rusopus) 0.1.1 | Opus decoding | MIT OR Apache-2.0 | `adapters/wedeo-symphonia/src/opus.rs` |
+| [rubato](https://github.com/HEnquist/rubato) 1.0.1 | Audio resampling | MIT | `crates/wedeo-resample` |
+| [dcv-color-primitives](https://github.com/aws/dcv-color-primitives) 1.0.0 | I420/NV12 to RGB pixel conversion | MIT-0 | `crates/wedeo-scale` |
+| [adler2](https://github.com/oyvindln/adler2) 2.0.1 | FFmpeg-style non-standard Adler-32 in framecrc | 0BSD OR MIT OR Apache-2.0 | `tests/fate` harness |
+| [md-5](https://github.com/RustCrypto/hashes) 0.10.6 | MD5 for conformance vectors | MIT OR Apache-2.0 | `tests/fate` harness |
+| [bitflags](https://github.com/bitflags/bitflags) 2, [inventory](https://github.com/dtolnay/inventory) 0.3, [tracing](https://github.com/tokio-rs/tracing) 0.1 / `tracing-subscriber` 0.3 | Flags, registry and diagnostics | MIT or MIT OR Apache-2.0 | workspace-wide |
+
+Platform/utility crates (`cpal`, `wgpu`, `winit`, `pollster`, `ringbuf`,
+`cc`, `libc`, `divan`) are used by the player, CLI and build harness; their
+licenses are recorded in `Cargo.lock` and in each crate's published manifest.
+
+## Upstream Wedeo project
+
+The repository was forked from [sharifhsn/wedeo](https://github.com/sharifhsn/wedeo),
+which was originally dual-licensed `MIT OR Apache-2.0`. Core traits, the
+workspace layout and the verification harness inherit from that project. The
+fork was later relicensed to `LGPL-2.1-or-later` to match the FFmpeg-derived
+majority of the code (`LICENSE`); `README.md` also credits the upstream authors.
+
 ## License compatibility note
 
 Wedeo's workspace is licensed `LGPL-2.1-or-later`. Apache 2.0 is not compatible
