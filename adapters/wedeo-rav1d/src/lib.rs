@@ -318,6 +318,11 @@ impl Rav1dDecoderWrapper {
         if params.thread_count > 0 {
             settings.n_threads = params.thread_count as c_int;
         }
+        tracing::debug!(
+            requested = params.thread_count,
+            effective = settings.n_threads,
+            "rav1d decoder threading"
+        );
         // Apply film grain by default (matches FFmpeg behavior)
         settings.apply_grain = 1;
 

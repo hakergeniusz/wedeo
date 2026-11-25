@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 
 use rusty_h264_common::nal::{emulation_prevent_into, split_annex_b};
-use rusty_h264_common::{NalUnit, NalUnitType, YuvPlanes};
+use rusty_h264_common::{NalUnit, NalUnitType, YuvFrame, YuvPlanes};
 use rusty_h264_encoder::{Encoder as RustyEncoder, EncoderConfig, Pps, Preset, Sps};
 use tracing::debug;
 
@@ -39,9 +39,16 @@ pub struct RustyH264Encoder {
     pps: Option<Vec<u8>>,
     frame_duration: i64,
     next_pts: i64,
+    /// With more than one thread, frames are encoded in parallel GOP batches
+    /// through rusty_h264's `encode_all`.
+    parallel: bool,
+    batch: Vec<YuvFrame>,
+    batch_meta: Vec<(i64, i64)>,
     draining: bool,
     ended: bool,
 }
+
+const PARALLEL_BATCH: usize = 128;
 
 impl RustyH264Encoder {
     fn new(builder: &EncoderBuilder) -> Result<Self> {
@@ -91,8 +98,9 @@ impl RustyH264Encoder {
         // Zero added latency: one access unit out per frame, no lookahead or
         // reordering, so `dts == pts` always and `send_frame(None)` drains
         // nothing unexpected.
-        cfg.mbtree = false;
-        cfg.lookahead = 0;
+        let parallel = builder.thread_count.unwrap_or(1) > 1;
+        cfg.mbtree = parallel;
+        cfg.lookahead = if parallel { 40 } else { 0 };
         cfg.scenecut = 0;
         cfg.bframes = 0;
         cfg.gop_size = gop;
@@ -127,6 +135,9 @@ impl RustyH264Encoder {
             pps: Some(pps),
             frame_duration,
             next_pts: 0,
+            parallel,
+            batch: Vec::new(),
+            batch_meta: Vec::new(),
             draining: false,
             ended: false,
         };
@@ -203,6 +214,39 @@ impl RustyH264Encoder {
     }
 }
 
+impl RustyH264Encoder {
+    /// Encode a batch of frames using rusty_h264's parallel GOP encoder.
+    fn encode_batch(&mut self) -> Result<()> {
+        if self.batch.is_empty() {
+            return Ok(());
+        }
+        let frames = std::mem::take(&mut self.batch);
+        let meta = std::mem::take(&mut self.batch_meta);
+        let streams = self
+            .encoder
+            .encode_all(&frames)
+            .map_err(|e| Error::Other(e.to_string()))?;
+        for (stream, (pts, duration)) in streams.into_iter().zip(meta) {
+            self.packetize(&stream, pts, duration);
+        }
+        Ok(())
+    }
+
+    /// Copy a plane into a tightly packed buffer for `YuvFrame`.
+    fn tight_plane(data: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(width * height);
+        for row in 0..height {
+            let start = row * stride;
+            if start + width > data.len() {
+                break;
+            }
+            out.extend_from_slice(&data[start..start + width]);
+        }
+        out.resize(width * height, 0);
+        out
+    }
+}
+
 impl Encoder for RustyH264Encoder {
     fn send_frame(&mut self, frame: Option<&Frame>) -> Result<()> {
         if self.ended {
@@ -266,6 +310,23 @@ impl Encoder for RustyH264Encoder {
                 } else {
                     self.frame_duration
                 };
+                if self.parallel {
+                    let w = video.width as usize;
+                    let h = video.height as usize;
+                    self.batch.push(YuvFrame {
+                        width: w,
+                        height: h,
+                        y: Self::tight_plane(&converted[0], y_stride, w, h),
+                        u: Self::tight_plane(&converted[1], u_stride, w / 2, h / 2),
+                        v: Self::tight_plane(&converted[2], v_stride, w / 2, h / 2),
+                    });
+                    self.batch_meta.push((pts, duration));
+                    self.next_pts = pts + duration;
+                    if self.batch.len() >= PARALLEL_BATCH {
+                        self.encode_batch()?;
+                    }
+                    return Ok(());
+                }
                 let stream = self
                     .encoder
                     .encode_planes(&view)
@@ -277,6 +338,7 @@ impl Encoder for RustyH264Encoder {
             None => {
                 if !self.draining {
                     self.draining = true;
+                    self.encode_batch()?;
                     let stream = self.encoder.flush();
                     self.packetize(&stream, self.next_pts, self.frame_duration);
                 }

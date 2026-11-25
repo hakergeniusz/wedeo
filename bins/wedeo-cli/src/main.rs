@@ -1707,7 +1707,11 @@ fn build_pipeline(
             apply_metadata(&mut out_stream, &opts.metadata);
             output_streams.push(out_stream);
         } else {
-            let dec = DecoderBuilder::new(in_params.clone()).open()?;
+            let dec = DecoderBuilder::new(decoder_params_with_threads(
+                in_params.clone(),
+                opts.thread_count,
+            ))
+            .open()?;
             video_decoder = Some(dec);
 
             let out_codec_id = if let Some(ref name) = opts.video_codec {
@@ -1732,9 +1736,10 @@ fn build_pipeline(
             enc_builder.time_base = in_stream.time_base;
             // Honor `EncoderBuilder::with_thread_count`; `-threads` also keeps
             // its codec-private entry, which the builder reads as a fallback.
-            if let Some(count) = opts.thread_count {
-                enc_builder = enc_builder.with_thread_count(count);
-            }
+            let threads = opts.thread_count.filter(|&n| n > 0).unwrap_or_else(|| {
+                std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
+            });
+            enc_builder = enc_builder.with_thread_count(threads);
 
             if let Some(br) = opts.bitrate_video {
                 enc_builder.bit_rate = br;
@@ -1784,7 +1789,11 @@ fn build_pipeline(
             apply_metadata(&mut out_stream, &opts.metadata);
             output_streams.push(out_stream);
         } else {
-            let dec = DecoderBuilder::new(in_params.clone()).open()?;
+            let dec = DecoderBuilder::new(decoder_params_with_threads(
+                in_params.clone(),
+                opts.thread_count,
+            ))
+            .open()?;
             audio_decoder = Some(dec);
 
             let out_codec_id = if let Some(ref name) = opts.audio_codec {
@@ -1815,9 +1824,10 @@ fn build_pipeline(
                     enc_builder.flags |= CodecFlags::GLOBAL_HEADER;
                 }
             }
-            if let Some(count) = opts.thread_count {
-                enc_builder = enc_builder.with_thread_count(count);
-            }
+            let threads = opts.thread_count.filter(|&n| n > 0).unwrap_or_else(|| {
+                std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
+            });
+            enc_builder = enc_builder.with_thread_count(threads);
 
             if let Some(br) = opts.bitrate_audio {
                 enc_builder.bit_rate = br;
@@ -1884,6 +1894,11 @@ fn run_pipeline(
     let mut packets_out = 0u64;
     let mut last_time_us = 0i64;
     let frame_limit = opts.frames_video.unwrap_or(u64::MAX);
+    // Frame-threaded decoders need several packets in flight before their
+    // first picture is emitted. Drain only after a small batch so they can
+    // overlap work across frames.
+    let mut video_pending = 0u32;
+    const DECODE_BATCH: u32 = 16;
     let started = Instant::now();
 
     // Demux -> decode -> (filter) -> encode -> mux
@@ -1929,26 +1944,30 @@ fn run_pipeline(
                 (&mut pipeline.video_decoder, &mut pipeline.video_encoder)
             {
                 dec.send_packet(Some(&packet))?;
-                loop {
-                    match dec.receive_frame() {
-                        Ok(frame) => {
-                            let frames = filter_frames(pipeline.video_graph.as_mut(), frame)?;
-                            for frame in frames {
-                                if video_frames_out >= frame_limit {
-                                    break;
+                video_pending += 1;
+                if video_pending >= DECODE_BATCH {
+                    video_pending = 0;
+                    loop {
+                        match dec.receive_frame() {
+                            Ok(frame) => {
+                                let frames = filter_frames(pipeline.video_graph.as_mut(), frame)?;
+                                for frame in frames {
+                                    if video_frames_out >= frame_limit {
+                                        break;
+                                    }
+                                    enc.send_frame(Some(&frame))?;
+                                    drain_encoder_to_output(
+                                        &mut **enc,
+                                        output,
+                                        video_stream_idx.unwrap_or(0),
+                                    )?;
+                                    video_frames_out += 1;
+                                    packets_out += 1;
                                 }
-                                enc.send_frame(Some(&frame))?;
-                                drain_encoder_to_output(
-                                    &mut **enc,
-                                    output,
-                                    video_stream_idx.unwrap_or(0),
-                                )?;
-                                video_frames_out += 1;
-                                packets_out += 1;
                             }
+                            Err(Error::Again) => break,
+                            Err(e) => return Err(e),
                         }
-                        Err(Error::Again) => break,
-                        Err(e) => return Err(e),
                     }
                 }
             }
@@ -2220,6 +2239,20 @@ fn guess_format_from_path(path: &str) -> Option<String> {
     let ext = Path::new(path).extension()?.to_str()?;
     let factory = format_registry::guess_muxer_by_extension(ext)?;
     Some(factory.descriptor().name.to_string())
+}
+
+/// Apply `-threads` (or the machine's parallelism when set to auto) to the
+/// decoder parameters. Codecs that support threading, such as rav1d, use it;
+/// others ignore the hint.
+fn decoder_params_with_threads(
+    mut params: wedeo_codec::decoder::CodecParameters,
+    requested: Option<u32>,
+) -> wedeo_codec::decoder::CodecParameters {
+    let threads = requested
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get() as u32));
+    params.thread_count = threads;
+    params
 }
 
 fn parse_bitrate(s: &str) -> i64 {
