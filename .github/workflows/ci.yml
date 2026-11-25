@@ -75,7 +75,7 @@ jobs:
           fi
           {
             echo 'matrix<<JSON_EOF'
-            cat /tmp/work-unit-crates.json
+            python3 -c 'import json; print(json.dumps({"include": json.load(open("/tmp/work-unit-crates.json"))}))'
             echo 'JSON_EOF'
           } >> "$GITHUB_OUTPUT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
