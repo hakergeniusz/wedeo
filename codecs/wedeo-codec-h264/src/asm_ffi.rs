@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // verified FFmpeg-derived SIMD/FFI/tile-threading kernels
 // FFI declarations for FFmpeg's hand-written NEON assembly.
 //
 // These functions are compiled from vendored .S files in asm/aarch64/ by build.rs.

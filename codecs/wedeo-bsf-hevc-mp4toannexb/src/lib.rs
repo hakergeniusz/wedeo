@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! HEVC MP4 to Annex B byte stream format filter.
 //!
 //! FFmpeg reference: `libavcodec/bsf/hevc_mp4toannexb.c`.

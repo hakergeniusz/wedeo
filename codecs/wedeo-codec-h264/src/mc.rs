@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // verified FFmpeg-derived SIMD/FFI/tile-threading kernels
 // H.264/AVC motion compensation — quarter-pixel luma, eighth-pixel chroma.
 //
 // Luma uses a 6-tap FIR filter {1, -5, 20, 20, -5, 1} for half-pel positions,

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Constant frame rate enforcement filter.
 //!
 //! FFmpeg reference: `libavfilter/vf_fps.c`.

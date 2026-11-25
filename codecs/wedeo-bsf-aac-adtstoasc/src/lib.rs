@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MPEG-2/4 AAC ADTS to MPEG-4 Audio Specific Configuration bitstream filter.
 //!
 //! FFmpeg reference: `libavcodec/bsf/aac_adtstoasc.c`.

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 /*
  * Copyright (c) 2007 Bobby Bingham
  *

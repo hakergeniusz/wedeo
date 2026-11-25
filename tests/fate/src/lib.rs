@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! FATE test support library.
 //!
 //! Provides utilities for running FATE-style comparison tests between

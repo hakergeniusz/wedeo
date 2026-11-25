@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // IVF container demuxer for wedeo.
 //
 // IVF is a simple raw video container used by the VP8, VP9, and AV1 codecs.

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // VP8 video codec for wedeo.
 //
 // Pure-Rust translation of FFmpeg's VP8 decoder (libavcodec/vp8.c,

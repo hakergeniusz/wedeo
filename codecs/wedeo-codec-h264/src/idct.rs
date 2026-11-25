@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // verified FFmpeg-derived SIMD/FFI/tile-threading kernels
 // H.264 IDCT (Inverse Discrete Cosine Transform) and related transforms.
 //
 // Implements the 4x4 integer IDCT, DC-only shortcut, and inverse Hadamard

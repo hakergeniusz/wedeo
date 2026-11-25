@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Functional filter graph for Wedeo.
 //!
 //! FFmpeg references: `libavfilter/avfilter.c`, `libavfilter/avfiltergraph.c`,

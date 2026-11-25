@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Matroska / WebM muxer, translated from FFmpeg's `libavformat/matroskaenc.c`.
 //!
 //! The muxer writes a complete EBML structure:

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use std::collections::VecDeque;
 use std::env;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

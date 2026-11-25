@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MPEG-4 Part 2 adapters backed by the pure-Rust `oxideav-mpeg4video`
 //! crate (MIT). No upstream source is copied here; this crate converts
 //! between wedeo's and oxideav's frame/packet/parameter types.

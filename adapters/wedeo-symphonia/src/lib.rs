@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 pub mod channel_layout;
 pub mod codec_map;
 pub mod decoder;

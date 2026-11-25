@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // HEVC Annex B raw bitstream demuxer.
 //
 // Reads raw HEVC elementary streams delimited by Annex B start codes

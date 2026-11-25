@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Port of FFmpeg's `libavfilter/vf_format.c` (the `format` filter).
 //!
 //! FFmpeg's `format` filter is `AVFILTER_FLAG_METADATA_ONLY`: it has no

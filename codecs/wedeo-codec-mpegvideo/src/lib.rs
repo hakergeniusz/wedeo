@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Shared MPEG-1/2/4 building blocks for Wedeo.
 //!
 //! This crate is a **reusable library**, not a decoder registration. It ports

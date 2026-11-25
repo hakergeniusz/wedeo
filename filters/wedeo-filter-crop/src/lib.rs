@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Video crop filter, ported from FFmpeg's `libavfilter/vf_crop.c`.
 //!
 //! Like the C filter, this does not copy pixels: it advances each plane's data

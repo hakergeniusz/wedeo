@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // IVF muxer, translated from FFmpeg's libavformat/ivfenc.c.
 //
 // File structure (all integers little-endian):

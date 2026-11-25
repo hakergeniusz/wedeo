@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Native pure-Rust FLAC decoder.
 //!
 //! FFmpeg reference: `libavcodec/flacdec.c` (with `flac.c`, `flacdata.c`,

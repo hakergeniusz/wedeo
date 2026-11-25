@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // verified FFmpeg-derived SIMD/FFI/tile-threading kernels
 // Persistent thread pool for frame-level decode parallelism.
 //
 // Replaces per-frame `std::thread::spawn` with a fixed pool of N worker

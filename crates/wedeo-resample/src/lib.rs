@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // wedeo-resample: Audio resampling (libswresample equivalent)
 // Wraps the rubato crate behind a simple interleaved f32 interface.
 

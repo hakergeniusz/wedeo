@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // wedeo-cli — FFmpeg-style command-line interface.
 //
 // Supports:

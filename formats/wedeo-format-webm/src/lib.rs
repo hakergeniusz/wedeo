@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // WebM/Matroska container demuxer for wedeo.
 //
 // WebM is a subset of the Matroska container format. Video and Opus/AAC

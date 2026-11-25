@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! FLV muxer, translated from FFmpeg's `libavformat/flvenc.c` (with constants
 //! from `libavformat/flv.h`).
 //!

@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // verified FFmpeg-derived SIMD/FFI/tile-threading kernels
 //! High bit-depth (9..14) intra reconstruction.
 //!
 //! The 8-bit kernels in `mb.rs` write into the `u8` picture planes. FFmpeg

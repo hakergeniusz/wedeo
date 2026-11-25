@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // H.264 Annex B raw bitstream demuxer.
 //
 // Reads raw H.264 elementary streams delimited by Annex B start codes

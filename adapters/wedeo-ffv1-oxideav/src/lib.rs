@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! FFV1 adapters backed by the pure-Rust `oxideav-ffv1` crate (MIT).
 //! No upstream source is copied here; this crate converts between wedeo's
 //! and oxideav's frame/packet/parameter types.

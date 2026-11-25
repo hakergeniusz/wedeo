@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! AC-3 and E-AC-3 adapters backed by the pure-Rust `oxideav-ac3` crate
 //! (MIT). No upstream source is copied here: this crate only converts between
 //! wedeo's and oxideav's frame/packet/parameter types.

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 pub mod buffer;
 pub mod channel_layout;
 pub mod chroma_location;

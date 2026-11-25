@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // verified FFmpeg-derived SIMD/FFI/tile-threading kernels
 // Thread-safe picture with row-level progress tracking for frame-level threading.
 //
 // One writer thread decodes rows top-to-bottom, calling `publish_row()` after

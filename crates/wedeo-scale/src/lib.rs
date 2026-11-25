@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // wedeo-scale: Pixel format conversion (libswscale equivalent).
 //
 // Wraps dcv-color-primitives to convert between YUV planar formats and packed

@@ -1,3 +1,4 @@
+#![deny(unsafe_op_in_unsafe_fn)]
 //! Pure-Rust `core::arch` SIMD hot kernels for VP9 motion compensation and
 //! block averaging.
 //!

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MPEG-2 Transport Stream (aka DVB) demuxer.
 //!
 //! Ported from FFmpeg's `libavformat/mpegts.c` (with `mpegts.h`) with the same

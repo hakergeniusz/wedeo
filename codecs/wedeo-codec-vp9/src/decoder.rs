@@ -1,4 +1,7 @@
-// VP9 decoder — main entry point.
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // tile-column threading uses raw pointers into disjoint grid ranges
+
+// VP9 decoder - main entry point.
 //
 // Implements the `Decoder` trait for VP9 video by orchestrating:
 //   1. Frame header parsing   (`header::decode_frame_header`)

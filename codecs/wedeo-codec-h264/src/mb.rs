@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // verified FFmpeg-derived SIMD/FFI/tile-threading kernels
 // H.264 macroblock decode orchestrator.
 //
 // Decodes a single macroblock by calling CAVLC, dequant, intra prediction,

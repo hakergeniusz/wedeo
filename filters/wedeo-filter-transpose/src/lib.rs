@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Transposition filter, ported from FFmpeg's `libavfilter/vf_transpose.c`.
 //!
 //! The filter rotates a video by 90 degrees and optionally flips the result,

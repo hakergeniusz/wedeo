@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! HEVC DSP primitives, translated directly from FFmpeg's C source.
 //!
 //! References:

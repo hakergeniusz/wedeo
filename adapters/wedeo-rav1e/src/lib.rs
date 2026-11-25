@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! rav1e AV1 encoder adapter for wedeo.
 //!
 //! Wraps the `rav1e` crate (pure Rust AV1 encoder) behind wedeo's `Encoder`

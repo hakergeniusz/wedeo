@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Native HEVC / H.265 decoder.
 //!
 //! FFmpeg reference: `libavcodec/hevc/hevcdec.c` (plus `filter.c`, `cabac.c`,

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MPEG-2 Transport Stream muxer, translated from FFmpeg's
 //! `libavformat/mpegtsenc.c`.
 //!

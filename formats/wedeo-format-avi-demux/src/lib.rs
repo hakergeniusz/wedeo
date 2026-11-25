@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // AVI demuxer for wedeo, translated from FFmpeg's libavformat/avidec.c.
 //
 // RIFF layout:

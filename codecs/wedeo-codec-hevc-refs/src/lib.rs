@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Reusable HEVC reference-picture and motion-vector library.
 //!
 //! FFmpeg reference: `libavcodec/hevc/refs.c`, `libavcodec/hevc/mvs.c`,

@@ -1,3 +1,4 @@
+#![deny(unsafe_op_in_unsafe_fn)]
 //! rav1d AV1 decoder adapter for wedeo.
 //!
 //! Wraps the `rav1d` crate (pure Rust AV1 decoder, port of dav1d) behind

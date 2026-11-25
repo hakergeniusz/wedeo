@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 mod atoms;
 mod boxes;
 pub mod demuxer;

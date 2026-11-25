@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::{Error, Result};
 use wedeo_core::packet::Packet;

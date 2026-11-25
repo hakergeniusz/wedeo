@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! FLV (Flash Video) demuxer, translated from FFmpeg's `libavformat/flvdec.c`.
 //!
 //! The FLV container is described in Annex E of the Flash Video File Format

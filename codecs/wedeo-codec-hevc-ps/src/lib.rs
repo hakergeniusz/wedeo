@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! HEVC parameter-set parsing (VPS / SPS / PPS), slice headers, NAL units.
 //!
 //! FFmpeg reference: `libavcodec/hevc/ps.c`, `libavcodec/hevc/parse.c`,

@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // verified FFmpeg-derived SIMD/FFI/tile-threading kernels
 // Assembly dispatch layer: bridges wedeo's MC/IDCT/deblock calling conventions
 // to FFmpeg's NEON assembly functions.
 //

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Work unit: `wedeo-filter-copy`.
 //!
 //! FFmpeg reference: `libavfilter/vf_copy.c`.

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! H.264 MP4 to Annex B byte stream format filter.
 //!
 //! FFmpeg reference: `libavcodec/bsf/h264_mp4toannexb.c`.

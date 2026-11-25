@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! H.264 encoder adapter backed by the pure-Rust `rusty_h264-encoder` crate.
 //!
 //! The encoder itself is BSD-2-Clause and is used as an external dependency;

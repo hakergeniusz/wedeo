@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Work unit: `wedeo-filter-hflip`.
 //!
 //! FFmpeg reference: `libavfilter/vf_hflip.c` (plus `vf_hflip_init.h` for the

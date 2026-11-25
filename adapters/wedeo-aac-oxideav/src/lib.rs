@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! AAC decoder and encoder adapters backed by the pure-Rust `oxideav-aac`
 //! crate (MIT). No source from it is copied here: the adapter only converts
 //! between wedeo's and oxideav's frame/packet/parameter types.

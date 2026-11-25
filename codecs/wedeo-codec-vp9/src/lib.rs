@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 // VP9 video codec for wedeo.
 //
 // Pure-Rust translation of FFmpeg's VP9 decoder (libavcodec/vp9*.c).

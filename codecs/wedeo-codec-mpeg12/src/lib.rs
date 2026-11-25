@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! MPEG-1 / MPEG-2 video decoder.
 //!
 //! FFmpeg reference: `libavcodec/mpeg12dec.c` (with `mpegvideo_dec.c`,

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 pub mod bitstream;
 pub mod bitstream_filter;
 pub mod decoder;

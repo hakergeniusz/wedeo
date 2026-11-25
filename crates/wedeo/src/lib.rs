@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # wedeo
 //!
 //! **AI-generated Rust rewrite of FFmpeg** — a pure-Rust multimedia framework

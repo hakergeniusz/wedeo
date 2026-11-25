@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(unsafe_code)]
 #![allow(rustdoc::broken_intra_doc_links)]
 
 #[cfg(has_asm)]

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Work unit: `wedeo-filter-pad`.
 //!
 //! FFmpeg reference: `libavfilter/vf_pad.c`.

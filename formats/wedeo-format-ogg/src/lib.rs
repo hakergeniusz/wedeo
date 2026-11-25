@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Ogg container demuxer for wedeo.
 //!
 //! FFmpeg reference: `libavformat/ogg/demuxer.c` and the codec mappings in

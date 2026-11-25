@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use std::collections::VecDeque;
 
 use wedeo_codec::descriptor::{CodecCapabilities, CodecProperties};

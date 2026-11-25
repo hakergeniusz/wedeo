@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! HEVC CABAC (Context-Adaptive Binary Arithmetic Coding) decoder engine.
 //!
 //! FFmpeg reference: `libavcodec/hevc/cabac.c`, `libavcodec/cabac.c`,

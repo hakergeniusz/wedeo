@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Vorbis encoder adapter backed by the pure-Rust `vorbis-enc` crate
 //! (BSD-3-Clause, aoTuV b6.03). No upstream source is copied here.
 //!

@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_code)] // verified FFmpeg-derived SIMD/FFI/tile-threading kernels
 // H.264/AVC in-loop deblocking filter.
 //
 // Reduces blocking artifacts at macroblock and 4x4 block boundaries.
