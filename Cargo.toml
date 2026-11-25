@@ -22,6 +22,8 @@ members = [
     "adapters/wedeo-rav1e",
     "adapters/wedeo-h264-rusty",
     "adapters/wedeo-h265-oxideav",
+    "adapters/wedeo-aac-oxideav",
+    "adapters/wedeo-ac3-oxideav",
     "bins/wedeo-cli",
     "bins/wedeo-play",
     "tests/fate",
@@ -107,6 +109,8 @@ wedeo-rav1d = { path = "adapters/wedeo-rav1d", version = "0.2.0" }
 wedeo-rav1e = { path = "adapters/wedeo-rav1e", version = "0.2.0" }
 wedeo-h264-rusty = { path = "adapters/wedeo-h264-rusty", version = "0.2.0" }
 wedeo-h265-oxideav = { path = "adapters/wedeo-h265-oxideav", version = "0.2.0" }
+wedeo-aac-oxideav = { path = "adapters/wedeo-aac-oxideav", version = "0.2.0" }
+wedeo-ac3-oxideav = { path = "adapters/wedeo-ac3-oxideav", version = "0.2.0" }
 
 # Pure-Rust H.264 encoder (BSD-2-Clause). `default-features = false` avoids
 # the global allocator and the unsafe accel crate; `std` keeps diagnostics.
@@ -116,6 +120,12 @@ rusty_h264-common = { version = "0.17.4", default-features = false, features = [
 # Pure-Rust HEVC decoder + encoder (MIT). The adapter uses oxideav-core types.
 oxideav-h265 = "0.0.18"
 oxideav-core = "0.1"
+
+# Pure-Rust AAC decoder + encoder (MIT).
+oxideav-aac = "0.1.7"
+
+# Pure-Rust AC-3 / E-AC-3 decoder + encoder (MIT).
+oxideav-ac3 = "0.0.12"
 wedeo-codec-vp9 = { path = "codecs/wedeo-codec-vp9", version = "0.2.0" }
 wedeo-format-ivf = { path = "formats/wedeo-format-ivf", version = "0.2.0" }
 wedeo-format-webm = { path = "formats/wedeo-format-webm", version = "0.2.0" }

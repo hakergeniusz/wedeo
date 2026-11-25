@@ -28,6 +28,8 @@ wedeo-rav1d = { workspace = true }
 wedeo-rav1e = { workspace = true }
 wedeo-h264-rusty = { workspace = true }
 wedeo-h265-oxideav = { workspace = true }
+wedeo-aac-oxideav = { workspace = true }
+wedeo-ac3-oxideav = { workspace = true }
 wedeo-codec-vp9 = { workspace = true }
 wedeo-format-ivf = { workspace = true }
 wedeo-format-webm = { workspace = true }

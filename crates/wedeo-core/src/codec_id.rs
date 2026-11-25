@@ -16,11 +16,13 @@ pub enum CodecId {
     Mpeg4 = 12,
     Rawvideo = 13,
     H264 = 27,
-    Theora = 30, // AV_CODEC_ID_THEORA
-    Vp8 = 139,   // AV_CODEC_ID_VP8
-    Vp9 = 167,   // AV_CODEC_ID_VP9
-    Hevc = 173,  // AV_CODEC_ID_HEVC
-    Av1 = 225,   // AV_CODEC_ID_AV1
+    Theora = 30,  // AV_CODEC_ID_THEORA
+    Vp8 = 139,    // AV_CODEC_ID_VP8
+    Vp9 = 167,    // AV_CODEC_ID_VP9
+    Hevc = 173,   // AV_CODEC_ID_HEVC
+    Av1 = 225,    // AV_CODEC_ID_AV1
+    Ffv1 = 33,    // AV_CODEC_ID_FFV1
+    Prores = 147, // AV_CODEC_ID_PRORES
 
     // Audio codecs — start at 0x10000 per FFmpeg
     PcmS16le = 0x10000,
@@ -53,6 +55,7 @@ pub enum CodecId {
     Mp3 = 0x15001,
     Aac = 0x15002,
     Ac3 = 0x15003,
+    Eac3 = 0x15028,
     Vorbis = 0x15005,
     Flac = 0x1500C,
     Alac = 0x15010,
@@ -89,6 +92,8 @@ impl CodecId {
             CodecId::Vp9 => "vp9",
             CodecId::Av1 => "av1",
             CodecId::Hevc => "hevc",
+            CodecId::Ffv1 => "ffv1",
+            CodecId::Prores => "prores",
             CodecId::PcmS16le => "pcm_s16le",
             CodecId::PcmS16be => "pcm_s16be",
             CodecId::PcmU16le => "pcm_u16le",
@@ -116,6 +121,7 @@ impl CodecId {
             CodecId::Mp3 => "mp3",
             CodecId::Aac => "aac",
             CodecId::Ac3 => "ac3",
+            CodecId::Eac3 => "eac3",
             CodecId::Vorbis => "vorbis",
             CodecId::Flac => "flac",
             CodecId::Alac => "alac",
@@ -153,6 +159,8 @@ impl CodecId {
             "vp9" | "libvpx-vp9" => Self::Vp9,
             "av1" | "libaom-av1" | "librav1e" | "libsvtav1" => Self::Av1,
             "hevc" | "h265" | "libx265" => Self::Hevc,
+            "ffv1" => Self::Ffv1,
+            "prores" => Self::Prores,
             "pcm_s16le" => Self::PcmS16le,
             "pcm_s16be" => Self::PcmS16be,
             "pcm_u16le" => Self::PcmU16le,
@@ -180,6 +188,7 @@ impl CodecId {
             "mp3" | "libmp3lame" => Self::Mp3,
             "aac" | "libfdk_aac" => Self::Aac,
             "ac3" => Self::Ac3,
+            "eac3" => Self::Eac3,
             "vorbis" | "libvorbis" => Self::Vorbis,
             "flac" => Self::Flac,
             "alac" => Self::Alac,

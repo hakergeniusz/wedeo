@@ -2220,6 +2220,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-aac"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35453ffa827080f322dba5d2233879f008627d4ffb07c496c0c6fe3190b35048"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-ac3"
+version = "0.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "635118d86d2da8451863432e7325865cff2a6c15c3a7771d684ce6bfa4160d26"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "oxideav-core"
 version = "0.1.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3831,6 +3849,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "wedeo-aac-oxideav"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "oxideav-aac",
+ "oxideav-core",
+ "tracing",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-ac3-oxideav"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "oxideav-ac3",
+ "oxideav-core",
+ "tracing",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
 name = "wedeo-bsf-aac-adtstoasc"
 version = "0.2.0"
 dependencies = [
@@ -3862,6 +3904,8 @@ name = "wedeo-cli"
 version = "0.2.0"
 dependencies = [
  "tracing-subscriber",
+ "wedeo-aac-oxideav",
+ "wedeo-ac3-oxideav",
  "wedeo-bsf-aac-adtstoasc",
  "wedeo-bsf-h264-mp4toannexb",
  "wedeo-bsf-hevc-mp4toannexb",

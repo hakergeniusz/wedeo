@@ -21,6 +21,8 @@ use std::process;
 use std::time::Instant;
 
 // Ensure inventory registrations are linked in.
+use wedeo_aac_oxideav as _;
+use wedeo_ac3_oxideav as _;
 use wedeo_bsf_aac_adtstoasc as _;
 use wedeo_bsf_h264_mp4toannexb as _;
 use wedeo_bsf_hevc_mp4toannexb as _;
@@ -1799,6 +1801,14 @@ fn build_pipeline(
             enc_builder.sample_format = in_params.sample_format;
             enc_builder.channel_layout = in_params.channel_layout.clone();
             enc_builder.time_base = in_stream.time_base;
+            // Containers such as MP4 need global headers (ASC for AAC) and
+            // raw access units instead of ADTS frames.
+            if let Some(muxer_factory) = format_registry::find_muxer_by_name(format_name) {
+                let mflags = muxer_factory.descriptor().flags;
+                if mflags.contains(wedeo_format::muxer::OutputFormatFlags::GLOBALHEADER) {
+                    enc_builder.flags |= CodecFlags::GLOBAL_HEADER;
+                }
+            }
             if let Some(count) = opts.thread_count {
                 enc_builder = enc_builder.with_thread_count(count);
             }
@@ -1808,10 +1818,12 @@ fn build_pipeline(
             }
 
             let enc = enc_builder.open()?;
+            let encoder_extradata = enc.extradata();
             audio_encoder = Some(enc);
 
             let mut out_params =
                 wedeo_codec::decoder::CodecParameters::new(out_codec_id, MediaType::Audio);
+            out_params.extradata = encoder_extradata.unwrap_or_default();
             out_params.sample_rate = in_params.sample_rate;
             out_params.sample_format = in_params.sample_format;
             out_params.channel_layout = in_params.channel_layout.clone();
