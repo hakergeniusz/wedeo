@@ -474,11 +474,14 @@ impl Demuxer for OggDemuxer {
             params.width = pic.width;
             params.height = pic.height;
             let mut stream = Stream::new(index, params);
-            stream.time_base = Rational::new(1, 1_000_000);
+            // avformat_new_stream() defaults to 1/90000 for new streams.
+            stream.time_base = Rational::new(1, 90_000);
             stream
                 .metadata
                 .set("comment", picture_type_name(pic.picture_type));
-            stream.metadata.set("title", &pic.description);
+            if !pic.description.is_empty() {
+                stream.metadata.set("title", &pic.description);
+            }
             streams.push(stream);
 
             // `ff_add_attached_pic()` gives the packet KEY only; the framecrc

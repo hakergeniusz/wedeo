@@ -203,9 +203,12 @@ fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
     let mut acc = 0u32;
     let mut bits = 0u32;
     for &c in input {
-        let Some(v) = sextet(c) else {
+        // FFmpeg's map2[] uses 0xfe for NUL/'=' (clean termination, keep the
+        // decoded prefix) and 0xff for any other invalid byte (hard error).
+        if c == b'=' || c == 0 {
             break;
-        };
+        }
+        let v = sextet(c)?;
         acc = (acc << 6) | v;
         bits += 6;
         if bits >= 8 {
@@ -1372,9 +1375,10 @@ impl OggStream {
         }
         let mut pos = 0usize;
 
-        let picture_type = read_be32(&block, &mut pos).unwrap_or(0);
+        // FFmpeg clamps an out-of-range type to 0 (Other) and still attaches.
+        let mut picture_type = read_be32(&block, &mut pos).unwrap_or(0);
         if picture_type >= 21 {
-            return;
+            picture_type = 0;
         }
         let Some(mime_len) = read_be32(&block, &mut pos) else {
             return;
@@ -1401,10 +1405,7 @@ impl OggStream {
             "JPG",
             "PNG",
         ];
-        if !KNOWN_MIMES
-            .iter()
-            .any(|known| mime.eq_ignore_ascii_case(known))
-        {
+        if !KNOWN_MIMES.iter().any(|known| mime == *known) {
             debug!(%mime, "Unknown attached picture mimetype");
             return;
         }
