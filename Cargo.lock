@@ -2258,6 +2258,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-prores"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc234011fb6aa95051ea4d7309f21b895663c14aee97347882e3358beab912f5"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3949,6 +3958,7 @@ dependencies = [
  "wedeo-format-webm",
  "wedeo-h264-rusty",
  "wedeo-h265-oxideav",
+ "wedeo-prores-oxideav",
  "wedeo-rav1d",
  "wedeo-rav1e",
  "wedeo-symphonia",
@@ -4487,6 +4497,18 @@ dependencies = [
  "wedeo-symphonia",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "wedeo-prores-oxideav"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "oxideav-core",
+ "oxideav-prores",
+ "tracing",
+ "wedeo-codec",
+ "wedeo-core",
 ]
 
 [[package]]

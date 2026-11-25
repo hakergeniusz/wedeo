@@ -339,6 +339,7 @@ fn is_supported_codec(codec_id: CodecId) -> bool {
         CodecId::H264
             | CodecId::Hevc
             | CodecId::Av1
+            | CodecId::Prores
             | CodecId::Aac
             | CodecId::PcmS16be
             | CodecId::PcmS16le

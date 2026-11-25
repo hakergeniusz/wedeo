@@ -332,6 +332,7 @@ fn write_stsd(track: &TrackState) -> Vec<u8> {
         CodecId::H264 => write_avc1_entry(track),
         CodecId::Hevc => write_hvc1_entry(track),
         CodecId::Av1 => write_av01_entry(track),
+        CodecId::Prores => write_prores_entry(track),
         CodecId::Aac => write_mp4a_entry(track),
         _ => write_generic_audio_entry(track),
     };
@@ -505,6 +506,27 @@ fn write_avc1_entry(track: &TrackState) -> Vec<u8> {
     }
 
     mp4_box(b"avc1", &c)
+}
+
+/// ProRes visual sample entry (Apple `apcn`, Standard profile). ProRes is
+/// self-describing, so no configuration box is needed.
+fn write_prores_entry(track: &TrackState) -> Vec<u8> {
+    let mut c = Vec::with_capacity(86);
+    c.extend_from_slice(&[0u8; 6]); // reserved
+    c.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
+    c.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
+    c.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    c.extend_from_slice(&[0u8; 12]); // pre_defined
+    c.extend_from_slice(&(track.width as u16).to_be_bytes());
+    c.extend_from_slice(&(track.height as u16).to_be_bytes());
+    c.extend_from_slice(&0x0048_0000u32.to_be_bytes()); // horiz resolution 72 dpi
+    c.extend_from_slice(&0x0048_0000u32.to_be_bytes()); // vert resolution 72 dpi
+    c.extend_from_slice(&0u32.to_be_bytes()); // reserved
+    c.extend_from_slice(&1u16.to_be_bytes()); // frame_count
+    c.extend_from_slice(&[0u8; 32]); // compressorname
+    c.extend_from_slice(&0x0018u16.to_be_bytes()); // depth = 24
+    c.extend_from_slice(&(-1i16).to_be_bytes()); // pre_defined = -1
+    mp4_box(b"apcn", &c)
 }
 
 /// hvc1 sample entry for HEVC.
