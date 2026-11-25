@@ -229,6 +229,7 @@ pub fn parse_stsd(io: &mut BufferedIo, _payload_size: u64) -> Result<StsdEntry> 
         b"hev1" | b"hvc1" => parse_hev1_entry(io, fourcc, entry_payload),
         b"av01" => parse_av01_entry(io, fourcc, entry_payload),
         b"mp4a" => parse_mp4a_entry(io, fourcc, entry_payload),
+        b"opus" | b"Opus" => parse_opus_entry(io, fourcc, entry_payload),
         _ => {
             // Unknown codec — skip the entry
             if entry_payload > 0 {
@@ -467,6 +468,60 @@ fn parse_mp4a_entry(io: &mut BufferedIo, fourcc: [u8; 4], payload_size: u64) -> 
         height: 0,
         channel_count,
         sample_rate,
+        extradata,
+    })
+}
+
+/// Parse an `opus` sample entry and build an RFC 7845 OpusHead from its dOps.
+fn parse_opus_entry(io: &mut BufferedIo, fourcc: [u8; 4], payload_size: u64) -> Result<StsdEntry> {
+    let start_pos = io.tell()?;
+    io.skip(6)?; // reserved
+    io.skip(2)?; // data_reference_index
+    io.skip(8)?; // reserved
+    let channel_count = io.read_u16be()?;
+    io.skip(2)?; // sample_size
+    io.skip(2)?; // pre_defined
+    io.skip(2)?; // reserved
+    io.skip(4)?; // sample_rate (Opus is always decoded at 48 kHz)
+
+    let end_pos = start_pos + payload_size;
+    let mut extradata = Vec::new();
+    while io.tell()? + 8 <= end_pos {
+        let sub = read_box_header(io)?;
+        let sub_payload = sub.payload_size().unwrap_or(0);
+        if &sub.box_type == b"dOps" && sub_payload >= 19 {
+            let mut dops = vec![0u8; sub_payload as usize];
+            io.read_exact(&mut dops)?;
+            let channels = dops[1].max(1);
+            let pre_skip = u16::from_le_bytes([dops[2], dops[3]]);
+            let input_rate = u32::from_le_bytes([dops[4], dops[5], dops[6], dops[7]]);
+            let gain = i16::from_le_bytes([dops[8], dops[9]]);
+            let family = dops[10];
+            extradata.extend_from_slice(b"OpusHead");
+            extradata.push(1); // version
+            extradata.push(channels);
+            extradata.extend_from_slice(&pre_skip.to_le_bytes());
+            extradata.extend_from_slice(&input_rate.to_le_bytes());
+            extradata.extend_from_slice(&gain.to_le_bytes());
+            extradata.push(family);
+            if family != 0 && dops.len() > 11 {
+                extradata.extend_from_slice(&dops[11..]);
+            }
+        } else if sub_payload > 0 {
+            io.skip(sub_payload)?;
+        }
+    }
+    let pos = io.tell()?;
+    if pos < end_pos {
+        io.skip(end_pos - pos)?;
+    }
+
+    Ok(StsdEntry {
+        fourcc,
+        width: 0,
+        height: 0,
+        channel_count,
+        sample_rate: 48_000,
         extradata,
     })
 }

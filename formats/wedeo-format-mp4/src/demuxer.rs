@@ -16,6 +16,7 @@ use wedeo_core::metadata::Metadata;
 use wedeo_core::packet::{Packet, PacketFlags};
 use wedeo_core::pixel_format::PixelFormat;
 use wedeo_core::rational::Rational;
+use wedeo_core::sample_format::SampleFormat;
 use wedeo_format::demuxer::{
     Demuxer, DemuxerHeader, InputFormatDescriptor, InputFormatFlags, ProbeData, SeekFlags, Stream,
 };
@@ -322,10 +323,14 @@ impl Demuxer for Mp4Demuxer {
                 // Audio
                 let codec_id = match &stsd.fourcc {
                     b"mp4a" => CodecId::Aac,
+                    b"opus" | b"Opus" => CodecId::Opus,
                     _ => continue,
                 };
                 let mut params = CodecParameters::new(codec_id, MediaType::Audio);
                 params.sample_rate = stsd.sample_rate;
+                if codec_id == CodecId::Opus {
+                    params.sample_format = SampleFormat::Flt;
+                }
                 params.channel_layout = if stsd.channel_count == 1 {
                     ChannelLayout::mono()
                 } else if stsd.channel_count == 2 {
