@@ -2520,11 +2520,6 @@ impl H264Decoder {
                 reader.range()
             );
 
-            // Check terminate after both MBs of pair
-            if reader.get_cabac_terminate() {
-                break;
-            }
-
             // Advance to next pair
             mb_x += 1;
             if mb_x >= mb_width {
@@ -2532,6 +2527,12 @@ impl H264Decoder {
                 inline_deblock_pair_row(fdc, mb_y / 2, mb_width, deblock_enabled);
                 mb_x = 0;
                 mb_y += 2; // Skip to next pair row
+            }
+
+            // A slice that terminates at a pair-row boundary still completes
+            // that row (FFmpeg: CABAC termination runs after row completion).
+            if reader.get_cabac_terminate() {
+                break;
             }
         }
 
