@@ -22,16 +22,42 @@ const NOPTS: i64 = i64::MIN;
 type Frame = (usize, i64, i64, i64, usize, u32);
 
 const OGG_SAMPLES: &[&str] = &[
+    // Vorbis (including old encoder versions, chained streams and lacing).
     "vorbis/1.0.1-test_small.ogg",
     "vorbis/mono_small.ogg",
     "vorbis/6.ogg",
+    "vorbis/1.0-test_small.ogg",
+    "vorbis/beta3-test_small.ogg",
+    "vorbis/beta4-test_small.ogg",
+    "vorbis/chain-test1_small.ogg",
+    "vorbis/chain-test2_small.ogg",
+    "vorbis/highrate-test_small.ogg",
+    "vorbis/lsp-test_small.ogg",
+    "vorbis/lsp-test2_small.ogg",
+    "vorbis/lsp-test3_small.ogg",
+    "vorbis/lsp-test4_small.ogg",
+    "vorbis/moog_small.ogg",
+    "vorbis/rc1-test_small.ogg",
+    "vorbis/rc2-test_small.ogg",
+    "vorbis/rc2-test2_small.ogg",
+    "vorbis/rc3-test_small.ogg",
+    "vorbis/sleepzor_small.ogg",
+    "vorbis/test-short2_small.ogg",
+    "vorbis/vorbis_chapter_extension_demo.ogg",
+    "ogg-vorbis/tos.ogg",
+    "ogg-vorbis/chained-meta.ogg",
+    // Opus (pre-skip, comments, cover art).
     "audiomatch/tones_opus_48000_stereo.opus",
     "ogg/intro-partial.opus",
+    "ogg-opus/chained-meta.ogg",
+    "cover_art/ogg_vorbiscomment_cover.opus",
+    // Theora / VP3 video.
     "ogg/bear.ogv",
     "ogg/videotest.ogv",
+    "ogg/empty_theora_packets.ogv",
+    "vp3/offset_test.ogv",
+    // FLAC in Ogg.
     "ogg-flac/chained-meta.ogg",
-    "ogg-vorbis/chained-meta.ogg",
-    "ogg-opus/chained-meta.ogg",
 ];
 
 /// FFmpeg's non-standard Adler-32 (`av_adler32_update` starts with s1=s2=0).
@@ -115,13 +141,13 @@ fn wedeo_framecrc(path: &Path) -> Vec<Frame> {
     frames
 }
 
-fn compare_sample(relative: &str, path: &Path) {
+fn compare_sample(relative: &str, path: &Path) -> bool {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
     let Some(ffmpeg) = ffmpeg_framecrc(path) else {
         eprintln!("SKIP {relative}: ffmpeg unavailable");
-        return;
+        return true;
     };
     let wedeo = wedeo_framecrc(path);
 
@@ -139,7 +165,7 @@ fn compare_sample(relative: &str, path: &Path) {
             let b = ffmpeg.len() - 1 - i;
             eprintln!("  wedeo[{a}]={:?} ffmpeg[{b}]={:?}", wedeo[a], ffmpeg[b]);
         }
-        panic!("{relative}: packet count mismatch");
+        return false;
     }
 
     // FFmpeg's av_read_frame() reorders packets across streams by DTS; our
@@ -166,13 +192,13 @@ fn compare_sample(relative: &str, path: &Path) {
 
     let mut mismatches = 0;
     for (s, (ws, fs)) in by_stream_w.iter().zip(by_stream_f.iter()).enumerate() {
-        assert_eq!(
-            ws.len(),
-            fs.len(),
-            "{relative} stream {s}: packet count differs (wedeo={} ffmpeg={})",
-            ws.len(),
-            fs.len()
-        );
+        if ws.len() != fs.len() {
+            eprintln!(
+                "{relative} stream {s}: packet count differs (wedeo={} ffmpeg={})",
+                ws.len(),
+                fs.len()
+            );
+        }
         for (i, (w, f)) in ws.iter().zip(fs.iter()).enumerate() {
             if w != f {
                 if mismatches < 8 {
@@ -182,8 +208,16 @@ fn compare_sample(relative: &str, path: &Path) {
             }
         }
     }
-    assert_eq!(mismatches, 0, "{relative}: {mismatches} packets differ");
+    if mismatches > 0 || wedeo.len() != ffmpeg.len() {
+        eprintln!(
+            "FAIL {relative}: {} of {} packets differ",
+            mismatches.max(wedeo.len().abs_diff(ffmpeg.len())),
+            wedeo.len().max(ffmpeg.len())
+        );
+        return false;
+    }
     eprintln!("PASS {relative}: {} packets bitexact", wedeo.len());
+    true
 }
 
 #[test]
@@ -238,13 +272,17 @@ fn test_ogg_stream_metadata() {
 #[test]
 fn test_framecrc_bitexact() {
     let mut checked = 0usize;
+    let mut failed = 0usize;
     for relative in OGG_SAMPLES {
         let Some(sample) = wedeo_fate::fate_sample(relative) else {
             eprintln!("Skipping missing FATE sample: {relative}");
             continue;
         };
-        compare_sample(relative, &sample);
+        if !compare_sample(relative, &sample) {
+            failed += 1;
+        }
         checked += 1;
     }
     assert!(checked > 0, "no FATE Ogg samples available");
+    assert_eq!(failed, 0, "{failed} of {checked} Ogg samples diverged");
 }

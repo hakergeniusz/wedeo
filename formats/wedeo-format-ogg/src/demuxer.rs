@@ -2,11 +2,17 @@
 //!
 //! Ported from FFmpeg's `libavformat/ogg/demuxer.c`.
 
+use std::collections::VecDeque;
+
 use tracing::{debug, trace, warn};
+use wedeo_codec::decoder::CodecParameters;
 use wedeo_core::buffer::Buffer;
+use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::{Error, Result};
+use wedeo_core::media_type::MediaType;
 use wedeo_core::metadata::Metadata;
 use wedeo_core::packet::{Packet, PacketFlags, PacketSideData, PacketSideDataType};
+use wedeo_core::rational::Rational;
 use wedeo_format::demuxer::{
     Demuxer, DemuxerHeader, InputFormatDescriptor, InputFormatFlags, PROBE_SCORE_MAX, ProbeData,
     SeekFlags, Stream,
@@ -15,7 +21,9 @@ use wedeo_format::io::BufferedIo;
 use wedeo_format::registry::DemuxerFactory;
 
 use crate::crc::page_crc;
-use crate::mapping::{CodecKind, NOPTS, OGG_NOGRANULE_VALUE, OggStream, find_codec};
+use crate::mapping::{
+    CodecKind, NOPTS, OGG_NOGRANULE_VALUE, OggStream, find_codec, picture_type_name,
+};
 
 const MAX_PAGE_SIZE: usize = 65307;
 const OGG_FLAG_CONT: u8 = 1;
@@ -47,6 +55,11 @@ pub(crate) struct OggDemuxer {
     /// accumulating durations; our thin `InputContext` has no such layer, so
     /// the demuxer reproduces it here for bit-exact framecrc parity.
     next_pts: Vec<i64>,
+    /// Attached-picture packets from `METADATA_BLOCK_PICTURE` comments. FFmpeg
+    /// queues these in `avformat_queue_attached_pictures()`; we drain them
+    /// first because `read_packet()` has no cross-stream DTS interleaving and
+    /// the bitexact test compares each stream's packet sequence separately.
+    pending_pictures: VecDeque<Packet>,
 }
 
 impl OggDemuxer {
@@ -58,6 +71,7 @@ impl OggDemuxer {
             headers: false,
             header_read: false,
             next_pts: Vec::new(),
+            pending_pictures: VecDeque::new(),
         }
     }
 
@@ -431,7 +445,7 @@ impl Demuxer for OggDemuxer {
             }
         }
 
-        let streams: Vec<Stream> = self
+        let mut streams: Vec<Stream> = self
             .streams
             .iter()
             .enumerate()
@@ -445,6 +459,38 @@ impl Demuxer for OggDemuxer {
                 stream
             })
             .collect();
+
+        // FFmpeg creates an attached-picture stream for every
+        // METADATA_BLOCK_PICTURE while parsing OpusTags/Vorbis comments, so
+        // these streams follow the real Ogg logical bitstreams in order.
+        let picture_base = streams.len();
+        let mut pictures = Vec::new();
+        for os in &self.streams {
+            pictures.extend(os.pictures.iter().cloned());
+        }
+        for (offset, pic) in pictures.into_iter().enumerate() {
+            let index = picture_base + offset;
+            let mut params = CodecParameters::new(CodecId::Mjpeg, MediaType::Video);
+            params.width = pic.width;
+            params.height = pic.height;
+            let mut stream = Stream::new(index, params);
+            stream.time_base = Rational::new(1, 1_000_000);
+            stream
+                .metadata
+                .set("comment", picture_type_name(pic.picture_type));
+            stream.metadata.set("title", &pic.description);
+            streams.push(stream);
+
+            // `ff_add_attached_pic()` gives the packet KEY only; the framecrc
+            // CLI maps NOPTS to 0, which is what the bitexact test compares.
+            let mut pkt = Packet::new();
+            pkt.data = Buffer::from_slice(&pic.data);
+            pkt.stream_index = index;
+            pkt.pts = 0;
+            pkt.dts = 0;
+            pkt.flags = PacketFlags::KEY;
+            self.pending_pictures.push_back(pkt);
+        }
 
         self.next_pts = vec![NOPTS; self.streams.len()];
         let _ = OGG_FLAG_EOS;
@@ -460,6 +506,9 @@ impl Demuxer for OggDemuxer {
     fn read_packet(&mut self, io: &mut BufferedIo) -> Result<Packet> {
         if !self.header_read {
             return Err(Error::InvalidData);
+        }
+        if let Some(pkt) = self.pending_pictures.pop_front() {
+            return Ok(pkt);
         }
         let packet = loop {
             match self.ogg_packet(io)? {

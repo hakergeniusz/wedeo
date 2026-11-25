@@ -19,6 +19,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Per-packet tuple collected for bitexact comparison.
+type PacketInfo = (i64, i64, u32, u32, bool);
+
 // Ensure the demuxer registration is linked into the test binary.
 use wedeo_format_flv_demux as _;
 
@@ -378,7 +381,7 @@ fn diagnostic_all_flv_samples() {
                 st.duration
             );
         }
-        let mut w: Vec<Vec<(i64, i64, u32, u32, bool)>> = vec![Vec::new(); ctx.streams.len()];
+        let mut w: Vec<Vec<PacketInfo>> = vec![Vec::new(); ctx.streams.len()];
         loop {
             match ctx.read_packet() {
                 Ok(p) => w[p.stream_index].push((

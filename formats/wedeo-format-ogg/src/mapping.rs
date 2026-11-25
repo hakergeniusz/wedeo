@@ -146,6 +146,77 @@ pub struct OpusPrivate {
     pub cur_dts: i64,
 }
 
+/// An attached picture decoded from a `METADATA_BLOCK_PICTURE` Vorbis comment.
+/// Mirrors the output of FFmpeg's `ff_flac_parse_picture()` (flac_picture.c).
+#[derive(Clone, Debug)]
+pub struct PictureData {
+    /// Raw picture payload (JPEG/PNG bytes), emitted as an attached-pic packet.
+    pub data: Vec<u8>,
+    pub description: String,
+    pub width: u32,
+    pub height: u32,
+    pub picture_type: u32,
+}
+
+/// `ff_id3v2_picture_types` (libavformat/id3v2/reader.c:114).
+pub fn picture_type_name(index: u32) -> &'static str {
+    const TYPES: [&str; 21] = [
+        "Other",
+        "32x32 pixels 'file icon'",
+        "Other file icon",
+        "Cover (front)",
+        "Cover (back)",
+        "Leaflet page",
+        "Media (e.g. label side of CD)",
+        "Lead artist/lead performer/soloist",
+        "Artist/performer",
+        "Conductor",
+        "Band/Orchestra",
+        "Composer",
+        "Lyricist/text writer",
+        "Recording Location",
+        "During recording",
+        "During performance",
+        "Movie/video screen capture",
+        "A bright coloured fish",
+        "Illustration",
+        "Band/artist logotype",
+        "Publisher/Studio logotype",
+    ];
+    TYPES.get(index as usize).copied().unwrap_or("Other")
+}
+
+/// Decode RFC 4648 base64. Like FFmpeg's `av_base64_decode()`, decoding stops
+/// at the first invalid character ('=' included).
+fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
+    fn sextet(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for &c in input {
+        let Some(v) = sextet(c) else {
+            break;
+        };
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1u32 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 /// Complete state of one logical Ogg bitstream.
 pub struct OggStream {
     pub serial: u32,
@@ -182,6 +253,9 @@ pub struct OggStream {
     pub duration: i64,
     pub private: CodecPrivate,
     pub metadata: Vec<(String, String)>,
+    /// Attached pictures from `METADATA_BLOCK_PICTURE` comments (FFmpeg
+    /// creates a new stream and an attached-pic packet for each one).
+    pub pictures: Vec<PictureData>,
 }
 
 impl OggStream {
@@ -221,6 +295,7 @@ impl OggStream {
             duration: NOPTS,
             private: CodecPrivate::None,
             metadata: Vec::new(),
+            pictures: Vec::new(),
         }
     }
 
@@ -1261,10 +1336,112 @@ impl OggStream {
             let entry = String::from_utf8_lossy(&data[pos..pos + l]).into_owned();
             pos += l;
             if let Some((key, value)) = entry.split_once('=') {
-                self.metadata
-                    .push((key.to_ascii_lowercase(), value.to_string()));
+                let lower = key.to_ascii_lowercase();
+                if lower == "metadata_block_picture" {
+                    self.parse_picture_block(value.as_bytes());
+                } else {
+                    self.metadata.push((lower, value.to_string()));
+                }
             }
         }
+    }
+
+    /// `ff_flac_parse_picture()` (libavformat/flac_picture.c): base64-decode a
+    /// FLAC picture block and retain the raw picture payload. FFmpeg attaches
+    /// each picture to a new stream; we store it here and the demuxer creates
+    /// the streams after all headers have been parsed.
+    fn parse_picture_block(&mut self, value: &[u8]) {
+        let Some(block) = base64_decode(value) else {
+            return;
+        };
+        if block.len() < 34 {
+            return;
+        }
+        fn read_be32(block: &[u8], pos: &mut usize) -> Option<u32> {
+            if *pos + 4 > block.len() {
+                return None;
+            }
+            let v = u32::from_be_bytes([
+                block[*pos],
+                block[*pos + 1],
+                block[*pos + 2],
+                block[*pos + 3],
+            ]);
+            *pos += 4;
+            Some(v)
+        }
+        let mut pos = 0usize;
+
+        let picture_type = read_be32(&block, &mut pos).unwrap_or(0);
+        if picture_type >= 21 {
+            return;
+        }
+        let Some(mime_len) = read_be32(&block, &mut pos) else {
+            return;
+        };
+        let mime_len = mime_len as usize;
+        if mime_len == 0 || mime_len >= 64 || pos + mime_len + 24 > block.len() {
+            return;
+        }
+        let mime = String::from_utf8_lossy(&block[pos..pos + mime_len]).into_owned();
+        pos += mime_len;
+        // `ff_id3v2_mime_tags` (libavformat/id3v2/reader.c:138). wedeo has no
+        // CodecId for most of these image formats, so every recognized MIME
+        // maps to Mjpeg here; only the raw payload and stream index matter for
+        // framecrc parity. FFmpeg also forces PNG on a PNG signature.
+        const KNOWN_MIMES: [&str; 10] = [
+            "image/gif",
+            "image/jpeg",
+            "image/jpg",
+            "image/jxl",
+            "image/png",
+            "image/tiff",
+            "image/bmp",
+            "image/webp",
+            "JPG",
+            "PNG",
+        ];
+        if !KNOWN_MIMES
+            .iter()
+            .any(|known| mime.eq_ignore_ascii_case(known))
+        {
+            debug!(%mime, "Unknown attached picture mimetype");
+            return;
+        }
+
+        let Some(desc_len) = read_be32(&block, &mut pos) else {
+            return;
+        };
+        let desc_len = desc_len as usize;
+        if desc_len > block.len().saturating_sub(pos + 20) {
+            return;
+        }
+        let description = String::from_utf8_lossy(&block[pos..pos + desc_len]).into_owned();
+        pos += desc_len;
+
+        let Some(width) = read_be32(&block, &mut pos) else {
+            return;
+        };
+        let Some(height) = read_be32(&block, &mut pos) else {
+            return;
+        };
+        pos += 8; // depth + colors
+        let Some(data_len) = read_be32(&block, &mut pos) else {
+            return;
+        };
+        let data_len = data_len as usize;
+        if data_len == 0 || pos + data_len > block.len() {
+            return;
+        }
+        let data = block[pos..pos + data_len].to_vec();
+
+        self.pictures.push(PictureData {
+            data,
+            description,
+            width,
+            height,
+            picture_type,
+        });
     }
 
     fn matches_private(&self, tag: CodecPrivateTag) -> bool {
