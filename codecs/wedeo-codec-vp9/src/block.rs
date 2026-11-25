@@ -504,7 +504,10 @@ fn decode_block(
         {
             skip = true;
             let row7 = (row >> 1) & 7;
-            for c in col..col + w4 {
+            // above.skip is indexed in 4x4 columns (two per 8x8 MI); the
+            // whole MI is marked skip for sub-8x8 partitions too.
+            let skip_w4 = BWH_TAB[0][bs as usize][0] as usize;
+            for c in col..col + skip_w4 {
                 if c < td.above.skip.len() {
                     td.above.skip[c] = 1;
                 }
@@ -1047,10 +1050,11 @@ fn decode_inter_mode(
     }
 
     // --- MV search context ---
-    // MV clamping bounds: cols_4x4/rows_4x4 and col/row are in 4×4 units,
-    // so bw4/bh4 must also be in 4×4 units (BWH_TAB[0], not BWH_TAB[1]).
-    let bw4 = BWH_TAB[0][bs as usize][0] as i32;
-    let bh4 = BWH_TAB[0][bs as usize][1] as i32;
+    // FFmpeg uses 8x8-aligned block extents (ff_vp9_bwh_tab[1] * 2 in 4x4
+    // units) for MV clamping. For sub-8x8 partitions that covers the whole
+    // 8x8 MI (two 4x4 cells), not just the single decoded 4x4 block.
+    let bw4 = BWH_TAB[1][bs as usize][0] as i32 * 2;
+    let bh4 = BWH_TAB[1][bs as usize][1] as i32 * 2;
     let mv_ctx = MvSearchCtx {
         min_mv: [
             (-(128 + col as i32 * 32)).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
@@ -2246,8 +2250,9 @@ fn update_ctx(
     filter_id: u8,
     vref: u8,
 ) {
-    // Above context arrays are cols_4x4 entries (4×4 units) → use BWH_TAB[0] for width.
-    let w4 = BWH_TAB[0][bs as usize][0] as usize;
+    // FFmpeg's above-context writes span the whole 8x8 MI (bwh_tab[1] * 2
+    // in 4x4 units), including both 4x4 cells of a sub-8x8 partition.
+    let w4 = BWH_TAB[1][bs as usize][0] as usize * 2;
     // Left context arrays are 8 entries (8×8 units) → use BWH_TAB[1] for height.
     let h4 = BWH_TAB[1][bs as usize][1] as usize;
     // row is in 4×4 units; left context needs 8×8-unit row within the SB.
