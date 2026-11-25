@@ -44,6 +44,7 @@ algorithms and implementations are essential to the rewrite.
 | [oxideav-prores](https://crates.io/crates/oxideav-prores) 0.1.3 | Pure-Rust ProRes decoding and encoding | MIT | `adapters/wedeo-prores-oxideav` (dependency only) |
 | [oxideav-mpeg4video](https://crates.io/crates/oxideav-mpeg4video) 0.1.11 | Pure-Rust MPEG-4 Part 2 decoding and encoding | MIT | `adapters/wedeo-mpeg4-oxideav` (dependency only) |
 | [oxideav-ffv1](https://crates.io/crates/oxideav-ffv1) 0.0.11 | Pure-Rust FFV1 lossless decoding and encoding | MIT | `adapters/wedeo-ffv1-oxideav` (dependency only) |
+| [vorbis-enc](https://crates.io/crates/vorbis-enc) 0.1.1 | Pure-Rust Vorbis encoding (aoTuV b6.03 port); see its `NOTICE` for aoTuV/libvorbis credits | BSD-3-Clause | `adapters/wedeo-vorbis-enc` (dependency only; adapter glue is LGPL-2.1-or-later) |
 | [Symphonia](https://github.com/pdeljanov/Symphonia) 0.5.5 | Audio demuxing and decoding (AAC, MP3, Vorbis, FLAC, ALAC, WavPack, ADPCM, PCM) | MPL-2.0 | `adapters/wedeo-symphonia` |
 | [rav1d](https://github.com/memorysafety/rav1d) (git, commit `9d78516`) | AV1 decoding; pure-Rust port of dav1d | BSD-2-Clause | `adapters/wedeo-rav1d`. Its `COPYING` credits VideoLAN, the dav1d authors and the Internet Security Research Group; retain that notice in distributions |
 | [av-bitstream](https://github.com/rust-av/rust-av) 0.2.1 | Exp-Golomb / bit-reader primitives (Luca Barbato, rust-av) | MIT | `crates/wedeo-codec/src/bitstream.rs` |

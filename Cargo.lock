@@ -3620,6 +3620,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "vorbis-enc"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1540da736810ed17651b1dbbd7a79d09c5adf714e7c331cc13f47d847ce17f2"
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3982,6 +3988,7 @@ dependencies = [
  "wedeo-rav1d",
  "wedeo-rav1e",
  "wedeo-symphonia",
+ "wedeo-vorbis-enc",
 ]
 
 [[package]]
@@ -4603,6 +4610,16 @@ dependencies = [
  "wedeo-codec",
  "wedeo-core",
  "wedeo-format",
+]
+
+[[package]]
+name = "wedeo-vorbis-enc"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "vorbis-enc",
+ "wedeo-codec",
+ "wedeo-core",
 ]
 
 [[package]]

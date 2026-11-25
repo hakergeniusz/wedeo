@@ -1,0 +1,19 @@
+[package]
+name = "wedeo-vorbis-enc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "Vorbis encoder adapter for wedeo backed by pure-Rust vorbis-enc (BSD-3-Clause)"
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+vorbis-enc = { workspace = true }
+
+[lints]
+workspace = true

@@ -27,6 +27,7 @@ members = [
     "adapters/wedeo-prores-oxideav",
     "adapters/wedeo-mpeg4-oxideav",
     "adapters/wedeo-ffv1-oxideav",
+    "adapters/wedeo-vorbis-enc",
     "bins/wedeo-cli",
     "bins/wedeo-play",
     "tests/fate",
@@ -117,6 +118,7 @@ wedeo-ac3-oxideav = { path = "adapters/wedeo-ac3-oxideav", version = "0.2.0" }
 wedeo-prores-oxideav = { path = "adapters/wedeo-prores-oxideav", version = "0.2.0" }
 wedeo-mpeg4-oxideav = { path = "adapters/wedeo-mpeg4-oxideav", version = "0.2.0" }
 wedeo-ffv1-oxideav = { path = "adapters/wedeo-ffv1-oxideav", version = "0.2.0" }
+wedeo-vorbis-enc = { path = "adapters/wedeo-vorbis-enc", version = "0.2.0" }
 
 # Pure-Rust H.264 encoder (BSD-2-Clause). `default-features = false` avoids
 # the global allocator and the unsafe accel crate; `std` keeps diagnostics.
@@ -141,6 +143,9 @@ oxideav-mpeg4video = "0.1.11"
 
 # Pure-Rust FFV1 lossless decoder + encoder (MIT).
 oxideav-ffv1 = "0.0.11"
+
+# Pure-Rust Vorbis encoder, aoTuV b6.03 port (BSD-3-Clause).
+vorbis-enc = "0.1.1"
 wedeo-codec-vp9 = { path = "codecs/wedeo-codec-vp9", version = "0.2.0" }
 wedeo-format-ivf = { path = "formats/wedeo-format-ivf", version = "0.2.0" }
 wedeo-format-webm = { path = "formats/wedeo-format-webm", version = "0.2.0" }

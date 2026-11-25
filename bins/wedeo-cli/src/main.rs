@@ -68,6 +68,7 @@ use wedeo_prores_oxideav as _;
 use wedeo_rav1d as _;
 use wedeo_rav1e as _;
 use wedeo_symphonia as _;
+use wedeo_vorbis_enc as _;
 
 use wedeo_codec::decoder::{Decoder, DecoderBuilder};
 use wedeo_codec::encoder::{CodecFlags, Encoder, EncoderBuilder};
