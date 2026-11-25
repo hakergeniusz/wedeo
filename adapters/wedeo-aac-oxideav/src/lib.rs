@@ -232,7 +232,7 @@ pub struct OxideavAacEncoder {
 
 impl OxideavAacEncoder {
     fn new(builder: &EncoderBuilder) -> Result<Self> {
-        if builder.sample_format != WSample::S16 {
+        if !matches!(builder.sample_format, WSample::S16 | WSample::Flt) {
             return Err(Error::PatchwelcomeNotImplemented);
         }
         let sample_rate = builder.sample_rate.max(1);
@@ -300,12 +300,35 @@ impl WEncoder for OxideavAacEncoder {
         match frame {
             Some(frame) => {
                 let audio = frame.audio().ok_or(Error::InvalidData)?;
-                if audio.format != WSample::S16 {
+                if audio.format == WSample::S16 {
+                    let mut data = Vec::new();
+                    for plane in &audio.planes {
+                        data.extend_from_slice(&plane.buffer.data()[plane.offset..]);
+                    }
+                    let of = OFrame::Audio(OAudioFrame {
+                        samples: audio.nb_samples,
+                        pts: if frame.pts == NOPTS {
+                            None
+                        } else {
+                            Some(frame.pts)
+                        },
+                        data: vec![data],
+                    });
+                    self.inner.send_frame(&of).map_err(to_w_error)?;
+                    return self.drain();
+                }
+                if audio.format != WSample::Flt {
                     return Err(Error::PatchwelcomeNotImplemented);
                 }
-                let mut data = Vec::new();
-                for plane in &audio.planes {
-                    data.extend_from_slice(&plane.buffer.data()[plane.offset..]);
+                // Symphonia decodes Opus to interleaved f32; oxideav-aac
+                // accepts only interleaved S16.
+                let plane = audio.planes.first().ok_or(Error::InvalidData)?;
+                let bytes = &plane.buffer.data()[plane.offset..];
+                let mut data = Vec::with_capacity(bytes.len() / 2);
+                for chunk in bytes.chunks_exact(4) {
+                    let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    let s = (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+                    data.extend_from_slice(&s.to_ne_bytes());
                 }
                 let of = OFrame::Audio(OAudioFrame {
                     samples: audio.nb_samples,
@@ -365,7 +388,7 @@ impl EncoderFactory for OxideavAacEncoderFactory {
                 media_type: MediaType::Audio,
                 capabilities: CodecCapabilities::empty(),
                 properties: CodecProperties::LOSSY,
-                supported_sample_formats: &[WSample::S16],
+                supported_sample_formats: &[WSample::S16, WSample::Flt],
                 supported_pixel_formats: &[],
                 priority: 50,
             };

@@ -289,6 +289,10 @@ unsafe impl Send for Rav1dDecoderWrapper {}
 struct Rav1dDecoderWrapper {
     ctx: Option<Dav1dContext>,
     pending_packets: VecDeque<Packet>,
+    /// Packet timestamps retained for pictures that rav1d returns with the
+    /// sentinel timestamp. rav1d does not always propagate `Dav1dData.m`
+    /// through to `Dav1dPicture.m`, so this is the authoritative fallback.
+    timestamps: VecDeque<(i64, i64)>,
     pending_frames: VecDeque<Frame>,
     drained: bool,
     codec_descriptor: CodecDescriptor,
@@ -337,6 +341,7 @@ impl Rav1dDecoderWrapper {
         let mut wrapper = Self {
             ctx: Some(ctx),
             pending_packets: VecDeque::new(),
+            timestamps: VecDeque::new(),
             pending_frames: VecDeque::new(),
             drained: false,
             codec_descriptor: CodecDescriptor {
@@ -460,7 +465,15 @@ impl Rav1dDecoderWrapper {
             drop(guard);
 
             match frame_result {
-                Ok(frame) => self.pending_frames.push_back(frame),
+                Ok(mut frame) => {
+                    if frame.pts == i64::MIN
+                        && let Some((pts, duration)) = self.timestamps.pop_front()
+                    {
+                        frame.pts = pts;
+                        frame.duration = duration;
+                    }
+                    self.pending_frames.push_back(frame);
+                }
                 Err(e) => {
                     tracing::warn!("failed to convert rav1d picture to frame: {e:?}");
                 }
@@ -473,6 +486,7 @@ impl Decoder for Rav1dDecoderWrapper {
     fn send_packet(&mut self, packet: Option<&Packet>) -> Result<()> {
         match packet {
             Some(pkt) => {
+                self.timestamps.push_back((pkt.pts, pkt.duration));
                 self.pending_packets.push_back(pkt.clone());
                 Ok(())
             }

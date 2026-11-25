@@ -61,6 +61,7 @@ use wedeo_format_mpegts_demux as _;
 use wedeo_format_mpegts_mux as _;
 use wedeo_format_ogg as _;
 use wedeo_format_wav as _;
+use wedeo_format_webm as _;
 use wedeo_h264_rusty as _;
 use wedeo_h265_oxideav as _;
 use wedeo_mpeg4_oxideav as _;
@@ -1759,6 +1760,7 @@ fn build_pipeline(
             let mut out_params =
                 wedeo_codec::decoder::CodecParameters::new(out_codec_id, MediaType::Video);
             out_params.extradata = encoder_extradata.unwrap_or_default();
+            out_params.time_base = in_stream.time_base;
             out_params.width = in_params.width;
             out_params.height = in_params.height;
             out_params.pixel_format = in_params.pixel_format;
@@ -1828,6 +1830,7 @@ fn build_pipeline(
             let mut out_params =
                 wedeo_codec::decoder::CodecParameters::new(out_codec_id, MediaType::Audio);
             out_params.extradata = encoder_extradata.unwrap_or_default();
+            out_params.time_base = in_stream.time_base;
             out_params.sample_rate = in_params.sample_rate;
             out_params.sample_format = in_params.sample_format;
             out_params.channel_layout = in_params.channel_layout.clone();
@@ -1935,7 +1938,11 @@ fn run_pipeline(
                                     break;
                                 }
                                 enc.send_frame(Some(&frame))?;
-                                drain_encoder_to_output(&mut **enc, output)?;
+                                drain_encoder_to_output(
+                                    &mut **enc,
+                                    output,
+                                    video_stream_idx.unwrap_or(0),
+                                )?;
                                 video_frames_out += 1;
                                 packets_out += 1;
                             }
@@ -1972,7 +1979,11 @@ fn run_pipeline(
                             let frames = filter_frames(pipeline.audio_graph.as_mut(), frame)?;
                             for frame in frames {
                                 enc.send_frame(Some(&frame))?;
-                                drain_encoder_to_output(&mut **enc, output)?;
+                                drain_encoder_to_output(
+                                    &mut **enc,
+                                    output,
+                                    audio_stream_idx.unwrap_or(0),
+                                )?;
                                 packets_out += 1;
                             }
                         }
@@ -2001,7 +2012,7 @@ fn run_pipeline(
                 && let Some(enc) = pipeline.video_encoder.as_mut()
             {
                 enc.send_frame(Some(&frame))?;
-                drain_encoder_to_output(&mut **enc, output)?;
+                drain_encoder_to_output(&mut **enc, output, video_stream_idx.unwrap_or(0))?;
                 video_frames_out += 1;
                 packets_out += 1;
             }
@@ -2016,7 +2027,11 @@ fn run_pipeline(
                     for frame in frames {
                         if video_frames_out < frame_limit {
                             enc.send_frame(Some(&frame))?;
-                            drain_encoder_to_output(&mut **enc, output)?;
+                            drain_encoder_to_output(
+                                &mut **enc,
+                                output,
+                                video_stream_idx.unwrap_or(0),
+                            )?;
                             video_frames_out += 1;
                             packets_out += 1;
                         }
@@ -2027,7 +2042,7 @@ fn run_pipeline(
             }
         }
         enc.send_frame(None)?;
-        drain_encoder_to_output(&mut **enc, output)?;
+        drain_encoder_to_output(&mut **enc, output, video_stream_idx.unwrap_or(0))?;
     }
 
     if let Some(graph) = pipeline.audio_graph.as_mut() {
@@ -2035,7 +2050,7 @@ fn run_pipeline(
         for frame in graph.drain() {
             if let Some(enc) = pipeline.audio_encoder.as_mut() {
                 enc.send_frame(Some(&frame))?;
-                drain_encoder_to_output(&mut **enc, output)?;
+                drain_encoder_to_output(&mut **enc, output, audio_stream_idx.unwrap_or(0))?;
                 packets_out += 1;
             }
         }
@@ -2048,7 +2063,7 @@ fn run_pipeline(
                     let frames = filter_frames(pipeline.audio_graph.as_mut(), frame)?;
                     for frame in frames {
                         enc.send_frame(Some(&frame))?;
-                        drain_encoder_to_output(&mut **enc, output)?;
+                        drain_encoder_to_output(&mut **enc, output, audio_stream_idx.unwrap_or(0))?;
                         packets_out += 1;
                     }
                 }
@@ -2057,7 +2072,7 @@ fn run_pipeline(
             }
         }
         enc.send_frame(None)?;
-        drain_encoder_to_output(&mut **enc, output)?;
+        drain_encoder_to_output(&mut **enc, output, audio_stream_idx.unwrap_or(0))?;
     }
 
     print_stats(
@@ -2080,10 +2095,16 @@ fn filter_frames(graph: Option<&mut Graph>, frame: Frame) -> wedeo_core::Result<
 fn drain_encoder_to_output(
     enc: &mut dyn wedeo_codec::encoder::Encoder,
     output: &mut OutputContext,
+    stream_index: usize,
 ) -> wedeo_core::Result<()> {
     loop {
         match enc.receive_packet() {
-            Ok(pkt) => output.write_packet(&pkt)?,
+            Ok(mut pkt) => {
+                // Encoders do not know the output stream index; stamp it here
+                // so the muxer routes audio and video to the right tracks.
+                pkt.stream_index = stream_index;
+                output.write_packet(&pkt)?;
+            }
             Err(Error::Again | Error::Eof) => break,
             Err(e) => return Err(e),
         }

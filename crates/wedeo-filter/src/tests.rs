@@ -143,6 +143,8 @@ impl FilterFactory for DefaultFactory {
 }
 
 static OPTIONS_SEEN: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// Serializes tests that share `OPTIONS_SEEN`.
+static OPTIONS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct OptionFactory;
 
@@ -387,6 +389,11 @@ fn graph_flush_collects_node_tail_frames() {
 
 #[test]
 fn filter_factory_options() {
+    let _guard = OPTIONS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    OPTIONS_SEEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     let factory = DefaultFactory;
     assert!(factory.create_with_options(&[("ignored", "yes")]).is_ok());
     assert!(factory.create().is_ok());
@@ -407,6 +414,11 @@ fn filter_factory_options() {
 
 #[test]
 fn graph_add_node_with_options() {
+    let _guard = OPTIONS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    OPTIONS_SEEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     let mut graph = FilterGraph::new();
     let id = graph
         .add_node_with_options(

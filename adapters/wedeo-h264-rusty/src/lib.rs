@@ -24,7 +24,7 @@ use wedeo_core::error::{Error, Result};
 use wedeo_core::frame::Frame;
 use wedeo_core::media_type::MediaType;
 use wedeo_core::packet::{Packet, PacketFlags};
-use wedeo_core::pixel_format::PixelFormat;
+use wedeo_core::pixel_format::PixelFormat as WPixel;
 
 const DEFAULT_QP: u8 = 26;
 const DEFAULT_GOP: u32 = 30;
@@ -45,7 +45,7 @@ pub struct RustyH264Encoder {
 
 impl RustyH264Encoder {
     fn new(builder: &EncoderBuilder) -> Result<Self> {
-        if builder.pixel_format != PixelFormat::Yuv420p {
+        if !matches!(builder.pixel_format, WPixel::Yuv420p | WPixel::Yuv420p10le) {
             return Err(Error::PatchwelcomeNotImplemented);
         }
         let width = builder.width as usize;
@@ -136,7 +136,7 @@ impl RustyH264Encoder {
 
     /// Turn one Annex-B access unit into one AVCC packet (4-byte NAL lengths,
     /// no start codes), capturing SPS/PPS into `avcC` extradata on the way.
-    fn packetize(&mut self, stream: &[u8], pts: i64) {
+    fn packetize(&mut self, stream: &[u8], pts: i64, duration: i64) {
         let mut data = Vec::with_capacity(stream.len());
         let mut key = false;
         for nal in split_annex_b(stream) {
@@ -173,7 +173,7 @@ impl RustyH264Encoder {
         pkt.stream_index = 0;
         pkt.pts = pts;
         pkt.dts = pts;
-        pkt.duration = self.frame_duration;
+        pkt.duration = duration.max(1);
         if key {
             pkt.flags.insert(PacketFlags::KEY);
         }
@@ -215,18 +215,44 @@ impl Encoder for RustyH264Encoder {
                     return Err(Error::InvalidData);
                 }
                 let planes = [&video.planes[0], &video.planes[1], &video.planes[2]];
-                let data: Vec<&[u8]> = planes
-                    .iter()
-                    .map(|p| &p.buffer.data()[p.offset..])
-                    .collect();
+                // rusty_h264 only accepts 8-bit 4:2:0. Downshift 10-bit
+                // little-endian words to 8-bit before handing planes over;
+                // treating 16-bit words as bytes produces a green image.
+                let is_10bit = video.format == WPixel::Yuv420p10le;
+                let converted: Vec<Vec<u8>> = if is_10bit {
+                    planes
+                        .iter()
+                        .map(|p| {
+                            p.buffer.data()[p.offset..]
+                                .chunks_exact(2)
+                                .map(|w| (u16::from_le_bytes([w[0], w[1]]) >> 2) as u8)
+                                .collect()
+                        })
+                        .collect()
+                } else {
+                    planes
+                        .iter()
+                        .map(|p| p.buffer.data()[p.offset..].to_vec())
+                        .collect()
+                };
+                let (y_stride, u_stride, v_stride) = if is_10bit {
+                    (
+                        video.width as usize,
+                        (video.width / 2) as usize,
+                        (video.width / 2) as usize,
+                    )
+                } else {
+                    (planes[0].linesize, planes[1].linesize, planes[2].linesize)
+                };
+                let data: Vec<&[u8]> = converted.iter().map(Vec::as_slice).collect();
                 let Some(view) = YuvPlanes::new(
                     video.width as usize,
                     video.height as usize,
                     data[0],
                     data[1],
                     data[2],
-                    planes[0].linesize,
-                    planes[1].linesize,
+                    y_stride,
+                    u_stride,
                 ) else {
                     return Err(Error::InvalidData);
                 };
@@ -235,19 +261,24 @@ impl Encoder for RustyH264Encoder {
                 } else {
                     frame.pts
                 };
+                let duration = if frame.duration > 0 {
+                    frame.duration
+                } else {
+                    self.frame_duration
+                };
                 let stream = self
                     .encoder
                     .encode_planes(&view)
                     .map_err(|e| Error::Other(e.to_string()))?;
-                self.packetize(&stream, pts);
-                self.next_pts = pts + self.frame_duration;
+                self.packetize(&stream, pts, duration);
+                self.next_pts = pts + duration;
                 Ok(())
             }
             None => {
                 if !self.draining {
                     self.draining = true;
                     let stream = self.encoder.flush();
-                    self.packetize(&stream, self.next_pts);
+                    self.packetize(&stream, self.next_pts, self.frame_duration);
                 }
                 self.ended = true;
                 Ok(())
@@ -293,7 +324,7 @@ impl EncoderFactory for RustyH264EncoderFactory {
             capabilities: CodecCapabilities::empty(),
             properties: CodecProperties::LOSSY,
             supported_sample_formats: &[],
-            supported_pixel_formats: &[PixelFormat::Yuv420p],
+            supported_pixel_formats: &[WPixel::Yuv420p, WPixel::Yuv420p10le],
             priority: 50,
         };
         &DESC

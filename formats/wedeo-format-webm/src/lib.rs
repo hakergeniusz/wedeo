@@ -1,7 +1,7 @@
 // WebM/Matroska container demuxer for wedeo.
 //
-// WebM is a subset of the Matroska container format. This demuxer handles
-// video-only demuxing — audio tracks are silently skipped.
+// WebM is a subset of the Matroska container format. Video and Opus/AAC
+// audio tracks are exposed as streams; other track kinds are skipped.
 //
 // Format reference: https://www.matroska.org/technical/elements.html
 // EBML spec: https://matroska-org.github.io/libebml/specs.html
@@ -14,6 +14,7 @@
 use tracing::{debug, trace, warn};
 use wedeo_codec::decoder::CodecParameters;
 use wedeo_core::buffer::Buffer;
+use wedeo_core::channel_layout::ChannelLayout;
 use wedeo_core::codec_id::CodecId;
 use wedeo_core::error::{Error, Result};
 use wedeo_core::media_type::MediaType;
@@ -21,6 +22,7 @@ use wedeo_core::metadata::Metadata;
 use wedeo_core::packet::{Packet, PacketFlags};
 use wedeo_core::pixel_format::PixelFormat;
 use wedeo_core::rational::Rational;
+use wedeo_core::sample_format::SampleFormat;
 use wedeo_format::demuxer::{
     Demuxer, DemuxerHeader, InputFormatDescriptor, InputFormatFlags, PROBE_SCORE_MAX, ProbeData,
     SeekFlags, Stream,
@@ -63,6 +65,11 @@ const VIDEO: u32 = 0xE0;
 const PIXEL_WIDTH: u32 = 0xB0;
 const PIXEL_HEIGHT: u32 = 0xBA;
 
+// Audio
+const AUDIO: u32 = 0xE1;
+const SAMPLING_FREQUENCY: u32 = 0xB5;
+const CHANNELS: u32 = 0x9F;
+
 // Cluster
 const CLUSTER: u32 = 0x1F43_B675;
 const CLUSTER_TIMECODE: u32 = 0xE7;
@@ -81,6 +88,7 @@ const ATTACHMENTS: u32 = 0x1941_A469;
 
 // Matroska track types
 const TRACK_TYPE_VIDEO: u8 = 1;
+const TRACK_TYPE_AUDIO: u8 = 2;
 
 // ---------------------------------------------------------------------------
 // EBML variable-length integer reading
@@ -268,6 +276,9 @@ fn codec_id_from_matroska(s: &str) -> CodecId {
         "V_VP9" => CodecId::Vp9,
         "V_VP8" => CodecId::Vp8,
         "V_AV1" => CodecId::Av1,
+        "A_OPUS" => CodecId::Opus,
+        "A_AAC" => CodecId::Aac,
+        "A_VORBIS" => CodecId::Vorbis,
         _ => CodecId::None,
     }
 }
@@ -279,19 +290,24 @@ fn codec_id_from_matroska(s: &str) -> CodecId {
 struct TrackInfo {
     /// Matroska track number (used in SimpleBlock headers).
     number: u64,
-    /// Track type (1 = video, 2 = audio, etc.).
-    /// Only video tracks (type 1) are stored; kept for debugging.
-    _track_type: u8,
+    /// Track type (1 = video, 2 = audio).
+    track_type: u8,
     /// Mapped codec ID.
     codec_id: CodecId,
     /// Video pixel width.
     width: u32,
     /// Video pixel height.
     height: u32,
+    /// Audio sample rate in Hz.
+    sample_rate: u32,
+    /// Audio channel count.
+    channels: u16,
     /// Default frame duration in nanoseconds (0 if not present).
     default_duration_ns: u64,
-    /// CodecPrivate data (e.g. SPS/PPS for H.264).
+    /// CodecPrivate data (SPS/PPS, OpusHead, AV1 config OBUs, etc.).
     codec_private: Vec<u8>,
+    /// AV1 config OBUs have been prepended to the first frame.
+    av1_config_sent: bool,
     /// Index into the output streams vector.
     stream_index: usize,
 }
@@ -446,6 +462,32 @@ impl WebmDemuxer {
         Ok(())
     }
 
+    /// Parse the Audio sub-element of a TrackEntry.
+    fn parse_audio_element(
+        io: &mut BufferedIo,
+        size: u64,
+        sample_rate: &mut u32,
+        channels: &mut u16,
+    ) -> Result<()> {
+        let end = io.tell()? + size;
+
+        while io.tell()? < end {
+            let child_id = read_element_id(io)?;
+            let child_size = read_vint_size(io)?;
+            match child_id {
+                SAMPLING_FREQUENCY => {
+                    *sample_rate = read_float(io, child_size)? as u32;
+                }
+                CHANNELS => {
+                    *channels = read_uint(io, child_size)? as u16;
+                }
+                _ => skip_element(io, child_size)?,
+            }
+        }
+
+        Ok(())
+    }
+
     /// Parse a single TrackEntry element.
     fn parse_track_entry(&mut self, io: &mut BufferedIo, size: u64) -> Result<()> {
         let end = io.tell()? + size;
@@ -456,6 +498,8 @@ impl WebmDemuxer {
         let mut codec_private: Vec<u8> = Vec::new();
         let mut width: u32 = 0;
         let mut height: u32 = 0;
+        let mut sample_rate: u32 = 0;
+        let mut channels: u16 = 0;
         let mut default_duration_ns: u64 = 0;
 
         while io.tell()? < end {
@@ -488,39 +532,49 @@ impl WebmDemuxer {
                 VIDEO => {
                     Self::parse_video_element(io, child_size, &mut width, &mut height)?;
                 }
+                AUDIO => {
+                    Self::parse_audio_element(io, child_size, &mut sample_rate, &mut channels)?;
+                }
                 _ => {
                     skip_element(io, child_size)?;
                 }
             }
         }
 
-        // Only keep video tracks.
-        if track_type != TRACK_TYPE_VIDEO {
-            trace!(track_number, track_type, "skipping non-video track");
+        if track_type != TRACK_TYPE_VIDEO && track_type != TRACK_TYPE_AUDIO {
+            trace!(track_number, track_type, "skipping unsupported track");
             return Ok(());
         }
 
         let codec_id = codec_id_from_matroska(&codec_string);
+        if codec_id == CodecId::None {
+            trace!(track_number, codec = %codec_string, "skipping unknown codec");
+            return Ok(());
+        }
         let stream_index = self.tracks.len();
 
         debug!(
             track_number,
             codec = %codec_string,
+            track_type,
             width,
             height,
-            default_duration_ns,
-            stream_index,
-            "video track"
+            sample_rate,
+            channels,
+            "track"
         );
 
         self.tracks.push(TrackInfo {
             number: track_number,
-            _track_type: track_type,
+            track_type,
             codec_id,
             width,
             height,
+            sample_rate,
+            channels,
             default_duration_ns,
             codec_private,
+            av1_config_sent: false,
             stream_index,
         });
 
@@ -660,7 +714,7 @@ impl Demuxer for WebmDemuxer {
         }
 
         if self.tracks.is_empty() {
-            warn!("no video tracks found");
+            warn!("no supported tracks found");
             return Err(Error::InvalidData);
         }
 
@@ -672,11 +726,29 @@ impl Demuxer for WebmDemuxer {
         // 4. Build output streams.
         let mut streams = Vec::with_capacity(self.tracks.len());
         for track in &self.tracks {
-            let mut params = CodecParameters::new(track.codec_id, MediaType::Video);
-            params.width = track.width;
-            params.height = track.height;
-            params.pixel_format = PixelFormat::Yuv420p; // default; decoder will refine
-            if !track.codec_private.is_empty() {
+            let media_type = if track.track_type == TRACK_TYPE_AUDIO {
+                MediaType::Audio
+            } else {
+                MediaType::Video
+            };
+            let mut params = CodecParameters::new(track.codec_id, media_type);
+            if media_type == MediaType::Video {
+                params.width = track.width;
+                params.height = track.height;
+                params.pixel_format = PixelFormat::Yuv420p; // decoder refines
+            } else {
+                params.sample_rate = track.sample_rate;
+                params.sample_format = SampleFormat::S16;
+                params.channel_layout = match track.channels {
+                    1 => ChannelLayout::mono(),
+                    2 => ChannelLayout::stereo(),
+                    n => ChannelLayout::unspec(n as i32),
+                };
+            }
+            // Matroska AV1 CodecPrivate is a configuration record, not a
+            // decodable OBU frame. rav1d wants in-band sequence headers, so
+            // never feed it as an initial packet.
+            if track.codec_id != CodecId::Av1 && !track.codec_private.is_empty() {
                 params.extradata = track.codec_private.clone();
             }
 
@@ -790,7 +862,25 @@ impl Demuxer for WebmDemuxer {
 
                     // Frame data starts after track_number + 2 bytes timecode + 1 byte flags.
                     let header_len = vint_len + 3;
-                    let frame_data = &data[header_len..];
+                    let mut frame_data = data[header_len..].to_vec();
+                    // Matroska AV1 stores sequence-header OBUs in CodecPrivate.
+                    // Prepend them to the first frame so rav1d can decode it.
+                    if let Some(track) = self.tracks.iter_mut().find(|t| t.number == track_number)
+                        && track.codec_id == CodecId::Av1
+                        && !track.codec_private.is_empty()
+                        && !track.av1_config_sent
+                    {
+                        let mut with_config = if track.codec_private.first() == Some(&0x81) {
+                            // AV1CodecConfigurationRecord: 4-byte header
+                            // followed by concatenated config OBUs.
+                            track.codec_private[4..].to_vec()
+                        } else {
+                            track.codec_private.clone()
+                        };
+                        with_config.extend_from_slice(&frame_data);
+                        frame_data = with_config;
+                        track.av1_config_sent = true;
+                    }
 
                     // Look up the track — skip non-video tracks silently.
                     let stream_index = match self.find_stream_index(track_number) {
@@ -805,7 +895,7 @@ impl Demuxer for WebmDemuxer {
                     let pts = self.cluster_timecode + timecode_delta as i64;
 
                     let mut pkt = Packet::new();
-                    pkt.data = Buffer::from_slice(frame_data);
+                    pkt.data = Buffer::from_slice(&frame_data);
                     pkt.pts = pts;
                     pkt.dts = pts;
                     pkt.stream_index = stream_index;
@@ -941,8 +1031,9 @@ impl DemuxerFactory for WebmDemuxerFactory {
                 return PROBE_SCORE_MAX;
             }
         }
-        // EBML header present but DocType not found in probe buffer — score lower.
-        PROBE_SCORE_MAX / 2
+        // DocType may be beyond the probe window. Still outrank the Symphonia
+        // Matroska demuxer; parse_ebml_header validates DocType properly.
+        PROBE_SCORE_MAX - 5
     }
 
     fn create(&self) -> Result<Box<dyn Demuxer>> {
