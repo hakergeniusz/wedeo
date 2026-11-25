@@ -172,22 +172,199 @@ pub fn run_ffmpeg_framecrc_video(path: &Path) -> Option<Vec<String>> {
     Some(stdout.lines().map(|l| l.to_string()).collect())
 }
 
-/// Compare framecrc lines between wedeo and FFmpeg, ignoring comment lines.
-/// Returns Ok(()) if all data lines match on size and checksum fields.
-pub fn compare_framecrc_lines(wedeo: &[String], ffmpeg: &[String]) -> Result<(), String> {
-    let wedeo_data: Vec<&str> = wedeo
-        .iter()
-        .map(|s| s.as_str())
-        .filter(|l| !l.starts_with('#'))
-        .collect();
-    let ffmpeg_data: Vec<&str> = ffmpeg
-        .iter()
-        .map(|s| s.as_str())
-        .filter(|l| !l.starts_with('#'))
-        .collect();
+/// A comma-separated field in an FFmpeg framecrc data line.
+///
+/// FFmpeg's `framecrc_write_packet()` (libavformat/framecrcenc.c:74) emits:
+///
+/// ```text
+/// stream_index, dts, pts, duration, size, 0x<adler32>[, F=0x..][, S=.. ...]
+/// ```
+///
+/// Header lines (`#tb`, `#media_type`, `#codec_id`, `#dimensions`, `#sar`, ...) come
+/// from `ff_framehash_write_header()` (libavformat/framehash.c:25) and are ignored
+/// by the comparison helpers in this module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FramecrcField {
+    StreamIndex,
+    Dts,
+    Pts,
+    Duration,
+    Size,
+    Checksum,
+    Flags,
+    /// Side-data count/name/size/checksum fields (`S=...` and subsequent triples).
+    Extra(usize),
+}
+
+impl FramecrcField {
+    /// Presentation timestamps describe ordering, not decoded pixel identity.
+    pub fn is_timestamp(self) -> bool {
+        matches!(self, Self::Dts | Self::Pts | Self::Duration)
+    }
+}
+
+/// Explicit tolerance policy for full-line framecrc comparison.
+///
+/// # Comparison policy
+///
+/// * Size and checksum are always exact: they are the bit-exact conformance
+///   contract (Adler-32 over the decoded frame bytes, FFmpeg's `s1 = s2 = 0`).
+/// * Stream index and packet flags are exact by default; they encode which
+///   stream and whether the packet is a key frame.
+/// * DTS/PTS/duration differences are collected as *notes* by default. FFmpeg's
+///   framecrc prints the container timestamps verbatim, while wedeo's decode
+///   path may report presentation timestamps for both dts and pts. Timestamp
+///   drift must never mask nor manufacture a decoded-pixel mismatch, so it is
+///   reported separately instead of failing the comparison.
+///
+/// Use [`FramecrcPolicy::default()`] for the standard policy, or override the
+/// booleans for a stricter (all-exact) comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FramecrcPolicy {
+    pub exact_stream_index: bool,
+    pub exact_size: bool,
+    pub exact_checksum: bool,
+    pub exact_flags: bool,
+    pub timestamps_are_notes: bool,
+}
+
+impl Default for FramecrcPolicy {
+    fn default() -> Self {
+        Self {
+            exact_stream_index: true,
+            exact_size: true,
+            exact_checksum: true,
+            exact_flags: true,
+            timestamps_are_notes: true,
+        }
+    }
+}
+
+/// One field-level difference between a wedeo and an FFmpeg framecrc data line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FramecrcFieldDiff {
+    /// Zero-based index among data lines (header lines are excluded).
+    pub frame: usize,
+    pub field: FramecrcField,
+    pub wedeo: String,
+    pub ffmpeg: String,
+}
+
+/// Differences split into hard failures and diagnostic notes by a [`FramecrcPolicy`].
+#[derive(Clone, Debug, Default)]
+pub struct FramecrcVerdict {
+    /// Field differences that make the comparison fail.
+    pub mismatches: Vec<FramecrcFieldDiff>,
+    /// Timestamp differences, reported for diagnostics only under the default policy.
+    pub notes: Vec<FramecrcFieldDiff>,
+}
+
+impl FramecrcVerdict {
+    /// True when no hard mismatch was found (notes are allowed).
+    pub fn is_pass(&self) -> bool {
+        self.mismatches.is_empty()
+    }
+
+    /// Human-readable report of mismatches and timestamp notes.
+    pub fn format(&self) -> String {
+        let mut out = String::new();
+        for diff in &self.mismatches {
+            out.push_str(&format!(
+                "Frame {} {:?} mismatch:\n  wedeo:  {}\n  ffmpeg: {}\n",
+                diff.frame, diff.field, diff.wedeo, diff.ffmpeg
+            ));
+        }
+        for diff in &self.notes {
+            out.push_str(&format!(
+                "Frame {} {:?} note (tolerance):\n  wedeo:  {}\n  ffmpeg: {}\n",
+                diff.frame, diff.field, diff.wedeo, diff.ffmpeg
+            ));
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// Policy-independent result of a full field-by-field framecrc comparison.
+#[derive(Clone, Debug, Default)]
+pub struct FramecrcComparison {
+    /// Structural problems (malformed lines, differing frame counts).
+    /// These are always hard errors, independent of the tolerance policy.
+    pub structural_errors: Vec<String>,
+    pub differences: Vec<FramecrcFieldDiff>,
+    pub wedeo_frame_count: usize,
+    pub ffmpeg_frame_count: usize,
+}
+
+impl FramecrcComparison {
+    /// True only when both outputs have the same data-line count and every field matches.
+    pub fn is_exact(&self) -> bool {
+        self.structural_errors.is_empty()
+            && self.differences.is_empty()
+            && self.wedeo_frame_count == self.ffmpeg_frame_count
+    }
+
+    /// Apply a tolerance policy, splitting differences into mismatches and notes.
+    pub fn evaluate(&self, policy: &FramecrcPolicy) -> FramecrcVerdict {
+        let mut verdict = FramecrcVerdict::default();
+        for diff in &self.differences {
+            let is_note = diff.field.is_timestamp() && policy.timestamps_are_notes;
+            let is_exact = match diff.field {
+                FramecrcField::StreamIndex => policy.exact_stream_index,
+                FramecrcField::Size => policy.exact_size,
+                FramecrcField::Checksum => policy.exact_checksum,
+                FramecrcField::Flags => policy.exact_flags,
+                // Extra side-data fields have no dedicated tolerance knob; they
+                // are always exact because they change the checksummed payload.
+                FramecrcField::Extra(_) => true,
+                FramecrcField::Dts | FramecrcField::Pts | FramecrcField::Duration => !is_note,
+            };
+            if is_exact {
+                verdict.mismatches.push(diff.clone());
+            } else {
+                verdict.notes.push(diff.clone());
+            }
+        }
+        verdict
+    }
+
+    /// Convert into a `Result` using the supplied policy.
+    pub fn into_result(self, policy: &FramecrcPolicy) -> Result<(), String> {
+        if !self.structural_errors.is_empty() {
+            return Err(self.structural_errors.join("\n"));
+        }
+        let verdict = self.evaluate(policy);
+        if verdict.is_pass() {
+            Ok(())
+        } else {
+            Err(verdict.format())
+        }
+    }
+}
+
+/// Compare full framecrc lines field by field, ignoring comment/header lines.
+///
+/// This is the structured counterpart to [`compare_framecrc_lines`]: it records
+/// every differing field so callers can apply their own [`FramecrcPolicy`] and
+/// distinguish timestamp drift from bit-exact data mismatches.
+pub fn compare_framecrc_lines_full(wedeo: &[String], ffmpeg: &[String]) -> FramecrcComparison {
+    fn data_lines(lines: &[String]) -> Vec<&str> {
+        lines
+            .iter()
+            .map(String::as_str)
+            .filter(|l| !l.starts_with('#'))
+            .collect()
+    }
+    let wedeo_data = data_lines(wedeo);
+    let ffmpeg_data = data_lines(ffmpeg);
+
+    let mut result = FramecrcComparison {
+        wedeo_frame_count: wedeo_data.len(),
+        ffmpeg_frame_count: ffmpeg_data.len(),
+        ..FramecrcComparison::default()
+    };
 
     if wedeo_data.len() != ffmpeg_data.len() {
-        return Err(format!(
+        result.structural_errors.push(format!(
             "Frame count differs: wedeo={}, ffmpeg={}",
             wedeo_data.len(),
             ffmpeg_data.len()
@@ -195,26 +372,54 @@ pub fn compare_framecrc_lines(wedeo: &[String], ffmpeg: &[String]) -> Result<(),
     }
 
     for (i, (w, f)) in wedeo_data.iter().zip(ffmpeg_data.iter()).enumerate() {
-        let w_fields: Vec<&str> = w.split(',').map(|s| s.trim()).collect();
-        let f_fields: Vec<&str> = f.split(',').map(|s| s.trim()).collect();
+        let w_fields: Vec<&str> = w.split(',').map(str::trim).collect();
+        let f_fields: Vec<&str> = f.split(',').map(str::trim).collect();
 
         if w_fields.len() < 6 || f_fields.len() < 6 {
-            return Err(format!(
-                "Frame {}: malformed framecrc line\n  wedeo:  {w}\n  ffmpeg: {f}",
-                i
+            result.structural_errors.push(format!(
+                "Frame {i}: malformed framecrc line\n  wedeo:  {w}\n  ffmpeg: {f}"
             ));
+            continue;
         }
 
-        // Compare size (field 4) and checksum (field 5)
-        if w_fields[4] != f_fields[4] || w_fields[5] != f_fields[5] {
-            return Err(format!(
-                "Frame {} mismatch:\n  wedeo:  {w}\n  ffmpeg: {f}",
-                i
-            ));
+        let field_for = |index: usize, value: &str| -> FramecrcField {
+            match index {
+                0 => FramecrcField::StreamIndex,
+                1 => FramecrcField::Dts,
+                2 => FramecrcField::Pts,
+                3 => FramecrcField::Duration,
+                4 => FramecrcField::Size,
+                5 => FramecrcField::Checksum,
+                _ if value.starts_with("F=") => FramecrcField::Flags,
+                _ => FramecrcField::Extra(index - 6),
+            }
+        };
+        let field_count = w_fields.len().max(f_fields.len());
+        for index in 0..field_count {
+            let wv = w_fields.get(index).copied().unwrap_or("");
+            let fv = f_fields.get(index).copied().unwrap_or("");
+            if wv == fv {
+                continue;
+            }
+            result.differences.push(FramecrcFieldDiff {
+                frame: i,
+                field: field_for(index, if wv.is_empty() { fv } else { wv }),
+                wedeo: wv.to_string(),
+                ffmpeg: fv.to_string(),
+            });
         }
     }
 
-    Ok(())
+    result
+}
+
+/// Compare framecrc lines between wedeo and FFmpeg, ignoring comment lines.
+/// Returns Ok(()) if all data lines match on size and checksum fields.
+///
+/// Timestamp differences are reported by [`compare_framecrc_lines_full`] but do
+/// not fail this legacy helper; see [`FramecrcPolicy::default()`].
+pub fn compare_framecrc_lines(wedeo: &[String], ffmpeg: &[String]) -> Result<(), String> {
+    compare_framecrc_lines_full(wedeo, ffmpeg).into_result(&FramecrcPolicy::default())
 }
 
 #[cfg(test)]
@@ -235,5 +440,86 @@ mod tests {
         // "Wikipedia" -> 0x11E60398
         let checksum = super::adler32_compute(b"Wikipedia");
         assert_eq!(checksum, 0x11E60398);
+    }
+
+    fn line(ts: &str, size: &str, crc: &str) -> String {
+        format!("0, {ts}, {ts}, 1, {size}, {crc}")
+    }
+
+    #[test]
+    fn test_framecrc_field_comparison_exact_and_policy() {
+        let wedeo = vec!["#tb 0: 1/25".to_string(), line("0", "152064", "0x12345678")];
+        let ffmpeg = vec![
+            "#tb 0: 1/25".to_string(),
+            line("7", "152064", "0x12345678"), // only timestamps differ
+        ];
+        let cmp = compare_framecrc_lines_full(&wedeo, &ffmpeg);
+        assert!(!cmp.is_exact());
+        assert_eq!(cmp.differences.len(), 2); // dts, pts
+        assert!(cmp.differences.iter().all(|d| d.field.is_timestamp()));
+
+        // Default policy: timestamps are notes, so the legacy helper still passes.
+        assert!(compare_framecrc_lines(&wedeo, &ffmpeg).is_ok());
+        let verdict = cmp.evaluate(&FramecrcPolicy::default());
+        assert!(verdict.is_pass());
+        assert!(verdict.mismatches.is_empty());
+        assert_eq!(verdict.notes.len(), 2);
+        assert!(verdict.format().contains("note (tolerance)"));
+
+        // All-exact policy: timestamp drift becomes a hard failure.
+        let strict = FramecrcPolicy {
+            timestamps_are_notes: false,
+            ..FramecrcPolicy::default()
+        };
+        let strict_verdict = cmp.evaluate(&strict);
+        assert!(!strict_verdict.is_pass());
+        assert_eq!(strict_verdict.mismatches.len(), 2);
+        assert!(cmp.clone().into_result(&strict).is_err());
+    }
+
+    #[test]
+    fn test_framecrc_field_comparison_size_and_checksum_are_always_exact() {
+        let wedeo = vec![line("0", "152064", "0x12345678")];
+        let ffmpeg = vec![line("0", "152064", "0xdeadbeef")];
+        let cmp = compare_framecrc_lines_full(&wedeo, &ffmpeg);
+        assert_eq!(
+            cmp.differences,
+            vec![FramecrcFieldDiff {
+                frame: 0,
+                field: FramecrcField::Checksum,
+                wedeo: "0x12345678".to_string(),
+                ffmpeg: "0xdeadbeef".to_string(),
+            }]
+        );
+        assert!(compare_framecrc_lines(&wedeo, &ffmpeg).is_err());
+
+        let wedeo = vec![line("0", "152064", "0x12345678")];
+        let ffmpeg = vec![line("0", "152068", "0x12345678")];
+        let cmp = compare_framecrc_lines_full(&wedeo, &ffmpeg);
+        assert_eq!(cmp.differences[0].field, FramecrcField::Size);
+        assert!(compare_framecrc_lines(&wedeo, &ffmpeg).is_err());
+    }
+
+    #[test]
+    fn test_framecrc_flags_and_structural_errors() {
+        let wedeo = vec![format!("{}, F=0x0001", line("0", "10", "0x1"))];
+        let ffmpeg = vec![line("0", "10", "0x1")];
+        let cmp = compare_framecrc_lines_full(&wedeo, &ffmpeg);
+        assert_eq!(cmp.differences[0].field, FramecrcField::Flags);
+        assert!(compare_framecrc_lines(&wedeo, &ffmpeg).is_err());
+
+        // Relaxing flags is explicit, not implicit.
+        let relaxed = FramecrcPolicy {
+            exact_flags: false,
+            ..FramecrcPolicy::default()
+        };
+        assert!(cmp.clone().into_result(&relaxed).is_ok());
+
+        let err = compare_framecrc_lines(&[line("0", "10", "0x1")], &[]).unwrap_err();
+        assert_eq!(err, "Frame count differs: wedeo=1, ffmpeg=0");
+
+        let err =
+            compare_framecrc_lines(&["garbage".to_string()], &["junk".to_string()]).unwrap_err();
+        assert!(err.contains("malformed framecrc line"));
     }
 }
