@@ -2,7 +2,7 @@
 
 ## State
 - `main` = `75fa04c` (pushed to fork `main`). VP8 bit-exact (3364/3364), w72 VP9 SIMD, w78 CLI multi-input merged, Theora duration fix, Ogg cover-art/w79 (`83549e8`/`133fbd9`), H264 MBAFF termination alignment (`f2fa9be`), w85 structured framecrc comparison (`75fa04c`).
-- Gate: `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean (only pre-existing manifest warnings), full `wedeo-fate` suite green. JVT-AVC_V1 78/78 MATCH, JVT-FR-EXT 24/24 MATCH, H264 CAVLC FATE 52/52 BITEXACT. VP9 corpus 165/225 files bitexact (1434/2027 frames).
+- Gate: `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean (only pre-existing manifest warnings), full `wedeo-fate` suite green. JVT-AVC_V1 78/78 MATCH, JVT-FR-EXT 24/24 MATCH, H264 CAVLC FATE 52/52 BITEXACT. VP9 corpus 166/225 files bitexact (1435/2027 frames) after `13ccb4f` sub-8x8 MV/context extent alignment. Remaining VP9 gaps: 10/12-bit and 4:2:2/4:4:4 profiles, plus ±1/±2 luma rounding in `03-size` vectors.
 - Disk: ~33 GB free on `/`. Guard in `scripts/agent_env.sh` aborts below 3 GB.
 - Subagent provider: **free usage limit reached** - no new subagents until user fixes provider. Main agent still works.
 
