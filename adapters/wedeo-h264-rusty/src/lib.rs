@@ -4,8 +4,9 @@
 //! no source from it is copied here. This adapter (the wedeo `Encoder` glue,
 //! Annex-B to AVCC packetization and avcC construction) is LGPL-2.1-or-later,
 //! like the rest of wedeo. The upstream crate is built with `default-features
-//! = false` so it neither installs a process-wide allocator nor pulls in the
-//! unsafe accel crate: the shipped path stays 100% safe Rust.
+//! = false` so it does not install a process-wide allocator; the `asm`
+//! feature enables the upstream SIMD fast path (BSD-2-Clause, credited in
+//! `CREDITS.md`).
 //!
 //! FFmpeg has no native H.264 encoder, so there is no C source to port here.
 
@@ -48,7 +49,7 @@ pub struct RustyH264Encoder {
     ended: bool,
 }
 
-const PARALLEL_BATCH: usize = 128;
+const PARALLEL_BATCH: usize = 256;
 
 impl RustyH264Encoder {
     fn new(builder: &EncoderBuilder) -> Result<Self> {

@@ -2801,6 +2801,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rusty_h264-accel"
+version = "0.17.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb1078d19652da485f4e2491e02ed9559e44f7427cb1f62cd82d63a66b1c740e"
+
+[[package]]
 name = "rusty_h264-common"
 version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2809,6 +2815,7 @@ dependencies = [
  "bytemuck",
  "once_cell",
  "portable-atomic",
+ "rusty_h264-accel",
  "wide",
 ]
 
@@ -2818,6 +2825,7 @@ version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ecf0018e5589cd8ddae29193166022970766c1382377eb2cbbc069b0c0335ca"
 dependencies = [
+ "rusty_h264-accel",
  "rusty_h264-common",
 ]
 

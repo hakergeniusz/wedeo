@@ -36,7 +36,7 @@ algorithms and implementations are essential to the rewrite.
 
 | Project | Used for | License | Integration |
 |---|---|---|---|
-| [rusty_h264-encoder](https://www.mata.network/) / `rusty_h264-common` 0.17.4 | Pure-Rust H.264 encoding | BSD-2-Clause | `adapters/wedeo-h264-rusty` (dependency only; built with `default-features = false`) |
+| [rusty_h264-encoder](https://www.mata.network/) / `rusty_h264-common` / `rusty_h264-accel` 0.17.4 | Pure-Rust H.264 encoding and SIMD fast path | BSD-2-Clause | `adapters/wedeo-h264-rusty` (dependency only; `std` + `asm` features, no global allocator) |
 | [oxideav-h265](https://crates.io/crates/oxideav-h265) 0.0.18 | Pure-Rust HEVC decoding and encoding | MIT | `adapters/wedeo-h265-oxideav` (dependency only; adapter glue is LGPL-2.1-or-later) |
 | [oxideav-core](https://crates.io/crates/oxideav-core) 0.1.43 | Shared frame, packet and codec traits used by the oxideav adapters | MIT | `adapters/wedeo-h265-oxideav`, `adapters/wedeo-aac-oxideav` (dependency only) |
 | [oxideav-aac](https://crates.io/crates/oxideav-aac) 0.1.7 | Pure-Rust AAC decoding and encoding | MIT | `adapters/wedeo-aac-oxideav` (dependency only; adapter glue is LGPL-2.1-or-later) |

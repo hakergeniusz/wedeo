@@ -122,8 +122,8 @@ wedeo-vorbis-enc = { path = "adapters/wedeo-vorbis-enc", version = "0.2.0" }
 
 # Pure-Rust H.264 encoder (BSD-2-Clause). `default-features = false` avoids
 # the global allocator and the unsafe accel crate; `std` keeps diagnostics.
-rusty_h264-encoder = { version = "0.17.4", default-features = false, features = ["std"] }
-rusty_h264-common = { version = "0.17.4", default-features = false, features = ["std"] }
+rusty_h264-encoder = { version = "0.17.4", default-features = false, features = ["std", "asm"] }
+rusty_h264-common = { version = "0.17.4", default-features = false, features = ["std", "asm"] }
 
 # Pure-Rust HEVC decoder + encoder (MIT). The adapter uses oxideav-core types.
 oxideav-h265 = "0.0.18"
