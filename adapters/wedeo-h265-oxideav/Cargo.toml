@@ -1,0 +1,21 @@
+[package]
+name = "wedeo-h265-oxideav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "HEVC decoder and encoder adapters for wedeo backed by pure-Rust oxideav-h265 (MIT)"
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+tracing = { workspace = true }
+oxideav-h265 = { workspace = true }
+oxideav-core = { workspace = true }
+
+[lints]
+workspace = true

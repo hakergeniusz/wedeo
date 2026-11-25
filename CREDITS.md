@@ -37,6 +37,8 @@ algorithms and implementations are essential to the rewrite.
 | Project | Used for | License | Integration |
 |---|---|---|---|
 | [rusty_h264-encoder](https://www.mata.network/) / `rusty_h264-common` 0.17.4 | Pure-Rust H.264 encoding | BSD-2-Clause | `adapters/wedeo-h264-rusty` (dependency only; built with `default-features = false`) |
+| [oxideav-h265](https://crates.io/crates/oxideav-h265) 0.0.18 | Pure-Rust HEVC decoding and encoding | MIT | `adapters/wedeo-h265-oxideav` (dependency only; adapter glue is LGPL-2.1-or-later) |
+| [oxideav-core](https://crates.io/crates/oxideav-core) 0.1.43 | Shared frame, packet and codec traits used by `oxideav-h265` | MIT | `adapters/wedeo-h265-oxideav` (dependency only) |
 | [Symphonia](https://github.com/pdeljanov/Symphonia) 0.5.5 | Audio demuxing and decoding (AAC, MP3, Vorbis, FLAC, ALAC, WavPack, ADPCM, PCM) | MPL-2.0 | `adapters/wedeo-symphonia` |
 | [rav1d](https://github.com/memorysafety/rav1d) (git, commit `9d78516`) | AV1 decoding; pure-Rust port of dav1d | BSD-2-Clause | `adapters/wedeo-rav1d`. Its `COPYING` credits VideoLAN, the dav1d authors and the Internet Security Research Group; retain that notice in distributions |
 | [av-bitstream](https://github.com/rust-av/rust-av) 0.2.1 | Exp-Golomb / bit-reader primitives (Luca Barbato, rust-av) | MIT | `crates/wedeo-codec/src/bitstream.rs` |

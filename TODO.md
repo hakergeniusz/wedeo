@@ -34,7 +34,7 @@
   - [ ] VP9 scaled prediction — silently skipped when ref/current dimensions differ
   - [ ] VP9 10/12-bit support
   - [ ] VP9 superframe parsing
-- [ ] **HEVC decoder** — similar to H.264 but more complex (CTU/CTB structure).
+- [x] **HEVC decoder and encoder** - `adapters/wedeo-h265-oxideav` wraps pure-Rust `oxideav-h265` (MIT): full decode and I/P/B encode registered as `hevc_oxideav`. MP4 (hvcC + length-prefixed samples) and MPEG-TS (Annex B) output verified against FFmpeg. The native HEVC port remains partial.
 
 ### Video muxers
 - [ ] **MP4/MOV muxer** — needed for any useful video output. No existing pure-Rust MP4 muxer crate.

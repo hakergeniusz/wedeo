@@ -59,6 +59,7 @@ use wedeo_format_mpegts_mux as _;
 use wedeo_format_ogg as _;
 use wedeo_format_wav as _;
 use wedeo_h264_rusty as _;
+use wedeo_h265_oxideav as _;
 use wedeo_rav1d as _;
 use wedeo_rav1e as _;
 use wedeo_symphonia as _;
