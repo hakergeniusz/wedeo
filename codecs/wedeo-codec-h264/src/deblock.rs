@@ -968,15 +968,12 @@ fn compute_luma_bs(
         mb_width as usize
     };
 
-    // When 8x8 transform: skip internal 4-pixel edges (edges 1 and 3).
-    // Only edge 0 (MB boundary) and edge 2 (8-pixel boundary) are filtered.
-    let cur_t8x8 = cur.transform_8x8;
+    // Compute bS for all four edges even on 8x8-transform MBs. FFmpeg
+    // h264_loopfilter.c:631 keeps the internal 4-pixel edges for 4:2:2
+    // horizontal (chroma) filtering, so the values must be available here.
+    // The luma loop skips edges 1 and 3 separately when transform_8x8 is set.
 
     for (edge, bs_edge) in bs.iter_mut().enumerate() {
-        // Skip internal 4-pixel edges for 8x8 transform MBs
-        if cur_t8x8 && (edge == 1 || edge == 3) {
-            continue;
-        }
         let is_mb_edge = edge == 0;
 
         // For edge 0, the P block is in the neighboring macroblock.
@@ -1838,6 +1835,12 @@ fn deblock_mb(
 
         // --- Luma edges ---
         for (edge, &bs_edge) in luma_bs.iter().enumerate() {
+            // FFmpeg h264_loopfilter.c:693-703: with 8x8DCT the internal
+            // 4-pixel luma edges (1, 3) are skipped, but chroma422 still
+            // filters the corresponding horizontal chroma edges.
+            if mb_info[mb_idx].transform_8x8 && (edge == 1 || edge == 3) {
+                continue;
+            }
             if bs_edge == [0, 0, 0, 0] {
                 continue;
             }
