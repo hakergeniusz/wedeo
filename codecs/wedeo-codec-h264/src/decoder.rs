@@ -1700,8 +1700,11 @@ impl H264Decoder {
                         && fdc.slice_table[(mb_addr - mb_width) as usize] == fdc.current_slice;
                 }
             } else {
-                // Intra slice: no skip run, but guard against reading past end.
-                if br.consumed() + 8 >= rbsp_bits {
+                // Intra slice: no skip run. A coded MB needs at least a 1-bit
+                // mb_type UE code, so only break when no bits remain. An 8-bit
+                // margin skipped the final MB of I-slices whose last MB plus
+                // RBSP trailing bits occupied fewer than 8 bits.
+                if br.consumed() + 1 >= rbsp_bits {
                     break;
                 }
             }
