@@ -24,6 +24,7 @@ use std::time::Instant;
 // Ensure inventory registrations are linked in.
 use wedeo_aac_oxideav as _;
 use wedeo_ac3_oxideav as _;
+use wedeo_ass_oxideav as _;
 use wedeo_bsf_aac_adtstoasc as _;
 use wedeo_bsf_h264_mp4toannexb as _;
 use wedeo_bsf_hevc_mp4toannexb as _;
@@ -69,6 +70,8 @@ use wedeo_mpeg4_oxideav as _;
 use wedeo_prores_oxideav as _;
 use wedeo_rav1d as _;
 use wedeo_rav1e as _;
+use wedeo_sub_image_oxideav as _;
+use wedeo_subtitle_oxideav as _;
 use wedeo_symphonia as _;
 use wedeo_vorbis_enc as _;
 

@@ -18,6 +18,54 @@ use crate::codec_map::wedeo_to_symphonia;
 use crate::error::from_symphonia;
 use crate::sample_format::audio_buffer_to_frame;
 
+/// Convert FFmpeg-style Xiph-laced Vorbis extradata (count byte, lacing
+/// lengths for the first two headers, then all three headers concatenated)
+/// into the raw `ident || setup` byte stream symphonia 0.5's Vorbis decoder
+/// expects as `extra_data` (it reads the ident header first and requires the
+/// setup header to follow immediately; the comment header is skipped).
+///
+/// If the data does not look like Xiph-laced extradata it is returned
+/// unchanged.
+fn vorbis_extradata_for_symphonia(ed: &[u8]) -> Vec<u8> {
+    // FFmpeg's vorbis extradata starts with 2 (three headers) followed by
+    // lacing values for the ident and comment headers.
+    if ed.len() < 4 || ed[0] != 2 {
+        return ed.to_vec();
+    }
+    let mut pos = 1usize;
+    let mut lens = [0usize; 2];
+    for slot in 0..2 {
+        loop {
+            if pos >= ed.len() {
+                return ed.to_vec();
+            }
+            let b = ed[pos];
+            pos += 1;
+            lens[slot] += b as usize;
+            if b < 255 {
+                break;
+            }
+        }
+    }
+    let headers_start = pos;
+    let len1 = lens[0];
+    let len2 = lens[1];
+    let len3 = ed.len().saturating_sub(headers_start + len1 + len2);
+    if headers_start + len1 + len2 + len3 != ed.len() {
+        return ed.to_vec();
+    }
+    let ident = &ed[headers_start..headers_start + len1];
+    let setup = &ed[headers_start + len1 + len2..];
+    // Sanity: ident must be a Vorbis identification header.
+    if ident.len() < 7 || ident[0] != 1 || &ident[1..7] != b"vorbis" {
+        return ed.to_vec();
+    }
+    let mut out = Vec::with_capacity(ident.len() + setup.len());
+    out.extend_from_slice(ident);
+    out.extend_from_slice(setup);
+    out
+}
+
 /// Check if a codec ID is a PCM or ADPCM variant (these require
 /// `max_frames_per_packet` to be set on symphonia's CodecParameters).
 fn is_pcm_or_adpcm(id: CodecId) -> bool {
@@ -120,7 +168,12 @@ impl SymphoniaDecoderWrapper {
         }
 
         if !params.extradata.is_empty() {
-            sp.with_extra_data(params.extradata.into());
+            let extradata = if params.codec_id == CodecId::Vorbis {
+                vorbis_extradata_for_symphonia(&params.extradata)
+            } else {
+                params.extradata.clone()
+            };
+            sp.with_extra_data(extradata.into());
         }
 
         if params.bits_per_coded_sample > 0 {

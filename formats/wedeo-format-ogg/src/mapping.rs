@@ -1519,7 +1519,8 @@ impl CodecPrivate {
 }
 
 /// `opus_duration()`: decode the packet duration from the TOC byte.
-fn opus_duration(src: &[u8]) -> Result<i64> {
+/// Also used by the Ogg muxer to build granule positions.
+pub(crate) fn opus_duration(src: &[u8]) -> Result<i64> {
     if src.is_empty() {
         return Err(Error::InvalidData);
     }

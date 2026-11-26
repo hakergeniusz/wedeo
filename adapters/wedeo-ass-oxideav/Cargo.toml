@@ -1,0 +1,23 @@
+[package]
+name = "wedeo-ass-oxideav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "ASS/SSA subtitle decoder and encoder adapters for wedeo backed by pure-Rust oxideav-ass (MIT)"
+
+[dependencies]
+wedeo-core = { workspace = true }
+wedeo-codec = { workspace = true }
+inventory = { workspace = true }
+oxideav-core = { workspace = true }
+# Default features pull in TTF shaping/rasterisation for rendering; this
+# adapter only needs the ASS text codec, parser and writer.
+oxideav-ass = { workspace = true, default-features = false }
+oxideav-subtitle = { workspace = true, default-features = false }
+
+[lints]
+workspace = true

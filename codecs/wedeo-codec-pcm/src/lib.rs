@@ -9,7 +9,7 @@ use wedeo_core::error::{Error, Result};
 use wedeo_core::frame::Frame;
 use wedeo_core::media_type::MediaType;
 use wedeo_core::packet::Packet;
-use wedeo_core::sample_format::SampleFormat;
+use wedeo_core::sample_format::{SampleFormat, convert_samples};
 
 /// Map codec ID to native sample format.
 fn codec_id_to_sample_format(id: CodecId) -> Option<SampleFormat> {
@@ -128,7 +128,39 @@ impl PcmEncoder {
     fn encode_frame(&self, frame: &Frame) -> Result<Packet> {
         let audio = frame.audio().ok_or(Error::InvalidData)?;
         let nb_channels = self.channel_layout.nb_channels.max(1) as u32;
-        let data = audio.planes[0].buffer.data();
+        // The decoder may hand us any sample format (e.g. Vorbis decodes to
+        // Flt); convert to the coded format's native format first, like the
+        // auto-inserted aformat filter does in FFmpeg.
+        let target = codec_id_to_sample_format(self.codec_id)
+            .unwrap_or(self._sample_format)
+            .packed();
+        let src = audio.format.packed();
+        let raw: &[u8] = audio.planes[0].buffer.data();
+        let converted;
+        let data: &[u8] = if audio.format.is_planar() {
+            // Interleave planar planes into one packed buffer.
+            let nb_samples = audio.nb_samples as usize;
+            let bps = audio.format.bytes_per_sample();
+            let mut packed = Vec::with_capacity(nb_samples * nb_channels as usize * bps);
+            for s in 0..nb_samples {
+                for ch in 0..nb_channels as usize {
+                    if let Some(chunk) = audio
+                        .planes
+                        .get(ch)
+                        .and_then(|p| p.buffer.data().get(s * bps..(s + 1) * bps))
+                    {
+                        packed.extend_from_slice(chunk);
+                    }
+                }
+            }
+            converted = convert_samples(&packed, src, target);
+            &converted
+        } else if src != target {
+            converted = convert_samples(raw, src, target);
+            &converted
+        } else {
+            raw
+        };
 
         let output = encode_samples(self.codec_id, data, nb_channels);
 

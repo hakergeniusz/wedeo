@@ -28,6 +28,9 @@ members = [
     "adapters/wedeo-mpeg4-oxideav",
     "adapters/wedeo-ffv1-oxideav",
     "adapters/wedeo-vorbis-enc",
+    "adapters/wedeo-subtitle-oxideav",
+    "adapters/wedeo-ass-oxideav",
+    "adapters/wedeo-sub-image-oxideav",
     "bins/wedeo-cli",
     "bins/wedeo-play",
     "tests/fate",
@@ -119,6 +122,9 @@ wedeo-prores-oxideav = { path = "adapters/wedeo-prores-oxideav", version = "0.2.
 wedeo-mpeg4-oxideav = { path = "adapters/wedeo-mpeg4-oxideav", version = "0.2.0" }
 wedeo-ffv1-oxideav = { path = "adapters/wedeo-ffv1-oxideav", version = "0.2.0" }
 wedeo-vorbis-enc = { path = "adapters/wedeo-vorbis-enc", version = "0.2.0" }
+wedeo-subtitle-oxideav = { path = "adapters/wedeo-subtitle-oxideav", version = "0.2.0" }
+wedeo-ass-oxideav = { path = "adapters/wedeo-ass-oxideav", version = "0.2.0" }
+wedeo-sub-image-oxideav = { path = "adapters/wedeo-sub-image-oxideav", version = "0.2.0" }
 
 # Pure-Rust H.264 encoder (BSD-2-Clause). `default-features = false` avoids
 # the global allocator and the unsafe accel crate; `std` keeps diagnostics.
@@ -143,6 +149,15 @@ oxideav-mpeg4video = "0.1.11"
 
 # Pure-Rust FFV1 lossless decoder + encoder (MIT).
 oxideav-ffv1 = "0.0.11"
+
+# Pure-Rust text subtitle codecs (SubRip/WebVTT/etc.) (MIT).
+oxideav-subtitle = "0.1.5"
+
+# Pure-Rust ASS/SSA subtitle codec (MIT).
+oxideav-ass = "0.0.11"
+
+# Pure-Rust bitmap subtitle codecs (PGS/DVB/VobSub) (MIT).
+oxideav-sub-image = "0.0.9"
 
 # Pure-Rust Vorbis encoder, aoTuV b6.03 port (BSD-3-Clause).
 vorbis-enc = "0.1.1"

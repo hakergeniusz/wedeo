@@ -611,6 +611,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "compcol"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f29da98742f258743e8bb44b09f0cc1cbca2591e709b1bb85ccd6e9111f431"
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1352,6 +1358,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "intl"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5bfae726bb3f672d4f4b1f29cee6c74898a35230a4c794d8292c21129107f21"
 
 [[package]]
 name = "inventory"
@@ -2238,6 +2250,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-ass"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dda5a00a3af241abbc06544b2a5324b88ddf1d059938bfdfe802cecf961faff5"
+dependencies = [
+ "oxideav-core",
+ "oxideav-subtitle",
+]
+
+[[package]]
 name = "oxideav-core"
 version = "0.1.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2276,10 +2298,91 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-otf"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "193a0137ee19b4d07867d761473aba06bdee46c83921191a5817d3ace56a7f3f"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-pixfmt"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1364b985b56d0a11a0220c3558064eeaca0e07d08bc9fbdc9e99475ae47766ef"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-png"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4efb009dcbff5612772d6e8b1851b9dcf43f85f19cc3f1401f1f119b301d82c4"
+dependencies = [
+ "compcol",
+ "oxideav-core",
+]
+
+[[package]]
 name = "oxideav-prores"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc234011fb6aa95051ea4d7309f21b895663c14aee97347882e3358beab912f5"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-raster"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4123a0d4deaf496427fdeb4d99ac5b02e015858a59d5ca26feff0e2066aae64"
+dependencies = [
+ "oxideav-core",
+ "oxideav-pixfmt",
+]
+
+[[package]]
+name = "oxideav-scribe"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1764ecf10b8dccd0f5d772d087b019fa7e0817ffef63ad8aacffb836030ae3db"
+dependencies = [
+ "intl",
+ "oxideav-core",
+ "oxideav-otf",
+ "oxideav-png",
+ "oxideav-ttf",
+]
+
+[[package]]
+name = "oxideav-sub-image"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4f316bdec2aad01fe9edf8b0aacc83a44c5329ebea5f00e89e41e883a87e490"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-subtitle"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcdecb5410cc2d3d4629764ac78fd39ee3aec78c74a8bbdc483982140e16b941"
+dependencies = [
+ "oxideav-core",
+ "oxideav-pixfmt",
+ "oxideav-raster",
+ "oxideav-scribe",
+]
+
+[[package]]
+name = "oxideav-ttf"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1d2e37d38f13bec67238339215b574008120584d26b68aa75eccaab59c97eae"
 dependencies = [
  "oxideav-core",
 ]
@@ -3914,6 +4017,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wedeo-ass-oxideav"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "oxideav-ass",
+ "oxideav-core",
+ "oxideav-subtitle",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
 name = "wedeo-bsf-aac-adtstoasc"
 version = "0.2.0"
 dependencies = [
@@ -3947,6 +4062,7 @@ dependencies = [
  "tracing-subscriber",
  "wedeo-aac-oxideav",
  "wedeo-ac3-oxideav",
+ "wedeo-ass-oxideav",
  "wedeo-bsf-aac-adtstoasc",
  "wedeo-bsf-h264-mp4toannexb",
  "wedeo-bsf-hevc-mp4toannexb",
@@ -3995,6 +4111,8 @@ dependencies = [
  "wedeo-prores-oxideav",
  "wedeo-rav1d",
  "wedeo-rav1e",
+ "wedeo-sub-image-oxideav",
+ "wedeo-subtitle-oxideav",
  "wedeo-symphonia",
  "wedeo-vorbis-enc",
 ]
@@ -4605,6 +4723,28 @@ name = "wedeo-scale"
 version = "0.2.0"
 dependencies = [
  "dcv-color-primitives",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-sub-image-oxideav"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "oxideav-core",
+ "oxideav-sub-image",
+ "wedeo-codec",
+ "wedeo-core",
+]
+
+[[package]]
+name = "wedeo-subtitle-oxideav"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "oxideav-core",
+ "oxideav-subtitle",
+ "wedeo-codec",
  "wedeo-core",
 ]
 

@@ -14,7 +14,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use wedeo_codec::decoder::{CodecParameters, Decoder, DecoderDescriptor};
 use wedeo_codec::descriptor::{CodecCapabilities, CodecDescriptor, CodecProperties};
 use wedeo_codec::registry::DecoderFactory;
@@ -131,6 +131,30 @@ impl Vp9Decoder {
             width = header.width,
             height = header.height,
             "VP9 frame header decoded"
+        );
+        trace!(
+            keyframe = header.frame_type == FrameType::KeyFrame,
+            invisible = !header.show_frame,
+            error_resilient = header.error_resilient,
+            intra_only = header.intra_only,
+            reset_ctx = header.reset_context,
+            refresh = header.refresh_ref_mask,
+            ref_idx = ?header.ref_idx,
+            sign_bias = ?header.sign_bias,
+            frame_ctx_id = header.frame_ctx_id,
+            use_last_frame_mvs = header.use_last_frame_mvs,
+            filter_level = header.filter_level,
+            sharpness = header.sharpness_level,
+            base_q_idx = header.base_q_idx,
+            tile_cols_log2 = header.tile_cols_log2,
+            tile_rows_log2 = header.tile_rows_log2,
+            hdr_size = header.compressed_header_size,
+            skip_probs = ?header.prob.skip,
+            tx_mode = ?header.tx_mode,
+            comp_pred_mode = header.comp_pred_mode,
+            filter_probs = ?header.prob.filter,
+            seg_enabled = header.segmentation.enabled,
+            "VP9 full frame header"
         );
 
         // show_existing_frame: output a previously decoded reference frame.

@@ -71,7 +71,11 @@ fn av_log2(mut v: u32) -> u32 {
 /// Split a Xiph-laced extradata buffer into its three headers.
 ///
 /// Equivalent to `avpriv_split_xiph_headers(extradata, size, 30, ...)`.
-fn split_xiph_headers(extradata: &[u8], first_header_size: usize) -> Result<[(&[u8], usize); 3]> {
+/// Also used by the Ogg muxer to recover the header packets from extradata.
+pub(crate) fn split_xiph_headers(
+    extradata: &[u8],
+    first_header_size: usize,
+) -> Result<[(&[u8], usize); 3]> {
     if extradata.len() >= 6
         && u16::from_be_bytes([extradata[0], extradata[1]]) as usize == first_header_size
     {

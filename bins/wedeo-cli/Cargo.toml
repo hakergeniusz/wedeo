@@ -34,6 +34,9 @@ wedeo-prores-oxideav = { workspace = true }
 wedeo-mpeg4-oxideav = { workspace = true }
 wedeo-ffv1-oxideav = { workspace = true }
 wedeo-vorbis-enc = { workspace = true }
+wedeo-subtitle-oxideav = { workspace = true }
+wedeo-ass-oxideav = { workspace = true }
+wedeo-sub-image-oxideav = { workspace = true }
 wedeo-codec-vp9 = { workspace = true }
 wedeo-format-ivf = { workspace = true }
 wedeo-format-webm = { workspace = true }
