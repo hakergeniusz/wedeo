@@ -288,9 +288,11 @@ fn decode_chroma_hires(
                 };
                 if cbp_chroma >= 2 {
                     mb.chroma_ac[plane_idx][blk_idx][0] = dc_val as i16;
+                    // FFmpeg h264_cavlc.c:1138 uses plain chroma_qp for AC
+                    // dequant; the 4:2:2 `+3` applies only to the DC Hadamard.
                     dequant::dequant_4x4(
                         &mut mb.chroma_ac[plane_idx][blk_idx],
-                        &ctx.dequant4.coeffs[dc_cqm][c_qp as usize],
+                        &ctx.dequant4.coeffs[dc_cqm][chroma_qp[plane_idx] as usize],
                     );
                     mb.chroma_ac[plane_idx][blk_idx][0] = dc_val as i16;
                     idct::idct4x4_add(
