@@ -100,6 +100,15 @@ pub fn idct4x4_add<P: IdctPixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16
     P::idct4_add(dst, stride, coeffs)
 }
 
+/// Like [`idct4x4_add`] but leaves `coeffs` unmodified. The in-place transform
+/// (and the +32 DC bias) are applied to a local copy. Used by residual paths
+/// whose dequantized coefficients must be reused by a second (high-depth)
+/// reconstruction pass.
+pub fn idct4x4_add_keep<P: IdctPixel>(dst: &mut [P], stride: usize, coeffs: &[i16; 16]) {
+    let mut c = *coeffs;
+    P::idct4_add(dst, stride, &mut c)
+}
+
 fn idct4x4_add_impl<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 16]) {
     // Add rounding bias to DC coefficient (same as FFmpeg's block[0] += 1 << 5)
     coeffs[0] = coeffs[0].wrapping_add(32);

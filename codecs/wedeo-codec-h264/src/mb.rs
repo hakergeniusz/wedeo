@@ -378,6 +378,10 @@ pub struct FrameDecodeContext {
     pub neighbor_ctx: NeighborContext,
     /// Current QP (starts from PPS init_qp + slice_qp_delta, modified per-MB).
     pub qp: u8,
+    /// Per-plane chroma QP for the current MB (computed by `apply_macroblock`).
+    /// Cached here so the high-depth reconstruction pass can apply chroma
+    /// residual after motion compensation without re-parsing the PPS.
+    pub chroma_qp: [u8; 2],
     pub mb_width: u32,
     pub mb_height: u32,
     /// Pre-computed dequantization tables.
@@ -567,6 +571,7 @@ impl FrameDecodeContext {
             mb_info: vec![MbDeblockInfo::default(); total_mbs],
             neighbor_ctx: NeighborContext::new(mb_width),
             qp: 0,
+            chroma_qp: [0, 0],
             mb_width,
             mb_height,
             dequant4: Dequant4Table::new(
@@ -791,7 +796,7 @@ pub(crate) fn luma_block_offset(
 ///
 /// Same MBAFF field-mode adjustment as `luma_block_offset` but for chroma planes.
 #[inline]
-fn chroma_block_offset(
+pub(crate) fn chroma_block_offset(
     pic: &PictureBuffer,
     mb_x: u32,
     mb_y: u32,
@@ -1105,7 +1110,7 @@ pub fn decode_macroblock(
     mb_y: u32,
     ref_pics: &[Arc<SharedPicture>],
     ref_pics_l1: &[Arc<SharedPicture>],
-) -> Result<()> {
+) -> Result<Macroblock> {
     // 1. Parse macroblock syntax via CAVLC
     let mut mb = decode_mb_cavlc(
         br,
@@ -1133,7 +1138,8 @@ pub fn decode_macroblock(
         mb_y,
         ref_pics,
         ref_pics_l1,
-    )
+    )?;
+    Ok(mb)
 }
 
 /// Apply entropy-agnostic macroblock processing.
@@ -1173,6 +1179,7 @@ pub fn apply_macroblock(
     // H.264 Table 8-15 mapping; geometry (4:2:0/4:2:2/4:4:4) only decides how
     // many chroma blocks are decoded, not how their QP is computed.
     let c_qp = [pps.chroma_qp(0, qp as i32), pps.chroma_qp(1, qp as i32)];
+    ctx.chroma_qp = c_qp;
 
     // Check neighbor availability with slice boundary awareness.
     // H.264 spec: neighbors from different slices are unavailable.
@@ -1994,10 +2001,10 @@ fn decode_inter_mb(
                     );
                     let (offset, stride) =
                         luma_block_offset(&ctx.pic, mb_x, mb_y, blk_x, blk_y, ctx.mb_field);
-                    idct::idct4x4_add(
+                    idct::idct4x4_add_keep(
                         &mut ctx.pic.y[offset..],
                         stride,
-                        &mut mb.luma_coeffs[raster_idx],
+                        &mb.luma_coeffs[raster_idx],
                     );
                 }
             }
@@ -3040,10 +3047,10 @@ fn add_b_residual(
                     );
                     let (offset, stride) =
                         luma_block_offset(&ctx.pic, mb_x, mb_y, blk_x, blk_y, ctx.mb_field);
-                    idct::idct4x4_add(
+                    idct::idct4x4_add_keep(
                         &mut ctx.pic.y[offset..],
                         stride,
-                        &mut mb.luma_coeffs[raster_idx],
+                        &mb.luma_coeffs[raster_idx],
                     );
                 }
             }
@@ -4008,10 +4015,10 @@ fn decode_chroma_inter(
                         &ctx.dequant4.coeffs[ac_cqm][chroma_qp[plane_idx] as usize],
                     );
                     mb.chroma_ac[plane_idx][blk_idx][0] = dc_val as i16;
-                    idct::idct4x4_add(
+                    idct::idct4x4_add_keep(
                         &mut plane_data[c_offset..],
                         c_stride,
-                        &mut mb.chroma_ac[plane_idx][blk_idx],
+                        &mb.chroma_ac[plane_idx][blk_idx],
                     );
                 } else {
                     // DC-only

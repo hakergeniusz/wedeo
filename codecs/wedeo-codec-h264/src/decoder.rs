@@ -87,17 +87,25 @@ fn post_decode_mb_hires(
     mb_y: u32,
     ref_pics: &[Arc<SharedPicture>],
     ref_pics_l1: &[Arc<SharedPicture>],
-    mb: Option<&mut crate::cavlc::Macroblock>,
+    mut mb: Option<&mut crate::cavlc::Macroblock>,
 ) {
     if !fdc.pic.is_high_depth() {
         return;
     }
-    if let Some(mb) = mb
+    if let Some(mb) = mb.as_mut()
         && mb.is_pcm
     {
         crate::hires::decode_pcm_mb_hires(fdc, mb, mb_x, mb_y);
     }
-    crate::hires::reconstruct_inter_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1);
+    crate::hires::reconstruct_inter_mb_hires(
+        fdc,
+        hdr,
+        mb_x,
+        mb_y,
+        ref_pics,
+        ref_pics_l1,
+        mb.as_deref(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1707,7 +1715,7 @@ impl H264Decoder {
                 mb_y > 0 && fdc.slice_table[(mb_addr - mb_width) as usize] == fdc.current_slice;
 
             // Decode coded MB
-            mb::decode_macroblock(
+            let mut mb = mb::decode_macroblock(
                 fdc,
                 &mut br,
                 hdr,
@@ -1718,7 +1726,7 @@ impl H264Decoder {
                 ref_pics,
                 ref_pics_l1,
             )?;
-            post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, None);
+            post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, Some(&mut mb));
             mb_addr += 1;
             mbs_decoded += 1;
             // Inline deblock + publish with 1-row delay

@@ -574,6 +574,7 @@ pub fn reconstruct_inter_mb_hires(
     mb_y: u32,
     ref_pics: &[Arc<SharedPicture>],
     ref_pics_l1: &[Arc<SharedPicture>],
+    mb: Option<&crate::cavlc::Macroblock>,
 ) {
     let max_pixel = ctx.pic.max_pixel() as i32;
     let chroma422 = ctx.pic.chroma_format_idc == 2;
@@ -583,8 +584,12 @@ pub fn reconstruct_inter_mb_hires(
     let mut chroma1 = [0u16; 32];
 
     for (blk, &(blk_x, blk_y)) in BLOCK_INDEX_TO_XY.iter().enumerate() {
-        let (mv0, ref0) = ctx.mv_ctx.get(mb_x, mb_y, blk);
-        let (mv1, ref1) = ctx.mv_ctx.get_l1(mb_x, mb_y, blk);
+        // MvContext stores MVs by raster index (bx + by*4), while `blk` is
+        // the scan8-style BLOCK_INDEX_TO_XY index. Convert before lookup so
+        // 8x8 partitions with distinct per-partition MVs resolve correctly.
+        let raster = block_to_raster(blk);
+        let (mv0, ref0) = ctx.mv_ctx.get(mb_x, mb_y, raster);
+        let (mv1, ref1) = ctx.mv_ctx.get_l1(mb_x, mb_y, raster);
         let use_l0 = ref0 >= 0 && (ref0 as usize) < ref_pics.len();
         let use_l1 = ref1 >= 0 && (ref1 as usize) < ref_pics_l1.len();
         if !use_l0 && !use_l1 {
@@ -638,15 +643,28 @@ pub fn reconstruct_inter_mb_hires(
             |pic: &SharedPicture, mv: [i16; 2], plane: usize, out: &mut [u16; 32]| {
                 let rp = unsafe { pic.data() };
                 let src = if plane == 0 { &rp.u16 } else { &rp.v16 };
+                // 4:2:2 chroma is full-resolution vertically: reference row
+                // uses `my >> 2` and the 1/8-pel phase is `(my << 1) & 7`
+                // (FFmpeg h264_mb.c mc_dir_part, ysh = 3 - (chroma_idc == 2)).
+                let chroma_ref_y = if chroma422 {
+                    c_dst_y + (mv[1] as i32 >> 2)
+                } else {
+                    c_dst_y + (mv[1] as i32 >> 3)
+                };
+                let chroma_dy = if chroma422 {
+                    (mv[1] as i32) << 1 & 7
+                } else {
+                    mv[1] as i32 & 7
+                };
                 mc::mc_chroma_u16(
                     &mut out[..cw * ch],
                     cw,
                     src,
                     rp.uv_stride,
                     c_dst_x + (mv[0] as i32 >> 3),
-                    c_dst_y + (mv[1] as i32 >> 3),
+                    chroma_ref_y,
                     (mv[0] as i32 & 7) as u8,
-                    (mv[1] as i32 & 7) as u8,
+                    chroma_dy as u8,
                     cw,
                     ch,
                     rp.width / 2,
@@ -756,6 +774,87 @@ pub fn reconstruct_inter_mb_hires(
                     chroma[i]
                 };
                 plane[chroma_off + i / cw * uv_stride + i % cw] = val;
+            }
+        }
+    }
+
+    // Apply residual to the high-depth planes. The generic (u8) pass has
+    // dequantized the coefficients in `mb` and applied them via
+    // `idct4x4_add_keep` (which preserves the coefficients), but that residual
+    // went to the 8-bit planes only. Re-apply the same residual here, after
+    // motion compensation, so the 10-bit planes get full-precision residual.
+    let Some(mb) = mb else {
+        return;
+    };
+    // Intra MB residual is applied by decode_intra_mb_hires; only inter MBs
+    // need the deferred high-depth residual after motion compensation.
+    if mb.is_intra || mb.is_pcm {
+        return;
+    }
+
+    let cbp_luma = mb.cbp & 0x0F;
+    if cbp_luma != 0 {
+        for (block, &(blk_x, blk_y)) in BLOCK_INDEX_TO_XY.iter().enumerate() {
+            let group = (blk_y / 2) * 2 + (blk_x / 2);
+            if cbp_luma & (1 << group) == 0 {
+                continue;
+            }
+            let raster = block_to_raster(block);
+            let (off, stride) = luma_block_offset(&ctx.pic, mb_x, mb_y, blk_x, blk_y, ctx.mb_field);
+            let mut c = mb.luma_coeffs[raster];
+            idct::idct4x4_add(&mut ctx.pic.y16[off..], stride, &mut c);
+        }
+    }
+
+    let cbp_chroma = (mb.cbp >> 4) & 3;
+    if cbp_chroma > 0 && ctx.decode_chroma {
+        let max_qp = 51 + ctx.pic.qp_bd_offset();
+        let chroma422 = ctx.pic.chroma_format_idc == 2;
+        for plane_idx in 0..2usize {
+            let c_qp = if chroma422 {
+                (ctx.chroma_qp[plane_idx] as i32 + 3).min(max_qp) as u8
+            } else {
+                ctx.chroma_qp[plane_idx]
+            };
+            let dc_cqm = 4 + plane_idx;
+            let qmul = dequant::dc_dequant_scale(&ctx.dequant4, dc_cqm, c_qp);
+            let mut dc_out = [0i32; 8];
+            let num_blocks = if chroma422 { 8 } else { 4 };
+            if chroma422 {
+                idct::chroma422_dc_dequant_idct(&mut dc_out, &mb.chroma_dc[plane_idx], qmul);
+            } else {
+                let dc_in: [i16; 4] = mb.chroma_dc[plane_idx][..4].try_into().unwrap();
+                let mut dc420 = [0i32; 4];
+                idct::chroma_dc_dequant_idct(&mut dc420, &dc_in, qmul);
+                dc_out[..4].copy_from_slice(&dc420);
+            }
+            let max = ctx.pic.max_pixel() as i32;
+            let offsets: Vec<(usize, usize)> = (0..num_blocks)
+                .map(|b| {
+                    let bx = (b & 1) as u32;
+                    let by = (b >> 1) as u32;
+                    chroma_block_offset(&ctx.pic, mb_x, mb_y, bx, by)
+                })
+                .collect();
+            let plane = if plane_idx == 0 {
+                &mut ctx.pic.u16
+            } else {
+                &mut ctx.pic.v16
+            };
+            for (blk_idx, &(off, stride)) in offsets.iter().enumerate() {
+                if cbp_chroma >= 2 {
+                    let mut c = mb.chroma_ac[plane_idx][blk_idx];
+                    idct::idct4x4_add(&mut plane[off..], stride, &mut c);
+                } else {
+                    let dc_add = (dc_out[blk_idx] + 32) >> 6;
+                    for j in 0..4 {
+                        for i in 0..4 {
+                            let idx = off + j * stride + i;
+                            let v = plane[idx] as i32 + dc_add;
+                            plane[idx] = v.clamp(0, max) as u16;
+                        }
+                    }
+                }
             }
         }
     }
