@@ -827,6 +827,7 @@ fn filter_mb_edge_chroma<P: Pixel>(
     qp: u8,
     alpha_offset: i32,
     beta_offset: i32,
+    chroma422: bool,
 ) {
     let (alpha, beta, index_a) = get_thresholds(qp, alpha_offset, beta_offset);
     if alpha == 0 || beta == 0 {
@@ -867,10 +868,14 @@ fn filter_mb_edge_chroma<P: Pixel>(
             continue;
         }
 
-        for d in 0..2usize {
+        // FFmpeg h264dsp.c:115-132 swaps in h_loop_filter_chroma422() for
+        // 4:2:2 vertical chroma edges: inner_iters=4 walks all 16 chroma
+        // rows of the MB instead of the 8 rows used for 4:2:0.
+        let inner_iters = if is_vertical && chroma422 { 4 } else { 2 };
+        for d in 0..inner_iters {
             // Walk along the edge: for vertical, y varies; for horizontal, x varies.
             let off = if is_vertical {
-                base + (i as usize * 2 + d) * stride
+                base + (i as usize * inner_iters + d) * stride
             } else {
                 base + i as usize * 2 + d
             };
@@ -1660,6 +1665,7 @@ fn deblock_mbaff_horiz_edge0(
                 cqp,
                 alpha_c0_offset,
                 beta_offset,
+                pic.chroma_format_idc == 2,
             );
         }
     }
@@ -1933,6 +1939,7 @@ fn deblock_mb(
                             qp,
                             alpha_c0_offset,
                             beta_offset,
+                            pic.chroma_format_idc == 2,
                         );
                     } else {
                         filter_mb_edge_chroma::<u16>(
@@ -1945,6 +1952,7 @@ fn deblock_mb(
                             qp,
                             alpha_c0_offset,
                             beta_offset,
+                            pic.chroma_format_idc == 2,
                         );
                     }
                 } else if comp_u {
@@ -1958,6 +1966,7 @@ fn deblock_mb(
                         qp,
                         alpha_c0_offset,
                         beta_offset,
+                        pic.chroma_format_idc == 2,
                     );
                 } else {
                     filter_mb_edge_chroma::<u8>(
@@ -1970,6 +1979,7 @@ fn deblock_mb(
                         qp,
                         alpha_c0_offset,
                         beta_offset,
+                        pic.chroma_format_idc == 2,
                     );
                 }
             }
