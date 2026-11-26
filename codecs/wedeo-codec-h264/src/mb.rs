@@ -609,7 +609,7 @@ impl FrameDecodeContext {
             last_qscale_diff: 0,
             slice_deblock_params: Vec::new(),
             decode_chroma,
-            is_mbaff: !sps.frame_mbs_only_flag,
+            is_mbaff: !sps.frame_mbs_only_flag && sps.mb_aff,
             mb_field: false,
             mc_scratch: mc::McScratch::new(),
             bi_scratch_y: [0u8; 256],

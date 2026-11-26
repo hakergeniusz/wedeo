@@ -1598,7 +1598,7 @@ impl H264Decoder {
         let first_mb = hdr.first_mb_in_slice;
         let mut mbs_decoded = 0u32;
         let is_inter_slice = hdr.slice_type.is_p() || hdr.slice_type.is_b();
-        let is_mbaff = !sps.frame_mbs_only_flag;
+        let is_mbaff = !sps.frame_mbs_only_flag && sps.mb_aff;
 
         if is_mbaff {
             return Self::decode_slice_cavlc_mbaff(
@@ -2008,7 +2008,7 @@ impl H264Decoder {
         let first_mb = hdr.first_mb_in_slice;
         let mut mbs_decoded = 0u32;
         let is_inter_slice = hdr.slice_type.is_p() || hdr.slice_type.is_b();
-        let is_mbaff = !sps.frame_mbs_only_flag;
+        let is_mbaff = !sps.frame_mbs_only_flag && sps.mb_aff;
         let deblock_enabled = std::env::var("WEDEO_NO_DEBLOCK").is_err();
 
         if is_mbaff {
