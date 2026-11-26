@@ -886,14 +886,11 @@ fn filter_mb_edge_chroma<P: Pixel>(
             let q1 = plane[off + step].to_i32();
 
             if cur_bs < 4 {
-                // FFmpeg: tc = ((tc0[i] - 1U) << (BIT_DEPTH - 8)) + 1.
-                // Keep the legacy +1 behaviour at 8-bit to avoid regressing
-                // the existing bit-exact 8-bit baseline.
-                let tc = if bit_shift == 0 {
-                    get_tc0(qp, alpha_offset, cur_bs) + 1
-                } else {
-                    get_tc0(qp, alpha_offset, cur_bs) << bit_shift
-                };
+                // FFmpeg filter_mb_edgecv passes tc0_table[index][bs] + 1 to
+                // h264_loop_filter_chroma, which computes
+                // tc = ((tc0 - 1U) << (BIT_DEPTH - 8)) + 1. Net result:
+                // tc = (tc0_table << bit_shift) + 1 at all bit depths.
+                let tc = (get_tc0(qp, alpha_offset, cur_bs) << bit_shift) + 1;
                 if let Some((new_p0, new_q0)) =
                     filter_normal_chroma(p0, p1, q0, q1, alpha, beta, tc)
                 {
