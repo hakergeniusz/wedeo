@@ -17,7 +17,8 @@ use crate::dequant;
 use crate::idct;
 use crate::intra_pred;
 use crate::mb::{
-    BLOCK_INDEX_TO_XY, FrameDecodeContext, block_to_raster, luma_block_offset, luma_mb_offset,
+    BLOCK_8X8_OFFSET, BLOCK_INDEX_TO_XY, FrameDecodeContext, block_to_raster, luma_block_offset,
+    luma_mb_offset,
 };
 use crate::mc;
 use crate::pixel::Pixel;
@@ -796,15 +797,32 @@ pub fn reconstruct_inter_mb_hires(
 
     let cbp_luma = mb.cbp & 0x0F;
     if cbp_luma != 0 {
-        for (block, &(blk_x, blk_y)) in BLOCK_INDEX_TO_XY.iter().enumerate() {
-            let group = (blk_y / 2) * 2 + (blk_x / 2);
-            if cbp_luma & (1 << group) == 0 {
-                continue;
+        if mb.transform_size_8x8_flag {
+            // High-profile inter MBs can code luma residual with the 8x8
+            // transform. Mirror FFmpeg's `idct8_add4` (h264_mb.c:773-777):
+            // the dequantized coefficients were kept by the 8-bit pass
+            // (`idct8x8_add_keep`), so apply the same IDCT to the u16 plane.
+            for (i8x8, &(bx, by)) in BLOCK_8X8_OFFSET.iter().enumerate() {
+                if cbp_luma & (1 << i8x8) == 0 {
+                    continue;
+                }
+                let (off, stride) =
+                    luma_block_offset(&ctx.pic, mb_x, mb_y, bx / 4, by / 4, ctx.mb_field);
+                let mut c = mb.luma_8x8_coeffs[i8x8];
+                idct::idct8x8_add(&mut ctx.pic.y16[off..], stride, &mut c);
             }
-            let raster = block_to_raster(block);
-            let (off, stride) = luma_block_offset(&ctx.pic, mb_x, mb_y, blk_x, blk_y, ctx.mb_field);
-            let mut c = mb.luma_coeffs[raster];
-            idct::idct4x4_add(&mut ctx.pic.y16[off..], stride, &mut c);
+        } else {
+            for (block, &(blk_x, blk_y)) in BLOCK_INDEX_TO_XY.iter().enumerate() {
+                let group = (blk_y / 2) * 2 + (blk_x / 2);
+                if cbp_luma & (1 << group) == 0 {
+                    continue;
+                }
+                let raster = block_to_raster(block);
+                let (off, stride) =
+                    luma_block_offset(&ctx.pic, mb_x, mb_y, blk_x, blk_y, ctx.mb_field);
+                let mut c = mb.luma_coeffs[raster];
+                idct::idct4x4_add(&mut ctx.pic.y16[off..], stride, &mut c);
+            }
         }
     }
 

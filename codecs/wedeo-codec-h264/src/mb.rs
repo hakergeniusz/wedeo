@@ -1962,10 +1962,10 @@ fn decode_inter_mb(
                     let blk_y_4 = by / 4;
                     let (offset, field_stride) =
                         luma_block_offset(&ctx.pic, mb_x, mb_y, blk_x_4, blk_y_4, ctx.mb_field);
-                    idct::idct8x8_add(
+                    idct::idct8x8_add_keep(
                         &mut ctx.pic.y[offset..],
                         field_stride,
-                        &mut mb.luma_8x8_coeffs[i8x8],
+                        &mb.luma_8x8_coeffs[i8x8],
                     );
                     {
                         let mut post_sum = 0u32;
@@ -3008,10 +3008,10 @@ fn add_b_residual(
                     let blk_y_4 = by / 4;
                     let (offset, field_stride) =
                         luma_block_offset(&ctx.pic, mb_x, mb_y, blk_x_4, blk_y_4, ctx.mb_field);
-                    idct::idct8x8_add(
+                    idct::idct8x8_add_keep(
                         &mut ctx.pic.y[offset..],
                         field_stride,
-                        &mut mb.luma_8x8_coeffs[i8x8],
+                        &mb.luma_8x8_coeffs[i8x8],
                     );
                     {
                         let mut post_sum = 0u32;

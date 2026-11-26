@@ -163,6 +163,15 @@ fn idct4x4_add_impl<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 1
     *coeffs = [0i16; 16];
 }
 
+/// Like [`idct8x8_add`] but leaves `coeffs` unmodified. The in-place transform
+/// (and the +32 DC bias) are applied to a local copy. Used by residual paths
+/// whose dequantized coefficients must be reused by a second (high-depth)
+/// reconstruction pass, mirroring [`idct4x4_add_keep`].
+pub fn idct8x8_add_keep<P: IdctPixel>(dst: &mut [P], stride: usize, coeffs: &[i16; 64]) {
+    let mut c = *coeffs;
+    P::idct8_add(dst, stride, &mut c)
+}
+
 /// DC-only 4x4 IDCT shortcut: add `(dc + 32) >> 6` to all 16 pixels.
 ///
 /// When only the DC coefficient is non-zero, the full IDCT simplifies to
@@ -798,5 +807,24 @@ mod tests {
         let mut coeffs = [42i16; 64];
         idct8x8_add(&mut dst, 8, &mut coeffs);
         assert_eq!(coeffs, [0i16; 64]);
+    }
+
+    #[test]
+    fn idct8x8_add_keep_preserves_coefficients_and_matches_add() {
+        let coeffs = {
+            let mut c = [0i16; 64];
+            c[0] = 512;
+            c[8] = -480;
+            c[21] = 37;
+            c
+        };
+        let mut dst = [128u16; 64];
+        let mut expected = [128u16; 64];
+        idct8x8_add_keep(&mut dst, 8, &coeffs);
+        idct8x8_add(&mut expected, 8, &mut coeffs.clone());
+        assert_eq!(dst, expected);
+        assert_eq!(coeffs[0], 512);
+        assert_eq!(coeffs[8], -480);
+        assert_eq!(coeffs[21], 37);
     }
 }
