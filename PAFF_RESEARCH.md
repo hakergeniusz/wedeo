@@ -1025,3 +1025,49 @@ partial patch that only changed row addressing (without pairing + field-view MC)
 produced ~140k wrong pixels/frame. Implement in the full order from the main plan
 (pairing -> field MB rows -> field-view MC -> field-aware deblock) and re-measure
 against these values after each step.
+
+---
+
+## Appendix F: Pairing + field addressing attempt (2026-11-26, reverted)
+
+Patch retained at `/tmp/ai-agent/paff_stage_attempt.patch` (363 lines). Tree is
+clean at `ff6feb9`; the patch was NOT committed because pixels remain wrong.
+
+### What was implemented (and what it achieved)
+1. `H264Decoder` PAFF state (`current_field_pair`, `current_top_frame_num`,
+   `current_top_field_poc`, `current_bottom_seen`). A bottom-field slice with
+   `first_mb=0`, equal `frame_num` and a pending top field reuses the FDC instead
+   of starting a new frame.
+2. POC type 0 bottom field POC = top POC + `delta_pic_order_cnt_bottom`; DPB
+   `field_poc[2]` / `ref_mask` updated on the paired entry.
+3. `build_ref_list_p/b` receive picture_structure 1/2 for field slices and
+   `RefPic::field(...)` preserves field parity.
+4. CAVLC/CABAC frame loops use field MB addressing:
+   `mb_y = (mb_addr/mb_width)*2 + bottom`, loop over `mb_width * ceil(mb_height/2)`
+   MBs, top-neighbour stride `2*mb_width`, and `compute_mbaff_neighbors(...,
+   is_mbaff=true, curr_field=true, ...)`.
+5. `decode_slice_into` sets `fdc.mb_field = true` and `fdc.is_mbaff = true` for
+   field slices.
+
+**Result: frame count went from 2 to 1** for `freh7_2f.264`, but luma parity 0/1
+still differ by ~99.9% / ~99.3%, and chroma ~97-99%. No improvement in pixels.
+
+### Measured MB-level state (top I field, temporary trace, reverted)
+- MB(0,0): `cbp=239`, `mb_type=0`, `transform_8x8_flag=true`,
+  `intra4x4_pred_mode=[2,2,1,1]` (DC/DC/H/H), `luma_coeffs[0]` all zero,
+  `luma_8x8_coeffs[0][..8]=[1,1,0,3,0,-1,0,0]`. FFmpeg's cbp is also 239.
+- MB(1,2): Wedeo `cbp=15` vs FFmpeg `cbp=47` (entropy divergence persists).
+- Bottom P MB(0,1): Wedeo `mb_type=3, cbp=175` (skip) vs FFmpeg coded `cbp=239`.
+
+### Conclusion
+Pairing and field addressing alone are insufficient. The first MB's syntax
+matches FFmpeg, so the divergence is in **field-mode reconstruction** (intra
+prediction / 8x8 intra residual placement with the doubled field stride), not
+in bitstream parsing or frame assembly. Disabling deblocking does not help.
+
+### Next step (do NOT repeat this partial patch)
+Extract FFmpeg gdb ground truth for the top I field MB(0,0): prediction buffer
+after intra prediction / before IDCT, dequantized 8x8 coefficients, and the
+field-mode destination stride/offset. Compare against Wedeo's `ctx.pic.y`
+immediately after `apply_macroblock` for the same MB. Find WHERE the first
+reconstructed pixel diverges before changing code again.
