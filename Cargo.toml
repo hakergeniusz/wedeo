@@ -151,13 +151,16 @@ oxideav-mpeg4video = "0.1.11"
 oxideav-ffv1 = "0.0.11"
 
 # Pure-Rust text subtitle codecs (SubRip/WebVTT/etc.) (MIT).
-oxideav-subtitle = "0.1.5"
+# `default-features = false` is declared here (not in members) so the
+# pinned Rust 1.85.0 toolchain of the cargo-deny CI job can parse the
+# workspace: members may not override default-features before Rust 1.87.
+oxideav-subtitle = { version = "0.1.5", default-features = false }
 
 # Pure-Rust ASS/SSA subtitle codec (MIT).
-oxideav-ass = "0.0.11"
+oxideav-ass = { version = "0.0.11", default-features = false }
 
 # Pure-Rust bitmap subtitle codecs (PGS/DVB/VobSub) (MIT).
-oxideav-sub-image = "0.0.9"
+oxideav-sub-image = { version = "0.0.9", default-features = false }
 
 # Pure-Rust Vorbis encoder, aoTuV b6.03 port (BSD-3-Clause).
 vorbis-enc = "0.1.1"

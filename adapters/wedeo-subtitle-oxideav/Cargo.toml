@@ -16,7 +16,7 @@ inventory = { workspace = true }
 oxideav-core = { workspace = true }
 # Rendering (`text`) and the ASS sibling are not used by this adapter; the
 # cue IR and the SRT/WebVTT codec factories are all in the base crate.
-oxideav-subtitle = { workspace = true, default-features = false }
+oxideav-subtitle = { workspace = true }
 
 [lints]
 workspace = true

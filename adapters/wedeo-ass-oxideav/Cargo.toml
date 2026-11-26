@@ -16,8 +16,8 @@ inventory = { workspace = true }
 oxideav-core = { workspace = true }
 # Default features pull in TTF shaping/rasterisation for rendering; this
 # adapter only needs the ASS text codec, parser and writer.
-oxideav-ass = { workspace = true, default-features = false }
-oxideav-subtitle = { workspace = true, default-features = false }
+oxideav-ass = { workspace = true }
+oxideav-subtitle = { workspace = true }
 
 [lints]
 workspace = true
