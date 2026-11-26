@@ -1071,3 +1071,40 @@ after intra prediction / before IDCT, dequantized 8x8 coefficients, and the
 field-mode destination stride/offset. Compare against Wedeo's `ctx.pic.y`
 immediately after `apply_macroblock` for the same MB. Find WHERE the first
 reconstructed pixel diverges before changing code again.
+
+---
+
+## Appendix G: Field-mode intra reconstruction ground truth (2026-11-26, reverted)
+
+Source: `/tmp/ai-agent/PAFF_INTRA_GROUND_TRUTH.md` (gdb + temporary Wedeo probes,
+all reverted). Vector `freh7_2f.264`, top I field MB(0,0).
+
+### Measured, in order
+1. **Placement matches**: FFmpeg `dest_y - data[0]=0`, `linesize=352`,
+   reconstruction stride `704`, `block_offset[0]=0`; Wedeo offset 0,
+   `y_stride=352`, block stride 704.
+2. **Prediction matches**: FFmpeg `pred8x8l` dir=11 (DC_128) gives eight 128s;
+   Wedeo mode=2 with top/left/top-left all 128 also gives eight 128s.
+3. **Coefficients diverge**: FFmpeg dequantized block
+   `[1480,375,0,375,1232,233,-500,495,...]` (16 nonzeros in first 16) vs
+   Wedeo `[296,128,0,540,0,-127,0,0,...]` (6 nonzeros), both at QP 28 / CBP 239.
+4. Final row 0 follows: FFmpeg `0 33 214 255 247 251 239 255`, Wedeo
+   `151 138 118 118 130 133 120 110`.
+
+### Measured table facts (not yet proven causal)
+- FFmpeg `h->field_scan8x8[0..15] = 0,1,2,8,9,3,4,10,16,11,5,6,7,12,17,24`
+  (= TRANSPOSE of the raw table), Wedeo `FIELD_SCAN_8X8[0..15] =
+  0,8,16,1,9,24,32,17,2,25,40,48,56,33,10,3` (raw, untransposed).
+- FFmpeg dequant8[QP28][0..15] = `18944,4800,26240,...`, Wedeo =
+  `18944,8160,23040,...` (transposes of each other).
+- These two orientation differences cancel for progressive zigzag (which is
+  why all progressive vectors pass), but field scan needs a separate check.
+- FFmpeg's raw pre-dequant levels were **not extracted**; the values
+  `5,5,0,2,7,1,-2,6,-28,...` quoted in the subagent report are *derived* from
+  dequantized output and must not be used as evidence.
+
+### Conclusion
+The earliest measured divergence is the coefficient block after CABAC residual
+decode + dequant, with prediction and placement identical. Extract the raw
+bitstream levels from both decoders (FFmpeg `STORE_BLOCK` with `j` in scope,
+Wedo before `dequant_8x8`) before changing any scan/dequant logic.
