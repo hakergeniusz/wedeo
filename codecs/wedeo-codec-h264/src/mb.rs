@@ -4074,7 +4074,27 @@ fn decode_intra8x8(
         // Neighbor availability for this 8x8 block
         let block_has_top = by > 0 || has_top;
         let block_has_left = bx > 0 || has_left;
-        let block_has_top_left = (by > 0 || has_top) && (bx > 0 || has_left);
+        // Top-left sample availability follows FFmpeg's `topleft_samples_available`:
+        // it is the bottom-right pixel of the above-left MB, so it can be
+        // available even when the MB directly above is not (e.g. a slice
+        // boundary above this MB). For blocks inside the MB it is always
+        // available; for the top-right block it lives in the MB above; for the
+        // top-left block it belongs to the above-left MB.
+        let mb_stride_u = ctx.mb_width as usize;
+        let mb_idx_u = (mb_y * ctx.mb_width + mb_x) as usize;
+        let above_left_idx = mb_idx_u.saturating_sub(mb_stride_u + 1);
+        let has_above_left = mb_y > 0
+            && mb_x > 0
+            && above_left_idx < ctx.slice_table.len()
+            && ctx.slice_table[above_left_idx] == ctx.current_slice
+            && (!ctx.constrained_intra_pred || ctx.mb_info[above_left_idx].is_intra);
+        let block_has_top_left = if by > 0 {
+            bx > 0 || has_left
+        } else if bx > 0 {
+            has_top
+        } else {
+            has_above_left
+        };
         let block_has_top_right = if by > 0 {
             // Within the MB: top-right 8x8 block is available if bx==0
             bx == 0
