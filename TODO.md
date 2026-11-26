@@ -19,7 +19,7 @@
 ### Video codecs (native Rust, no existing crate covers these)
 - [x] **H.264 decoder** — 79/79 progressive BITEXACT (52 CAVLC + 27 CABAC), 39/69 JVT FRext. See `H264.md` for detailed status.
   - [ ] FMO (Flexible Macroblock Ordering) — out of scope, rarely used
-  - [ ] Interlaced (MBAFF/PAFF) — PAFF field combining not implemented (`field_pic_flag` parsed but unused), so field-coded vectors emit 2x frames (e.g. FREXT16-19: 10 frames vs FFmpeg 5). MBAFF pixel reconstruction partial.
+  - [ ] Interlaced (MBAFF/PAFF) — field-aware DPB metadata (`ref_mask`, `field_poc`) and field-aware ref-list construction are in place (parity-carrying `RefListEntry` / `RefPic`), but field pairing, field MB addressing, and field-view MC are not enabled: PAFF vectors still emit 2x frames (e.g. FREXT16-19: 10 frames vs FFmpeg 5) and must be decoded with frame-only paths. MBAFF pixel reconstruction partial. See `PAFF_RESEARCH.md`.
   - [ ] 10-bit / 4:2:2 — progressive 4:2:2 8/10-bit and Hi422FR1-4,6-9,10-13 are BITEXACT; remaining 10-bit 4:2:0 (FREH10) and 4:2:2 (FR14-15) have MC/residual rounding diffs
 - [x] **AV1 decoder via rav1d** — `adapters/wedeo-rav1d/` wraps rav1d behind wedeo `Decoder` trait.
 - [x] **Video player with audio** — `bins/wedeo-play/` has full A/V playback: wgpu+winit GPU rendering, cpal audio output, ffplay-style A/V sync (pts_drift audio clock), resampling via wedeo-resample, 5.1→stereo downmix, volume control, pause. Supports H.264/AV1 video + symphonia audio codecs.

@@ -16,273 +16,391 @@ use crate::slice::{MmcoOp, RefPicListModification, SliceHeader};
 // Reference list construction
 // ---------------------------------------------------------------------------
 
-/// Collect long-term DPB references sorted by long_term_frame_idx ascending.
+/// A single reference-list entry.
 ///
-/// Returns a Vec of DPB indices in display order (lowest index first).
-fn collect_long_term_refs(dpb: &Dpb) -> Vec<usize> {
-    let mut long_term: Vec<(usize, u32)> = dpb
-        .entries
-        .iter()
-        .enumerate()
-        .filter_map(|(i, e)| {
-            e.as_ref()
-                .filter(|entry| entry.status == RefStatus::LongTerm)
-                .map(|entry| (i, entry.long_term_frame_idx))
-        })
-        .collect();
-    long_term.sort_by_key(|&(_, lt_idx)| lt_idx);
-    long_term.into_iter().map(|(idx, _)| idx).collect()
+/// A complementary field pair appears twice in a field-mode ref list, so the
+/// field parity must travel with the list index rather than being derivable
+/// from the DPB slot alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefListEntry {
+    pub dpb_idx: usize,
+    /// 1 = top field, 2 = bottom field, 3 = full frame.
+    pub parity: u8,
+    /// `PicNum`/`LongTermPicNum` used for sorting and list modification.
+    pub pic_num: i64,
 }
 
-/// Build reference list 0 for a P-slice (Baseline profile, frame-only).
+impl RefListEntry {
+    /// NULL sentinel used while a list is being reordered.
+    pub const NULL: Self = Self {
+        dpb_idx: usize::MAX,
+        parity: 3,
+        pic_num: 0,
+    };
+
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        self.dpb_idx == usize::MAX
+    }
+}
+
+/// Wrap a pic_num to the range (-MaxPicNum, CurrPicNum].
+#[inline]
+fn wrap_pic_num(pic_num: i64, curr_pic_num: i64, max_pic_num: i64) -> i64 {
+    if pic_num > curr_pic_num {
+        pic_num - max_pic_num
+    } else {
+        pic_num
+    }
+}
+
+/// Expand the DPB's short-term references into field entries.
 ///
-/// Short-term references are sorted by pic_num descending (most recent
-/// first). pic_num handles frame_num wrap-around per H.264 spec 8.2.4.1:
-///   pic_num = frame_num                    if frame_num <= CurrFrameNum
-///   pic_num = frame_num - MaxFrameNum      if frame_num > CurrFrameNum
-/// where MaxFrameNum = 2^log2_max_frame_num.
+/// Frame pictures (structure 3) only accept full-frame refs (`ref_mask == 3`).
+/// Field pictures accept each reference field separately, emitting a current-
+/// parity entry (odd `pic_num`) and/or an opposite-parity entry (even
+/// `pic_num`), matching FFmpeg `build_def_list` / `split_field_copy`.
+fn expand_short_term(
+    dpb: &Dpb,
+    structure: u8,
+    curr_pic_num: i64,
+    max_pic_num: i64,
+) -> Vec<RefListEntry> {
+    let mut out = Vec::new();
+    let opposite = structure ^ 3;
+    for (idx, e) in dpb.entries.iter().enumerate() {
+        let Some(e) = e else { continue };
+        if e.status != RefStatus::ShortTerm {
+            continue;
+        }
+        if structure == 3 {
+            if e.ref_mask & 3 == 3 {
+                out.push(RefListEntry {
+                    dpb_idx: idx,
+                    parity: 3,
+                    pic_num: wrap_pic_num(e.frame_num as i64, curr_pic_num, max_pic_num),
+                });
+            }
+        } else {
+            if e.ref_mask & structure != 0 {
+                out.push(RefListEntry {
+                    dpb_idx: idx,
+                    parity: structure,
+                    pic_num: wrap_pic_num(2 * e.frame_num as i64 + 1, curr_pic_num, max_pic_num),
+                });
+            }
+            if e.ref_mask & opposite != 0 {
+                out.push(RefListEntry {
+                    dpb_idx: idx,
+                    parity: opposite,
+                    pic_num: wrap_pic_num(2 * e.frame_num as i64, curr_pic_num, max_pic_num),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Expand the DPB's long-term references into field entries.
+fn expand_long_term(dpb: &Dpb, structure: u8) -> Vec<RefListEntry> {
+    let mut out = Vec::new();
+    let opposite = structure ^ 3;
+    for (idx, e) in dpb.entries.iter().enumerate() {
+        let Some(e) = e else { continue };
+        if e.status != RefStatus::LongTerm {
+            continue;
+        }
+        if structure == 3 {
+            if e.ref_mask & 3 == 3 {
+                out.push(RefListEntry {
+                    dpb_idx: idx,
+                    parity: 3,
+                    pic_num: e.long_term_frame_idx as i64,
+                });
+            }
+        } else {
+            if e.ref_mask & structure != 0 {
+                out.push(RefListEntry {
+                    dpb_idx: idx,
+                    parity: structure,
+                    pic_num: 2 * e.long_term_frame_idx as i64 + 1,
+                });
+            }
+            if e.ref_mask & opposite != 0 {
+                out.push(RefListEntry {
+                    dpb_idx: idx,
+                    parity: opposite,
+                    pic_num: 2 * e.long_term_frame_idx as i64,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Effective POC of a reference entry (field POC for field refs).
+fn entry_poc(dpb: &Dpb, entry: &RefListEntry) -> i32 {
+    dpb.get(entry.dpb_idx).map_or(i32::MAX, |e| {
+        if entry.parity == 3 {
+            e.poc
+        } else {
+            e.field_poc[(entry.parity - 1) as usize]
+        }
+    })
+}
+
+/// Build reference list 0 for a P-slice.
 ///
-/// Long-term references are appended after, sorted by
-/// long_term_frame_idx ascending.
+/// Short-term references are sorted by `pic_num` descending (most recent
+/// first), then long-term references by `long_term_pic_num` ascending.
+/// For field pictures (`structure` 1 or 2) each reference field is a separate
+/// entry and `pic_num` is doubled per H.264 8.2.4.1 / FFmpeg `h264_refs.c`.
 ///
-/// The list is then optionally reordered by ref_pic_list_modification
-/// commands from the slice header.
-///
-/// Returns a Vec of DPB indices representing list 0.
-///
-/// Reference: FFmpeg `h264_initialise_ref_list` and `ff_h264_build_ref_list`.
+/// Returns a Vec of DPB indices plus field parity.
 pub fn build_ref_list_p(
     dpb: &Dpb,
     slice_hdr: &SliceHeader,
     current_frame_num: u32,
-    max_frame_num: u32, // also MaxPicNum for frame mode
-) -> Vec<usize> {
-    // Compute pic_num with wrap-around handling (H.264 spec 8.2.4.1).
-    let pic_num = |fn_: u32| -> i64 {
-        if fn_ <= current_frame_num {
-            fn_ as i64
-        } else {
-            fn_ as i64 - max_frame_num as i64
-        }
+    max_frame_num: u32,
+    structure: u8,
+) -> Vec<RefListEntry> {
+    let curr_pic_num = if structure == 3 {
+        current_frame_num as i64
+    } else {
+        2 * current_frame_num as i64 + 1
+    };
+    let max_pic_num = if structure == 3 {
+        max_frame_num as i64
+    } else {
+        2 * max_frame_num as i64
     };
 
-    // Collect short-term references with their pic_num values.
-    let mut short_term: Vec<(usize, i64)> = Vec::new();
-    for (i, entry) in dpb.entries.iter().enumerate() {
-        if let Some(e) = entry
-            && e.status == RefStatus::ShortTerm
-        {
-            short_term.push((i, pic_num(e.frame_num)));
-        }
-    }
+    let mut short_term = expand_short_term(dpb, structure, curr_pic_num, max_pic_num);
+    short_term.sort_by_key(|e| std::cmp::Reverse(e.pic_num));
 
-    // Sort by pic_num descending (most recent first).
-    short_term.sort_by_key(|&(_, p)| std::cmp::Reverse(p));
+    let mut long_term = expand_long_term(dpb, structure);
+    long_term.sort_by_key(|e| e.pic_num);
 
-    // Collect long-term references sorted by long_term_frame_idx ascending
-    let lt_indices = collect_long_term_refs(dpb);
+    let mut list: Vec<RefListEntry> = short_term.into_iter().chain(long_term).collect();
 
-    // Build initial list: short-term first, then long-term
-    let mut list: Vec<usize> = short_term
-        .iter()
-        .map(|&(idx, _)| idx)
-        .chain(lt_indices)
-        .collect();
-
-    // Pad to num_ref_idx_l0_active BEFORE modification (matching FFmpeg
-    // h264_refs.c:181-182). Entries beyond the available refs are set to
-    // usize::MAX (NULL equivalent). The modification algorithm operates on
-    // the full-sized list, and the post-modification fixup (below) replaces
-    // any remaining NULL entries with the default ref.
+    // Pad BEFORE modification (matching FFmpeg h264_refs.c:181-182).
     let max_refs = slice_hdr.num_ref_idx_l0_active as usize;
     let available_len = list.len();
     if list.len() < max_refs {
-        list.resize(max_refs, usize::MAX);
+        list.resize(max_refs, RefListEntry::NULL);
     }
 
-    // Apply ref_pic_list_modification commands if present
     if !slice_hdr.ref_pic_list_modification_l0.is_empty() {
         apply_ref_pic_list_modification(
             &mut list,
             &slice_hdr.ref_pic_list_modification_l0,
             dpb,
-            current_frame_num,
+            curr_pic_num,
             max_refs,
-            max_frame_num,
+            max_pic_num,
+            structure,
         );
     }
 
-    // Truncate to num_ref_idx_l0_active.
     list.truncate(max_refs);
-
-    // Replace remaining NULL sentinels with the default ref.
     replace_null_entries(&mut list, available_len);
-
     list
 }
 
-/// Build reference lists L0 and L1 for a B-slice (frame-only).
+/// Build reference lists L0 and L1 for a B-slice.
 ///
-/// L0: short-term with POC <= current (descending by POC),
-///     then short-term with POC > current (ascending by POC),
-///     then long-term (ascending by long_term_frame_idx).
-/// L1: short-term with POC > current (ascending by POC),
-///     then short-term with POC <= current (descending by POC),
-///     then long-term (ascending by long_term_frame_idx).
-/// If L0 == L1 and len > 1, swap L1[0] and L1[1].
-///
-/// Returns (list0, list1) as DPB indices.
-///
-/// Reference: FFmpeg `h264_initialise_ref_list`, H.264 spec 8.2.4.2.3-4.
+/// `current_poc` is the field POC for field pictures (see
+/// `H264Picture.field_poc[picture_structure == BOTTOM]` in FFmpeg).
 pub fn build_ref_list_b(
     dpb: &Dpb,
     slice_hdr: &SliceHeader,
     current_poc: i32,
     max_frame_num: u32,
-) -> (Vec<usize>, Vec<usize>) {
-    // Collect short-term references split by POC relative to current.
-    let mut st_before: Vec<(usize, i32)> = Vec::new(); // POC <= current
-    let mut st_after: Vec<(usize, i32)> = Vec::new(); // POC > current
+    structure: u8,
+) -> (Vec<RefListEntry>, Vec<RefListEntry>) {
+    let curr_pic_num = if structure == 3 {
+        u32::MAX as i64
+    } else {
+        2 * u32::MAX as i64 + 1
+    };
+    let max_pic_num = if structure == 3 {
+        max_frame_num as i64
+    } else {
+        2 * max_frame_num as i64
+    };
 
-    for (i, entry) in dpb.entries.iter().enumerate() {
-        if let Some(e) = entry
-            && e.status == RefStatus::ShortTerm
-        {
-            if e.poc <= current_poc {
-                st_before.push((i, e.poc));
-            } else {
-                st_after.push((i, e.poc));
-            }
+    let mut entries = expand_short_term(dpb, structure, curr_pic_num, max_pic_num);
+    // B-slices order by POC, not pic_num. Sorting by pic_num inside expand
+    // is harmless here because we re-sort below.
+    let mut st_before: Vec<RefListEntry> = Vec::new();
+    let mut st_after: Vec<RefListEntry> = Vec::new();
+    for e in entries.drain(..) {
+        let poc = entry_poc(dpb, &e);
+        if poc <= current_poc {
+            st_before.push(e);
+        } else {
+            st_after.push(e);
         }
     }
+    st_before.sort_by_key(|e| std::cmp::Reverse(entry_poc(dpb, e)));
+    st_after.sort_by_key(|e| entry_poc(dpb, e));
 
-    // Sort: before = descending POC, after = ascending POC
-    st_before.sort_by_key(|&(_, poc)| std::cmp::Reverse(poc));
-    st_after.sort_by_key(|&(_, poc)| poc);
+    let mut long_term = expand_long_term(dpb, structure);
+    long_term.sort_by_key(|e| e.pic_num);
 
-    // Collect long-term references sorted by long_term_frame_idx ascending
-    let lt_indices = collect_long_term_refs(dpb);
-
-    // Build L0: before + after + long-term
-    let mut list0: Vec<usize> = st_before
+    let mut list0: Vec<RefListEntry> = st_before
         .iter()
-        .map(|&(idx, _)| idx)
-        .chain(st_after.iter().map(|&(idx, _)| idx))
-        .chain(lt_indices.iter().copied())
+        .copied()
+        .chain(st_after.iter().copied())
+        .chain(long_term.iter().copied())
+        .collect();
+    let mut list1: Vec<RefListEntry> = st_after
+        .iter()
+        .copied()
+        .chain(st_before.iter().copied())
+        .chain(long_term.iter().copied())
         .collect();
 
-    // Build L1: after + before + long-term
-    let mut list1: Vec<usize> = st_after
-        .iter()
-        .map(|&(idx, _)| idx)
-        .chain(st_before.iter().map(|&(idx, _)| idx))
-        .chain(lt_indices.iter().copied())
-        .collect();
-
-    // If L0 == L1 and len > 1, swap L1[0] and L1[1]
+    // Avoid identical first entries in L0/L1.
     if list0.len() > 1 && list0 == list1 {
         list1.swap(0, 1);
     }
 
-    // Pad lists to active counts BEFORE modification (matching FFmpeg).
     let max_l0 = slice_hdr.num_ref_idx_l0_active as usize;
     let max_l1 = slice_hdr.num_ref_idx_l1_active as usize;
     let l0_avail = list0.len();
     let l1_avail = list1.len();
     if list0.len() < max_l0 {
-        list0.resize(max_l0, usize::MAX);
+        list0.resize(max_l0, RefListEntry::NULL);
     }
     if list1.len() < max_l1 {
-        list1.resize(max_l1, usize::MAX);
+        list1.resize(max_l1, RefListEntry::NULL);
     }
 
-    // Apply ref_pic_list_modification for L0
+    let cur_l0_pic_num = if structure == 3 {
+        slice_hdr.frame_num as i64
+    } else {
+        2 * slice_hdr.frame_num as i64 + 1
+    };
     if !slice_hdr.ref_pic_list_modification_l0.is_empty() {
         apply_ref_pic_list_modification(
             &mut list0,
             &slice_hdr.ref_pic_list_modification_l0,
             dpb,
-            slice_hdr.frame_num,
+            cur_l0_pic_num,
             max_l0,
-            max_frame_num,
+            max_pic_num,
+            structure,
         );
     }
-    // Apply ref_pic_list_modification for L1
     if !slice_hdr.ref_pic_list_modification_l1.is_empty() {
         apply_ref_pic_list_modification(
             &mut list1,
             &slice_hdr.ref_pic_list_modification_l1,
             dpb,
-            slice_hdr.frame_num,
+            cur_l0_pic_num,
             max_l1,
-            max_frame_num,
+            max_pic_num,
+            structure,
         );
     }
 
-    // Truncate to active counts.
     list0.truncate(max_l0);
     list1.truncate(max_l1);
-
-    // Replace remaining NULL sentinels with the default ref.
     replace_null_entries(&mut list0, l0_avail);
     replace_null_entries(&mut list1, l1_avail);
 
     (list0, list1)
 }
 
-/// Replace `usize::MAX` sentinel entries with the first valid ref.
-///
-/// After padding a ref list to `num_ref_idx_lX_active` with `usize::MAX`
-/// and running ref_pic_list_modification, any remaining sentinels are
-/// replaced with the default ref (first non-sentinel entry).
-/// Matching FFmpeg h264_refs.c:391-404.
-fn replace_null_entries(list: &mut [usize], available_len: usize) {
+/// Replace NULL sentinel entries with the first valid reference.
+fn replace_null_entries(list: &mut [RefListEntry], available_len: usize) {
     if available_len == 0 {
         return;
     }
-    if let Some(&default_ref) = list.iter().find(|&&x| x != usize::MAX) {
-        for entry in list.iter_mut() {
-            if *entry == usize::MAX {
-                *entry = default_ref;
+    if let Some(default) = list.iter().find(|e| !e.is_null()).copied() {
+        for e in list.iter_mut() {
+            if e.is_null() {
+                *e = default;
             }
         }
     }
 }
 
-/// Apply ref_pic_list_modification() reordering commands to a reference list.
+/// Find a DPB reference matching a (possibly field-encoded) pic_num.
 ///
-/// `max_pic_num` = MaxFrameNum for frame mode (2^log2_max_frame_num).
-/// Wrap-around uses `& (max_pic_num - 1)` per H.264 spec 8.2.4.3.1.
+/// For field pictures, odd pic_nums denote the current parity and even
+/// pic_nums the opposite field (FFmpeg `pic_num_extract`).
+fn find_ref_entry(dpb: &Dpb, pic_num: i64, structure: u8, is_long: bool) -> Option<RefListEntry> {
+    let (parity, decoded_num) = if structure == 3 {
+        (3u8, pic_num)
+    } else if pic_num & 1 != 0 {
+        (structure, pic_num >> 1)
+    } else {
+        (structure ^ 3, pic_num >> 1)
+    };
+
+    for (idx, e) in dpb.entries.iter().enumerate() {
+        let Some(e) = e else { continue };
+        let expected_status = if is_long {
+            RefStatus::LongTerm
+        } else {
+            RefStatus::ShortTerm
+        };
+        if e.status != expected_status {
+            continue;
+        }
+        let num = if is_long {
+            e.long_term_frame_idx as i64
+        } else {
+            e.frame_num as i64
+        };
+        let field_ok = if structure == 3 {
+            e.ref_mask & 3 == 3
+        } else {
+            e.ref_mask & parity != 0
+        };
+        if num == decoded_num && field_ok {
+            return Some(RefListEntry {
+                dpb_idx: idx,
+                parity,
+                pic_num,
+            });
+        }
+    }
+    None
+}
+
+/// Apply ref_pic_list_modification() reordering commands to a reference list.
 fn apply_ref_pic_list_modification(
-    list: &mut [usize],
+    list: &mut [RefListEntry],
     mods: &[RefPicListModification],
     dpb: &Dpb,
-    current_frame_num: u32,
+    current_pic_num: i64,
     max_ref_count: usize,
-    max_pic_num: u32,
+    max_pic_num: i64,
+    structure: u8,
 ) {
-    let mut pred_pic_num = current_frame_num;
-    let mask = max_pic_num.wrapping_sub(1);
+    let mask = max_pic_num - 1;
+    let mut pred_pic_num = current_pic_num;
 
     for (index, modification) in mods.iter().enumerate() {
         match modification.idc {
             0 | 1 => {
-                let abs_diff_pic_num = modification.val + 1;
-                if modification.idc == 0 {
-                    pred_pic_num = pred_pic_num.wrapping_sub(abs_diff_pic_num);
+                let abs_diff = (modification.val + 1) as i64;
+                pred_pic_num = if modification.idc == 0 {
+                    pred_pic_num.wrapping_sub(abs_diff)
                 } else {
-                    pred_pic_num = pred_pic_num.wrapping_add(abs_diff_pic_num);
-                }
-                // Wrap modulo MaxPicNum (= MaxFrameNum for frame mode)
+                    pred_pic_num.wrapping_add(abs_diff)
+                };
                 pred_pic_num &= mask;
-                if let Some(dpb_idx) = dpb.find_short_term(pred_pic_num) {
-                    reorder_list(list, dpb_idx, index, max_ref_count);
+                if let Some(entry) = find_ref_entry(dpb, pred_pic_num, structure, false) {
+                    reorder_list(list, entry, index, max_ref_count);
                 }
             }
             2 => {
-                let long_term_pic_num = modification.val;
-                if let Some(dpb_idx) = dpb.find_long_term(long_term_pic_num) {
-                    reorder_list(list, dpb_idx, index, max_ref_count);
+                if let Some(entry) = find_ref_entry(dpb, modification.val as i64, structure, true) {
+                    reorder_list(list, entry, index, max_ref_count);
                 }
             }
             _ => {}
@@ -290,30 +408,19 @@ fn apply_ref_pic_list_modification(
     }
 }
 
-/// Reorder a reference list by inserting `dpb_idx` at `target_pos`.
-///
-/// Matches FFmpeg h264_refs.c:375-384: search for the same entry starting
-/// from target_pos, shift everything between found_pos and target_pos
-/// right by one, then place the entry at target_pos. This allows
-/// duplicates when the entry already exists before target_pos.
-fn reorder_list(list: &mut [usize], dpb_idx: usize, target_pos: usize, max_len: usize) {
-    // Find the first occurrence of dpb_idx at or after target_pos.
-    // If not found, use the end of the list (max_len - 1).
+/// Reorder a reference list by inserting `entry` at `target_pos`.
+fn reorder_list(list: &mut [RefListEntry], entry: RefListEntry, target_pos: usize, max_len: usize) {
     let end = max_len.min(list.len());
     let found = list[target_pos..end]
         .iter()
-        .position(|&x| x == dpb_idx)
+        .position(|x| x.dpb_idx == entry.dpb_idx && x.parity == entry.parity)
         .map_or(end.saturating_sub(1), |p| p + target_pos);
 
-    // Shift entries from found down to target_pos+1 one position right.
-    // This drops the entry at `found` and makes room at target_pos.
     for i in (target_pos + 1..=found).rev() {
         list[i] = list[i - 1];
     }
-
-    // Place the entry at target_pos.
     if target_pos < list.len() {
-        list[target_pos] = dpb_idx;
+        list[target_pos] = entry;
     }
 }
 
@@ -362,9 +469,11 @@ pub fn mark_reference(
         {
             if slice_hdr.long_term_reference_flag {
                 entry.status = RefStatus::LongTerm;
+                entry.ref_mask = 3;
                 entry.long_term_frame_idx = 0;
             } else {
                 entry.status = RefStatus::ShortTerm;
+                entry.ref_mask = 3;
             }
         }
         false
@@ -445,6 +554,7 @@ fn sliding_window_mark(
         && entry.status == RefStatus::Unused
     {
         entry.status = RefStatus::ShortTerm;
+        entry.ref_mask = 3;
     }
 }
 
@@ -491,6 +601,7 @@ fn apply_mmco(
         && entry.status == RefStatus::Unused
     {
         entry.status = RefStatus::ShortTerm;
+        entry.ref_mask = 3;
     }
 
     for op in ops {
@@ -541,6 +652,7 @@ fn apply_mmco(
                     && let Some(entry) = dpb.get_mut(idx)
                 {
                     entry.status = RefStatus::LongTerm;
+                    entry.ref_mask = 3;
                     entry.long_term_frame_idx = *long_term_frame_idx;
                 }
                 debug!(
@@ -593,6 +705,7 @@ fn apply_mmco(
                     && let Some(entry) = dpb.get_mut(idx)
                 {
                     entry.status = RefStatus::ShortTerm;
+                    entry.ref_mask = 3;
                     entry.frame_num = 0;
                 }
             }
@@ -611,6 +724,7 @@ fn apply_mmco(
                     && let Some(entry) = dpb.get_mut(idx)
                 {
                     entry.status = RefStatus::LongTerm;
+                    entry.ref_mask = 3;
                     entry.long_term_frame_idx = *long_term_frame_idx;
                 }
                 current_marked = true;
@@ -625,6 +739,7 @@ fn apply_mmco(
         && entry.status == RefStatus::Unused
     {
         entry.status = RefStatus::ShortTerm;
+        entry.ref_mask = 3;
     }
 
     // Post-MMCO DPB overflow check (FFmpeg h264_refs.c:764-788).
@@ -703,6 +818,8 @@ mod tests {
                 ..PictureBuffer::empty()
             }),
             poc,
+            field_poc: [poc, poc],
+            ref_mask: if status == RefStatus::Unused { 0 } else { 3 },
             frame_num,
             status,
             long_term_frame_idx: 0,
@@ -734,12 +851,12 @@ mod tests {
         dpb.store(make_entry(5, 10, RefStatus::ShortTerm));
 
         let hdr = default_slice_header();
-        let list = build_ref_list_p(&dpb, &hdr, 8, 256);
+        let list = build_ref_list_p(&dpb, &hdr, 8, 256, 3);
 
         assert_eq!(list.len(), 3);
         let frame_nums: Vec<u32> = list
             .iter()
-            .map(|&idx| dpb.get(idx).unwrap().frame_num)
+            .map(|e| dpb.get(e.dpb_idx).unwrap().frame_num)
             .collect();
         assert_eq!(frame_nums, vec![7, 5, 3]);
     }
@@ -755,11 +872,17 @@ mod tests {
         dpb.store(lt_entry);
 
         let hdr = default_slice_header();
-        let list = build_ref_list_p(&dpb, &hdr, 8, 256);
+        let list = build_ref_list_p(&dpb, &hdr, 8, 256, 3);
 
         assert_eq!(list.len(), 2);
-        assert_eq!(dpb.get(list[0]).unwrap().status, RefStatus::ShortTerm);
-        assert_eq!(dpb.get(list[1]).unwrap().status, RefStatus::LongTerm);
+        assert_eq!(
+            dpb.get(list[0].dpb_idx).unwrap().status,
+            RefStatus::ShortTerm
+        );
+        assert_eq!(
+            dpb.get(list[1].dpb_idx).unwrap().status,
+            RefStatus::LongTerm
+        );
     }
 
     #[test]
@@ -771,7 +894,7 @@ mod tests {
 
         let mut hdr = default_slice_header();
         hdr.num_ref_idx_l0_active = 3;
-        let list = build_ref_list_p(&dpb, &hdr, 10, 256);
+        let list = build_ref_list_p(&dpb, &hdr, 10, 256, 3);
 
         assert_eq!(list.len(), 3);
     }
@@ -781,7 +904,7 @@ mod tests {
     fn test_build_ref_list_p_empty_dpb() {
         let dpb = Dpb::new(4);
         let hdr = default_slice_header();
-        let list = build_ref_list_p(&dpb, &hdr, 0, 16);
+        let list = build_ref_list_p(&dpb, &hdr, 0, 16, 3);
         assert!(list.is_empty());
     }
 
@@ -806,12 +929,12 @@ mod tests {
 
         let hdr = default_slice_header();
         // CurrFrameNum=1 (wrapped), MaxFrameNum=16
-        let list = build_ref_list_p(&dpb, &hdr, 1, 16);
+        let list = build_ref_list_p(&dpb, &hdr, 1, 16, 3);
 
         assert_eq!(list.len(), 3);
         let frame_nums: Vec<u32> = list
             .iter()
-            .map(|&idx| dpb.get(idx).unwrap().frame_num)
+            .map(|e| dpb.get(e.dpb_idx).unwrap().frame_num)
             .collect();
         // frame_num=0 (pic_num=0) must be first (most recent)
         assert_eq!(frame_nums, vec![0, 15, 14]);
@@ -1005,5 +1128,63 @@ mod tests {
         apply_mmco(&mut dpb, &ops, 5, 256, None, 16);
 
         assert_eq!(dpb.num_long_term(), 0);
+    }
+
+    // --- Field-aware reference list tests (PAFF infrastructure) ---
+
+    #[test]
+    fn test_field_ref_list_interleaves_top_and_bottom() {
+        let mut dpb = Dpb::new(4);
+        let mut e = make_entry(5, 10, RefStatus::ShortTerm);
+        e.field_poc = [10, 11];
+        e.ref_mask = 3; // completed frame pair
+        dpb.store(e);
+
+        let mut hdr = default_slice_header();
+        hdr.num_ref_idx_l0_active = 2;
+        // Current top field (structure 1) of frame_num 6.
+        let list = build_ref_list_p(&dpb, &hdr, 6, 16, 1);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].parity, 1); // current parity (odd pic_num)
+        assert_eq!(list[0].pic_num, 11);
+        assert_eq!(list[1].parity, 2); // opposite field (even pic_num)
+        assert_eq!(list[1].pic_num, 10);
+
+        // Current bottom field (structure 2).
+        let list = build_ref_list_p(&dpb, &hdr, 6, 16, 2);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].parity, 2);
+        assert_eq!(list[0].pic_num, 11);
+        assert_eq!(list[1].parity, 1);
+        assert_eq!(list[1].pic_num, 10);
+    }
+
+    #[test]
+    fn test_field_ref_list_top_only_reference() {
+        let mut dpb = Dpb::new(4);
+        let mut e = make_entry(5, 10, RefStatus::ShortTerm);
+        e.field_poc = [10, i32::MAX];
+        e.ref_mask = 1; // only the top field is a reference
+        dpb.store(e);
+
+        let mut hdr = default_slice_header();
+        hdr.num_ref_idx_l0_active = 1;
+        // Bottom field: only the top field of the pair is usable.
+        let list = build_ref_list_p(&dpb, &hdr, 6, 16, 2);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].parity, 1);
+        assert_eq!(list[0].pic_num, 10); // even => opposite field
+    }
+
+    #[test]
+    fn test_frame_ref_list_requires_both_fields() {
+        let mut dpb = Dpb::new(4);
+        let mut e = make_entry(5, 10, RefStatus::ShortTerm);
+        e.ref_mask = 1; // single field only
+        dpb.store(e);
+
+        let hdr = default_slice_header();
+        let list = build_ref_list_p(&dpb, &hdr, 6, 16, 3);
+        assert!(list.iter().all(RefListEntry::is_null));
     }
 }

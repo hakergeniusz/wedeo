@@ -937,3 +937,34 @@ can be achieved.
    `linesize *= 2`, `poc = field_poc[parity]`.
 5. Then re-enable PAFF pairing and field-view MC.
 6. CAVLC path also needs field-aware `NeighborContext` (top_nz per field row).
+
+---
+
+## Appendix D: Infrastructure landed 2026-11-26
+
+The following PAFF **infrastructure** is implemented and verified not to regress
+frame-only decoding (all 39 progressive FRext matches unchanged):
+
+1. `DpbEntry.ref_mask` (bit0=top, bit1=bottom, 3=frame) and `DpbEntry.field_poc[2]`.
+2. `RefListEntry { dpb_idx, parity, pic_num }` - reference-list entries now carry
+   field parity. `build_ref_list_p/b` take a `structure` argument and expand
+   short/long-term refs into field entries with doubled `pic_num` for field
+   pictures (`expand_short_term`, `expand_long_term`, `find_ref_entry`).
+3. `RefPic { pic, parity, poc, frame_num }` - a reference-list entry with field
+   parity, Deref to `SharedPicture`. All MC / reconstruction paths take
+   `&[RefPic]` instead of `&[Arc<SharedPicture>]`.
+4. Unit tests for field interleaving, top-only refs, and frame-ref requirements.
+
+**Still missing (do not re-attempt partial patch without ground truth):**
+- PAFF top/bottom pairing in `process_nal` (bottom field must reuse the top
+  field's FDC and DPB slot, with one combined output frame).
+- Field MB row addressing in the CABAC/CAVLC loops (`mb_y = 2*field_y + parity`).
+- Field-view MC (`pic_as_field`: bottom data offset by one line, doubled stride,
+  field-coordinate `ref_y`) in `apply_mc_partition` and `reconstruct_inter_mb_hires`.
+- Field-aware deblocking.
+
+A partial implementation of the missing pieces was tried and reverted: it
+produced ~140k differing pixels per frame and hung on
+`Hi422FREXT16_SONY_A`. The likely remaining defect is in CABAC neighbor context
+for field rows; extract `mb_type` / neighbor state from single-thread debug
+FFmpeg before theorising further.

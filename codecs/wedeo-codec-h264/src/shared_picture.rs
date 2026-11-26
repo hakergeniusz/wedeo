@@ -399,3 +399,65 @@ impl DerefMut for PicHandle {
         unsafe { self.shared.data_mut() }
     }
 }
+
+// ---------------------------------------------------------------------------
+// RefPic - a reference list entry with field parity
+// ---------------------------------------------------------------------------
+
+/// A single entry in a reference picture list.
+///
+/// FFmpeg's `H264Ref` carries both a pointer to the underlying `H264Picture`
+/// and a `reference` bitmask describing which field the entry represents.
+/// Complementary field pairs appear twice in a field-mode ref list (once
+/// per field), so the parity must travel with the list entry rather than
+/// living on the picture itself.
+///
+/// `parity` follows FFmpeg's `picture_structure` convention:
+/// - `1` = top field
+/// - `2` = bottom field
+/// - `3` = full frame (both fields)
+#[derive(Clone)]
+pub struct RefPic {
+    pub pic: Arc<SharedPicture>,
+    pub parity: u8,
+    /// Effective POC of this reference (field POC for field entries).
+    pub poc: i32,
+    /// frame_num of the underlying picture (for debugging / pic_num maths).
+    pub frame_num: u32,
+}
+
+impl std::ops::Deref for RefPic {
+    type Target = SharedPicture;
+    fn deref(&self) -> &Self::Target {
+        &self.pic
+    }
+}
+
+impl RefPic {
+    /// Full-frame reference (the common case for progressive streams).
+    pub fn frame(pic: Arc<SharedPicture>, poc: i32, frame_num: u32) -> Self {
+        Self {
+            pic,
+            parity: 3,
+            poc,
+            frame_num,
+        }
+    }
+
+    /// Field reference. `parity` is 1 (top) or 2 (bottom).
+    pub fn field(pic: Arc<SharedPicture>, parity: u8, poc: i32, frame_num: u32) -> Self {
+        debug_assert!(parity == 1 || parity == 2);
+        Self {
+            pic,
+            parity,
+            poc,
+            frame_num,
+        }
+    }
+
+    /// True when this entry is a single field (needs doubled-stride MC).
+    #[inline]
+    pub fn is_field(&self) -> bool {
+        self.parity != 3
+    }
+}

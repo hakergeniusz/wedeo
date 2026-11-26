@@ -29,8 +29,8 @@ use crate::dpb::{Dpb, DpbEntry, RefStatus};
 use crate::mb::{self, FrameDecodeContext};
 use crate::nal::{NalUnit, NalUnitType, split_annex_b, split_nalff};
 use crate::pps::{Pps, parse_pps};
-use crate::refs;
-use crate::shared_picture::{BufferPool, SharedPicture};
+use crate::refs::{self, RefListEntry};
+use crate::shared_picture::{BufferPool, RefPic, SharedPicture};
 use crate::slice::{SliceHeader, SliceType, parse_slice_header};
 use crate::sps::{Sps, parse_sps};
 use crate::thread_pool::{DecodeThreadPool, FrameWork, InFlightDecode, SliceWorkUnit};
@@ -85,8 +85,8 @@ fn post_decode_mb_hires(
     hdr: &SliceHeader,
     mb_x: u32,
     mb_y: u32,
-    ref_pics: &[Arc<SharedPicture>],
-    ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    ref_pics_l1: &[RefPic],
     mut mb: Option<&mut crate::cavlc::Macroblock>,
 ) {
     if !fdc.pic.is_high_depth() {
@@ -157,9 +157,9 @@ pub struct H264Decoder {
     /// Decoded Picture Buffer for reference picture management.
     dpb: Dpb,
     /// Reference list 0 (DPB indices) for the current slice.
-    ref_list_l0: Vec<usize>,
+    ref_list_l0: Vec<RefListEntry>,
     /// Reference list 1 (DPB indices) for B-slices.
-    ref_list_l1: Vec<usize>,
+    ref_list_l1: Vec<RefListEntry>,
     /// Whether the current NAL is an IDR.
     current_is_idr: bool,
     /// frame_num from the current slice header.
@@ -704,6 +704,8 @@ impl H264Decoder {
             let entry = DpbEntry {
                 pic,
                 poc,
+                field_poc: [poc, poc],
+                ref_mask: 0,
                 frame_num: gap_frame_num,
                 status: RefStatus::Unused,
                 long_term_frame_idx: 0,
@@ -894,25 +896,30 @@ impl H264Decoder {
                 if hdr.slice_type.is_p() {
                     let max_frame_num = 1u32 << sps.log2_max_frame_num;
                     self.ref_list_l0 =
-                        refs::build_ref_list_p(&self.dpb, &hdr, hdr.frame_num, max_frame_num);
+                        refs::build_ref_list_p(&self.dpb, &hdr, hdr.frame_num, max_frame_num, 3);
                     self.ref_list_l1.clear();
                     debug!(
                         poc = self.current_poc,
                         l0_len = self.ref_list_l0.len(),
-                        l0_pocs = ?self.ref_list_l0.iter().map(|&i| self.dpb.get(i).map(|e| e.poc)).collect::<Vec<_>>(),
-                        l0_frame_nums = ?self.ref_list_l0.iter().map(|&i| self.dpb.get(i).map(|e| e.frame_num)).collect::<Vec<_>>(),
+                        l0_pocs = ?self.ref_list_l0.iter().map(|e| self.dpb.get(e.dpb_idx).map(|d| d.poc)).collect::<Vec<_>>(),
+                        l0_frame_nums = ?self.ref_list_l0.iter().map(|e| self.dpb.get(e.dpb_idx).map(|d| d.frame_num)).collect::<Vec<_>>(),
                         "REFLIST"
                     );
                 } else if hdr.slice_type.is_b() {
                     let max_frame_num_b = 1u32 << sps.log2_max_frame_num;
-                    let (l0, l1) =
-                        refs::build_ref_list_b(&self.dpb, &hdr, self.current_poc, max_frame_num_b);
+                    let (l0, l1) = refs::build_ref_list_b(
+                        &self.dpb,
+                        &hdr,
+                        self.current_poc,
+                        max_frame_num_b,
+                        3,
+                    );
                     debug!(
                         poc = self.current_poc,
                         l0_len = l0.len(),
                         l1_len = l1.len(),
-                        l0_pocs = ?l0.iter().map(|&i| self.dpb.get(i).map(|e| e.poc)).collect::<Vec<_>>(),
-                        l1_pocs = ?l1.iter().map(|&i| self.dpb.get(i).map(|e| e.poc)).collect::<Vec<_>>(),
+                        l0_pocs = ?l0.iter().map(|e| self.dpb.get(e.dpb_idx).map(|d| d.poc)).collect::<Vec<_>>(),
+                        l1_pocs = ?l1.iter().map(|e| self.dpb.get(e.dpb_idx).map(|d| d.poc)).collect::<Vec<_>>(),
                         "REFLIST"
                     );
                     self.ref_list_l0 = l0;
@@ -952,17 +959,16 @@ impl H264Decoder {
                         bit_depth_luma: slice_bit_depth,
                     };
 
-                    // Build list of SharedPicture references for MC.
-                    let ref_pic_list: Vec<Arc<SharedPicture>> = self
-                        .ref_list_l0
-                        .iter()
-                        .filter_map(|&dpb_idx| self.dpb.get(dpb_idx).map(|e| Arc::clone(&e.pic)))
-                        .collect();
-                    let ref_pic_list_l1: Vec<Arc<SharedPicture>> = self
-                        .ref_list_l1
-                        .iter()
-                        .filter_map(|&dpb_idx| self.dpb.get(dpb_idx).map(|e| Arc::clone(&e.pic)))
-                        .collect();
+                    // Build list of reference entries for MC.
+                    let to_ref_pic = |entry: &RefListEntry| {
+                        self.dpb
+                            .get(entry.dpb_idx)
+                            .map(|e| RefPic::frame(Arc::clone(&e.pic), e.poc, e.frame_num))
+                    };
+                    let ref_pic_list: Vec<RefPic> =
+                        self.ref_list_l0.iter().filter_map(to_ref_pic).collect();
+                    let ref_pic_list_l1: Vec<RefPic> =
+                        self.ref_list_l1.iter().filter_map(to_ref_pic).collect();
 
                     // Set per-slice DPB-derived state on the FDC, then snapshot
                     // into SliceWorkUnit. Use std::mem::take to move large vectors
@@ -971,9 +977,9 @@ impl H264Decoder {
                         fdc.cur_l0_ref_poc = self
                             .ref_list_l0
                             .iter()
-                            .filter_map(|&i| self.dpb.get(i).map(|e| e.poc))
+                            .filter_map(|entry| self.dpb.get(entry.dpb_idx).map(|e| e.poc))
                             .collect();
-                        fdc.cur_l0_ref_dpb = self.ref_list_l0.clone();
+                        fdc.cur_l0_ref_dpb = self.ref_list_l0.iter().map(|e| e.dpb_idx).collect();
                     } else {
                         fdc.cur_l0_ref_poc.clear();
                         fdc.cur_l0_ref_dpb.clear();
@@ -982,9 +988,9 @@ impl H264Decoder {
                         fdc.cur_l1_ref_poc = self
                             .ref_list_l1
                             .iter()
-                            .filter_map(|&i| self.dpb.get(i).map(|e| e.poc))
+                            .filter_map(|entry| self.dpb.get(entry.dpb_idx).map(|e| e.poc))
                             .collect();
-                        fdc.cur_l1_ref_dpb = self.ref_list_l1.clone();
+                        fdc.cur_l1_ref_dpb = self.ref_list_l1.iter().map(|e| e.dpb_idx).collect();
                     } else {
                         fdc.cur_l1_ref_poc.clear();
                         fdc.cur_l1_ref_dpb.clear();
@@ -992,7 +998,7 @@ impl H264Decoder {
 
                     // Populate colocated info from L1[0] for direct mode
                     if hdr.slice_type.is_b() && !self.ref_list_l1.is_empty() {
-                        let l1_0_dpb_idx = self.ref_list_l1[0];
+                        let l1_0_dpb_idx = self.ref_list_l1[0].dpb_idx;
                         if let Some(entry) = self.dpb.get(l1_0_dpb_idx) {
                             fdc.col_mv = entry.mv_info.clone();
                             fdc.col_ref = entry.ref_info.clone();
@@ -1014,8 +1020,8 @@ impl H264Decoder {
                     }
 
                     if hdr.slice_type.is_p() || hdr.slice_type.is_b() {
-                        for &dpb_idx in &self.ref_list_l0 {
-                            if let Some(e) = self.dpb.get(dpb_idx) {
+                        for entry in &self.ref_list_l0 {
+                            if let Some(e) = self.dpb.get(entry.dpb_idx) {
                                 // SAFETY: Ref frames are joined — PROGRESS_COMPLETE.
                                 let pic = unsafe { e.pic.data() };
                                 let s = pic.y_stride;
@@ -1030,7 +1036,7 @@ impl H264Decoder {
                                     .collect();
                                 trace!(
                                     frame_num = self.frame_num,
-                                    dpb_idx,
+                                    dpb_idx = entry.dpb_idx,
                                     ref_frame_num = e.frame_num,
                                     ref_poc = e.poc,
                                     status = ?e.status,
@@ -1403,12 +1409,12 @@ impl H264Decoder {
         let ref_poc_l0: Vec<i32> = in_flight
             .ref_list_l0
             .iter()
-            .filter_map(|&dpb_idx| self.dpb.get(dpb_idx).map(|e| e.poc))
+            .filter_map(|entry| self.dpb.get(entry.dpb_idx).map(|e| e.poc))
             .collect();
         let ref_poc_l1: Vec<i32> = in_flight
             .ref_list_l1
             .iter()
-            .filter_map(|&dpb_idx| self.dpb.get(dpb_idx).map(|e| e.poc))
+            .filter_map(|entry| self.dpb.get(entry.dpb_idx).map(|e| e.poc))
             .collect();
 
         let dpb_idx = if let Some(idx) = in_flight.dpb_idx {
@@ -1427,6 +1433,8 @@ impl H264Decoder {
             let entry = DpbEntry {
                 pic: in_flight.fdc.pic.into_shared(),
                 poc: in_flight.poc,
+                field_poc: [in_flight.poc, in_flight.poc],
+                ref_mask: 0,
                 frame_num: in_flight.frame_num_h264,
                 status: RefStatus::Unused,
                 long_term_frame_idx: 0,
@@ -1557,8 +1565,8 @@ impl H264Decoder {
         sps: &Sps,
         pps: &Pps,
         fdc: &mut FrameDecodeContext,
-        ref_pics: &[Arc<SharedPicture>],
-        ref_pics_l1: &[Arc<SharedPicture>],
+        ref_pics: &[RefPic],
+        ref_pics_l1: &[RefPic],
     ) -> Result<u32> {
         fdc.qp = hdr.slice_qp as u8;
         fdc.last_qscale_diff = 0; // H.264 spec: prevMbQpDelta = 0 at slice start
@@ -1578,8 +1586,8 @@ impl H264Decoder {
         sps: &Sps,
         pps: &Pps,
         fdc: &mut FrameDecodeContext,
-        ref_pics: &[Arc<SharedPicture>],
-        ref_pics_l1: &[Arc<SharedPicture>],
+        ref_pics: &[RefPic],
+        ref_pics_l1: &[RefPic],
     ) -> Result<u32> {
         let mb_width = sps.mb_width;
         let mb_height = sps.mb_height;
@@ -1773,8 +1781,8 @@ impl H264Decoder {
         sps: &Sps,
         pps: &Pps,
         fdc: &mut FrameDecodeContext,
-        ref_pics: &[Arc<SharedPicture>],
-        ref_pics_l1: &[Arc<SharedPicture>],
+        ref_pics: &[RefPic],
+        ref_pics_l1: &[RefPic],
         is_inter_slice: bool,
     ) -> Result<u32> {
         let mb_width = sps.mb_width;
@@ -1967,8 +1975,8 @@ impl H264Decoder {
         sps: &Sps,
         pps: &Pps,
         fdc: &mut FrameDecodeContext,
-        ref_pics: &[Arc<SharedPicture>],
-        ref_pics_l1: &[Arc<SharedPicture>],
+        ref_pics: &[RefPic],
+        ref_pics_l1: &[RefPic],
     ) -> Result<u32> {
         use crate::cabac::{
             CabacDecodeCache, CabacNeighborCtx, CabacReader, decode_cabac_mb_skip, decode_mb_cabac,
@@ -2208,8 +2216,8 @@ impl H264Decoder {
         sps: &Sps,
         pps: &Pps,
         fdc: &mut FrameDecodeContext,
-        ref_pics: &[Arc<SharedPicture>],
-        ref_pics_l1: &[Arc<SharedPicture>],
+        ref_pics: &[RefPic],
+        ref_pics_l1: &[RefPic],
         is_inter_slice: bool,
     ) -> Result<u32> {
         use crate::cabac::{

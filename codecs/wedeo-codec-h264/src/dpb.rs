@@ -37,8 +37,14 @@ pub struct DpbEntry {
     /// Arc-wrapped to allow zero-copy sharing across threads (reference pictures
     /// are read-only after DPB insertion).
     pub pic: Arc<SharedPicture>,
-    /// Picture Order Count.
+    /// Picture Order Count (frame POC = min of the two field POCs).
     pub poc: i32,
+    /// Top/bottom field POCs. For frame pictures both hold the frame POC.
+    /// `i32::MAX` marks a complementary field that has not been decoded yet.
+    pub field_poc: [i32; 2],
+    /// Reference-field bitmask: bit0 = top field, bit1 = bottom field.
+    /// `3` means a full frame reference (both fields). `0` = unused.
+    pub ref_mask: u8,
     /// frame_num from the slice header.
     pub frame_num: u32,
     /// Reference status.
@@ -130,11 +136,26 @@ impl Dpb {
         poc: i32,
         frame_num: u32,
     ) -> Option<usize> {
+        self.store_placeholder_fields(pic, poc, [poc, poc], 0, frame_num)
+    }
+
+    /// Store a placeholder with explicit field POCs and reference mask.
+    /// Used by PAFF when the first field of a complementary pair starts.
+    pub fn store_placeholder_fields(
+        &mut self,
+        pic: Arc<SharedPicture>,
+        poc: i32,
+        field_poc: [i32; 2],
+        ref_mask: u8,
+        frame_num: u32,
+    ) -> Option<usize> {
         // Use zero-capacity Vecs for MV/ref data — finalize_entry replaces them.
         // This avoids allocating ~1.5MB that would be immediately overwritten.
         let entry = DpbEntry {
             pic,
             poc,
+            field_poc,
+            ref_mask,
             frame_num,
             status: RefStatus::Unused,
             long_term_frame_idx: 0,
@@ -381,6 +402,8 @@ mod tests {
                 ..PictureBuffer::empty()
             }),
             poc,
+            field_poc: [poc, poc],
+            ref_mask: if status == RefStatus::Unused { 0 } else { 3 },
             frame_num,
             status,
             long_term_frame_idx: 0,

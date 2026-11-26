@@ -21,7 +21,7 @@ use crate::intra_pred;
 use crate::mc;
 use crate::mvpred::{self, MvContext};
 use crate::pps::Pps;
-use crate::shared_picture::{BufferPool, PicHandle, PictureFormat, SharedPicture};
+use crate::shared_picture::{BufferPool, PicHandle, PictureFormat, RefPic};
 use crate::slice::SliceHeader;
 use crate::sps::Sps;
 
@@ -1108,8 +1108,8 @@ pub fn decode_macroblock(
     pps: &Pps,
     mb_x: u32,
     mb_y: u32,
-    ref_pics: &[Arc<SharedPicture>],
-    ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    ref_pics_l1: &[RefPic],
 ) -> Result<Macroblock> {
     // 1. Parse macroblock syntax via CAVLC
     let mut mb = decode_mb_cavlc(
@@ -1157,8 +1157,8 @@ pub fn apply_macroblock(
     pps: &Pps,
     mb_x: u32,
     mb_y: u32,
-    ref_pics: &[Arc<SharedPicture>],
-    ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    ref_pics_l1: &[RefPic],
 ) -> Result<()> {
     let mb_idx = (mb_y * ctx.mb_width + mb_x) as usize;
 
@@ -1427,8 +1427,8 @@ fn decode_inter_mb(
     mb_y: u32,
     qp: u8,
     chroma_qp: [u8; 2],
-    ref_pics: &[Arc<SharedPicture>],
-    ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    ref_pics_l1: &[RefPic],
 ) {
     // Dispatch B-frame inter MBs to dedicated handler
     if slice_hdr.slice_type.is_b() {
@@ -2029,7 +2029,7 @@ fn decode_inter_mb(
 #[allow(clippy::too_many_arguments)]
 fn apply_mc_partition(
     ctx: &mut FrameDecodeContext,
-    ref_pic: &SharedPicture,
+    ref_pic: &RefPic,
     mb_x: u32,
     mb_y: u32,
     px_offset_x: u32,
@@ -2174,8 +2174,8 @@ pub fn decode_skip_mb(
     slice_hdr: &SliceHeader,
     mb_x: u32,
     mb_y: u32,
-    ref_pics: &[Arc<SharedPicture>],
-    _ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    _ref_pics_l1: &[RefPic],
 ) {
     if ref_pics.is_empty() {
         fill_mb_gray(ctx, mb_x, mb_y);
@@ -2232,8 +2232,8 @@ pub fn decode_b_skip_mb(
     slice_hdr: &SliceHeader,
     mb_x: u32,
     mb_y: u32,
-    ref_pics: &[Arc<SharedPicture>],
-    ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    ref_pics_l1: &[RefPic],
 ) {
     if ref_pics.is_empty() || ref_pics_l1.is_empty() {
         fill_mb_gray(ctx, mb_x, mb_y);
@@ -2332,8 +2332,8 @@ fn decode_b_inter_mb(
     mb_y: u32,
     qp: u8,
     chroma_qp: [u8; 2],
-    ref_pics: &[Arc<SharedPicture>],
-    ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    ref_pics_l1: &[RefPic],
 ) {
     if ref_pics.is_empty() && ref_pics_l1.is_empty() {
         fill_mb_gray(ctx, mb_x, mb_y);
@@ -2650,8 +2650,8 @@ fn decode_b_8x8_mb(
     slice_hdr: &SliceHeader,
     mb_x: u32,
     mb_y: u32,
-    ref_pics: &[Arc<SharedPicture>],
-    ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    ref_pics_l1: &[RefPic],
 ) {
     use crate::tables::B_SUB_MB_TYPE_INFO;
 
@@ -3588,8 +3588,8 @@ fn apply_weight_uni_at(
 #[allow(clippy::too_many_arguments)]
 fn apply_mc_bi_partition(
     ctx: &mut FrameDecodeContext,
-    ref_pics: &[Arc<SharedPicture>],
-    ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    ref_pics_l1: &[RefPic],
     mb_x: u32,
     mb_y: u32,
     px_offset_x: u32,

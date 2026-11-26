@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use crate::deblock;
 use crate::decoder::H264Decoder;
 use crate::mb::FrameDecodeContext;
-use crate::shared_picture::SharedPicture;
+use crate::shared_picture::RefPic;
 use crate::slice::SliceHeader;
 
 /// Per-slice snapshot of DPB-derived state + RBSP data for worker thread.
@@ -30,8 +30,8 @@ pub(crate) struct SliceWorkUnit {
     pub rbsp: Vec<u8>,
     pub sps: crate::sps::Sps,
     pub pps: crate::pps::Pps,
-    pub ref_pics_l0: Vec<Arc<SharedPicture>>,
-    pub ref_pics_l1: Vec<Arc<SharedPicture>>,
+    pub ref_pics_l0: Vec<RefPic>,
+    pub ref_pics_l1: Vec<RefPic>,
     pub slice_idx: u16,
     pub cur_l0_ref_poc: Vec<i32>,
     pub cur_l0_ref_dpb: Vec<usize>,
@@ -65,8 +65,8 @@ pub(crate) struct FrameWork {
     pub nal_ref_idc: u8,
     pub is_idr: bool,
     pub last_hdr: SliceHeader,
-    pub ref_list_l0: Vec<usize>,
-    pub ref_list_l1: Vec<usize>,
+    pub ref_list_l0: Vec<crate::refs::RefListEntry>,
+    pub ref_list_l1: Vec<crate::refs::RefListEntry>,
     pub dpb_idx: Option<usize>,
     /// Packet PTS from the demuxer, propagated to the output frame.
     pub pkt_pts: i64,
@@ -86,8 +86,8 @@ pub(crate) struct InFlightDecode {
     pub nal_ref_idc: u8,
     pub is_idr: bool,
     pub last_hdr: SliceHeader,
-    pub ref_list_l0: Vec<usize>,
-    pub ref_list_l1: Vec<usize>,
+    pub ref_list_l0: Vec<crate::refs::RefListEntry>,
+    pub ref_list_l1: Vec<crate::refs::RefListEntry>,
     pub dpb_idx: Option<usize>,
     /// Packet PTS from the demuxer, propagated to the output frame.
     pub pkt_pts: i64,

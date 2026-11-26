@@ -11,8 +11,6 @@
 //! Reference: FFmpeg `h264_mb_template.c` (`hl_decode_mb`), `h264pred_template.c`,
 //! `h264idct_template.c`.
 
-use std::sync::Arc;
-
 use crate::cavlc::Macroblock;
 use crate::deblock::PictureBuffer;
 use crate::dequant;
@@ -23,7 +21,7 @@ use crate::mb::{
 };
 use crate::mc;
 use crate::pixel::Pixel;
-use crate::shared_picture::SharedPicture;
+use crate::shared_picture::{RefPic, SharedPicture};
 use crate::slice::SliceHeader;
 
 #[inline]
@@ -576,8 +574,8 @@ pub fn reconstruct_inter_mb_hires(
     slice_hdr: &SliceHeader,
     mb_x: u32,
     mb_y: u32,
-    ref_pics: &[Arc<SharedPicture>],
-    ref_pics_l1: &[Arc<SharedPicture>],
+    ref_pics: &[RefPic],
+    ref_pics_l1: &[RefPic],
     mb: Option<&crate::cavlc::Macroblock>,
 ) {
     let max_pixel = ctx.pic.max_pixel() as i32;
