@@ -275,10 +275,13 @@ impl Vp9Decoder {
         // `s->s.frames[REF_FRAME_SEGMAP]` and only replaces it when a new map
         // is decoded (vp9.c:1667-1670, vp9block.c:98-141).
         let mut cur_seg_map = vec![0u8; rows_4x4 * cols_4x4];
-        // FFmpeg vp9.c:1618-1670: the segmentation-map reference is the
-        // previous current frame (which holds its decoded map) even when the
-        // new frame has update_map set; temporal prediction may still use it.
-        let ref_seg_map = if is_kf {
+        // FFmpeg vp9.c:1663-1670: keyframes, intra-only frames and
+        // error-resilient frames take the BLANK_FRAME as the segmentation
+        // reference, which has no map. Temporal prediction then falls back to
+        // segment 0 (vp9block.c:112-137). Previously we handed those frames
+        // the last decoded map, which made err-resilient inter frames (e.g.
+        // trac3849) predict stale segment 1 and diverge a few frames later.
+        let ref_seg_map = if is_kf || header.intra_only || header.error_resilient {
             None
         } else {
             self.ref_store.seg_map_for(rows_4x4, cols_4x4)
