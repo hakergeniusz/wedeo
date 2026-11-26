@@ -968,3 +968,60 @@ produced ~140k differing pixels per frame and hung on
 `Hi422FREXT16_SONY_A`. The likely remaining defect is in CABAC neighbor context
 for field rows; extract `mb_type` / neighbor state from single-thread debug
 FFmpeg before theorising further.
+
+---
+
+## Appendix E: FFmpeg vs Wedeo PAFF ground truth (2026-11-26, measured)
+
+Source: `/tmp/ai-agent/PAFF_GROUND_TRUTH.md` (gdb + temporary `trace!` probes, all reverted).
+Vector: `/var/cache/zstd5/tmp/freh7_2f.264` (352x288, 22x18 MBs, High/PIC-AFF, CABAC,
+POC type 0, top-first complementary I+P field pair). Debug FFmpeg with `-threads 1 -bitexact`.
+
+### Output level
+| Decoder | Frames | framecrc |
+|---|---|---|
+| FFmpeg | **1** | `0x89f2e8d5` |
+| Wedeo | 2 | `0x068f1ce5`, `0xdeff31ea` |
+
+~99.9% of Y samples differ against either Wedeo frame.
+
+### FIRST POINT OF DIVERGENCE (slice-header handling, before MB decode)
+- FFmpeg: both slices have `first_mb_addr=0`; `h264_field_start` pairs them into
+  **one picture** (same `curpic` pointer). `h264_slice_init` maps the top slice to
+  `mb_y=0` (`picture_structure=1`) and the bottom slice to `mb_y=1`
+  (`picture_structure=2`), both with `mb_field_decoding_flag=1`.
+- Wedeo: both slices take the `if hdr.first_mb_in_slice == 0` new-frame gate
+  (`decoder.rs:802`), allocate **separate FDCs** (`decoder.rs:828`), and start at
+  `mb_y=0` using frame row addressing (`mb_y = mb_addr / mb_width`,
+  `decoder.rs:1630/2040`). Two output frames.
+
+### Measured per-MB divergences (post first-divergence)
+| Field | MB | FFmpeg | Wedeo |
+|---|---|---|---|
+| top/I | (1,0) | CABAC `state[68]`=8 | `state[68]`=0 (state[54] still 124) |
+| top/I | (0,2) | neighbor `top_xy=0`, `left_xy=0` | `top_idx=0`, `left_idx=None` |
+| bottom/P | (0,1) | cbp=239, mb_type=12480 (coded) | cbp=175, mb_type=3 (skip path) |
+
+FFmpeg field-row stride for top neighbors is `mb_stride*2`; Wedeo uses
+`mb_width` (frame stride). FFmpeg's `mb_stride=23` (22 MBs + 1 padding).
+
+### Concrete Wedeo locations
+- `decoder.rs:802` - `first_mb_in_slice == 0` must not open a new frame for a
+  complementary bottom field (FFmpeg `h264_slice.c:1483-1532,1614-1673`).
+- `decoder.rs:828` - must reuse `cur_pic_ptr` for the second field.
+- `decoder.rs:853-857` - frame-level POC; needs `ff_h264_field_end` equivalent.
+- `decoder.rs:899,910` - `build_ref_list_p/b(..., structure=3)` must pass the
+  field structure (1/2), not always frame.
+- `decoder.rs:1630/2040` - `mb_y = mb_addr / mb_width` must become field addressing:
+  `mb_y = (first_mb/mb_width)<<1 (+1 for bottom)`.
+- `decoder.rs:1636/1642/1707/1725/2046/2050/2124` - `top_available` must use
+  doubled field stride.
+- `decoder.rs:2062/2129` - `compute_mbaff_neighbors(..., false, false, ...)` must
+  receive field coordinates and `mb_field=true`.
+
+### Conclusion
+The pairing/addressing change is the *first* required change, but the earlier
+partial patch that only changed row addressing (without pairing + field-view MC)
+produced ~140k wrong pixels/frame. Implement in the full order from the main plan
+(pairing -> field MB rows -> field-view MC -> field-aware deblock) and re-measure
+against these values after each step.
