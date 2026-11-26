@@ -388,7 +388,11 @@ fn decode_intra8x8_hires(
         // top-right neighbor lies in the next MB, which is not decoded yet.
         // `btr` is derived from the 4x4-block cache; refine it for the 8x8
         // geometry used by `predict_8x8l`.
-        let btr8 = if blk_y == 0 { btr } else { btr && blk_x == 0 };
+        let btr8 = if blk_y == 0 {
+            btr && (blk_x == 0 || mb_x + 1 < ctx.mb_width)
+        } else {
+            btr && blk_x == 0
+        };
         // 8x8DCT shares one prediction mode across the four 4x4 sub-blocks
         // of each 8x8 block. FFmpeg reads `intra4x4_pred_mode_cache[scan8[i]]`
         // where i is the 4x4 block index of the group's top-left sub-block.
