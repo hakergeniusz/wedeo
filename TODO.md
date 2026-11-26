@@ -37,8 +37,9 @@
 - [x] **HEVC decoder and encoder** - `adapters/wedeo-h265-oxideav` wraps pure-Rust `oxideav-h265` (MIT): full decode and I/P/B encode registered as `hevc_oxideav`. MP4 (hvcC + length-prefixed samples) and MPEG-TS (Annex B) output verified against FFmpeg. The native HEVC port remains partial.
 
 ### Video muxers
-- [ ] **MP4/MOV muxer** — needed for any useful video output. No existing pure-Rust MP4 muxer crate.
-- [ ] **MKV/WebM muxer** — `matroska` crate (0.30.0, 143K downloads, by tuffy) is a demuxer only. Muxer needs to be written.
+- [x] **MP4/MOV muxer** — `formats/wedeo-format-mp4/src/muxer.rs` (H.264/HEVC/AAC, hvcC + length-prefixed samples, verified against FFmpeg).
+- [x] **MKV/WebM muxer** — `formats/wedeo-format-matroska-mux/`; full MKV transcode works in wedeo alone.
+- [x] **Ogg muxer** — `formats/wedeo-format-ogg/src/muxer.rs` (Vorbis/Opus, FFmpeg-style granules and page duration). Remaining: Theora/FLAC/Ogm mappings.
 
 ## Player performance
 
@@ -55,7 +56,7 @@ Remaining optimizations:
 
 ## Infrastructure (ongoing)
 
-- [ ] **Filter graph data flow** — the filter trait and graph skeleton exist but have no format negotiation or frame queues. Needed before real transcode pipelines work.
+- [x] **Filter graph data flow** — `filters/wedeo-filter-graph` has pad/link validation, format negotiation (`query_formats` intersection) and per-link frame queues with a `run` path. Remaining: automatic insertion of conversion filters when the negotiation result requires a rescale (currently an explicit `format` filter is needed).
 - [ ] **Interruptible I/O** — needed for network streams and cancellation.
 - [x] **Buffer pool** — `BufferPool` for `PictureBuffer` reuse via `SharedPicture::Drop` reclaim.
 - [ ] **Error context** — add "where/why" info to errors. Currently errors are flat enums with no call-site context.
