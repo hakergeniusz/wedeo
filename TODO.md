@@ -17,7 +17,7 @@
 - [x] **Pixel format conversion** — wedeo-scale now wraps dcv-color-primitives for I420/NV12↔RGB24/BGR24/RGBA/BGRA conversions. Converter struct with metadata preservation. 11 unit tests.
 
 ### Video codecs (native Rust, no existing crate covers these)
-- [x] **H.264 decoder** — 79/79 progressive BITEXACT (52 CAVLC + 27 CABAC), 31/69 JVT FRext. See `H264.md` for detailed status.
+- [x] **H.264 decoder** — 79/79 progressive BITEXACT (52 CAVLC + 27 CABAC), 35/69 JVT FRext. See `H264.md` for detailed status.
   - [ ] FMO (Flexible Macroblock Ordering) — out of scope, rarely used
   - [ ] Interlaced (MBAFF/PAFF) — partial, CABAC engine correct, pixel reconstruction in progress
   - [ ] 10-bit / 4:2:2 — not yet implemented
