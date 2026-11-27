@@ -20,9 +20,10 @@ dates and commits; the numbers below are the current ones.
 - PAFF top/bottom field pairing and field-view motion compensation are
   implemented as a bounded step (commit `e61b4af`), with documented trade-offs:
   the top-field first row was double-deblocked (fixed at 056ffec),
-  high-depth bottom fields skip `post_decode_mb_hires`, and `mark_complete()`
-  is a temporary guard for self-reference waits. Full interlaced parity is
-  still open. See `PAFF_RESEARCH.md` Appendix Q.
+  high-depth bottom fields now run `post_decode_mb_hires` with field semantics
+  (9636f08), and `mark_complete()` is a temporary guard for self-reference
+  waits. Full interlaced parity is still open. See `PAFF_RESEARCH.md` Appendices
+  Q and S.
 - FMO is deliberately rejected: FFmpeg w62 rejects it too and emits zero
   frames. The FM1_BT_B rejection-path hang was fixed at `d86b9d2`.
 - Older docs recording 3/227, 8/227, 211/226, 42/69, 197/283 or "PAFF not
