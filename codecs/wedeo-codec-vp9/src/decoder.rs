@@ -164,7 +164,19 @@ impl Vp9Decoder {
                 .as_ref()
                 .ok_or(Error::InvalidData)?;
             let fb = &rf.fb;
-            let mut frame = Frame::new_video(rf.width, rf.height, PixelFormat::Yuv420p);
+            let Some(format) =
+                output_pixel_format(rf.bit_depth, rf.subsampling_x, rf.subsampling_y)
+            else {
+                warn!(
+                    bit_depth = rf.bit_depth,
+                    subsampling_x = rf.subsampling_x,
+                    subsampling_y = rf.subsampling_y,
+                    "VP9 reference frame format not supported for output"
+                );
+                self.frame_count += 1;
+                return Ok(());
+            };
+            let mut frame = Frame::new_video(rf.width, rf.height, format);
             frame.pts = pts;
             if let FrameData::Video(ref mut video) = frame.data {
                 video.planes = vec![
@@ -251,7 +263,7 @@ impl Vp9Decoder {
         // --- 2. Set up frame buffer and contexts ---
         let width = header.width;
         let height = header.height;
-        let mut fb = FrameBuffer::new(width, height);
+        let mut fb = FrameBuffer::new(width, height, header.subsampling_x, header.subsampling_y);
 
         // FFmpeg's coding grid is 8x8-based: `cols = (w + 7) >> 3`,
         // `rows = (h + 7) >> 3` (vp9.c:282-283). All frame-boundary
@@ -490,6 +502,9 @@ impl Vp9Decoder {
             mv_grid: cur_mv_grid.clone(),
             width,
             height,
+            bit_depth: header.bit_depth,
+            subsampling_x: header.subsampling_x,
+            subsampling_y: header.subsampling_y,
             cols_4x4,
             rows_4x4,
         });
@@ -538,7 +553,19 @@ impl Vp9Decoder {
                 linesize: fb.uv_stride,
             };
 
-            let mut frame = Frame::new_video(width, height, PixelFormat::Yuv420p);
+            let Some(format) =
+                output_pixel_format(header.bit_depth, header.subsampling_x, header.subsampling_y)
+            else {
+                warn!(
+                    bit_depth = header.bit_depth,
+                    subsampling_x = header.subsampling_x,
+                    subsampling_y = header.subsampling_y,
+                    "VP9 output format not supported"
+                );
+                self.frame_count += 1;
+                return Ok(());
+            };
+            let mut frame = Frame::new_video(width, height, format);
             frame.pts = pts;
             if let FrameData::Video(ref mut video) = frame.data {
                 video.planes = vec![y_plane, u_plane, v_plane];
@@ -559,6 +586,31 @@ impl Vp9Decoder {
         }
 
         Ok(())
+    }
+}
+
+/// Select the output pixel format from the parsed color config.
+///
+/// Mirrors `pix_fmt_for_ss` in FFmpeg's `vp9.c:497-504`: profile 0/2 use
+/// 4:2:0, while profile 1/3 signal `ss_h`/`ss_v` explicitly. RGB (`GBRP*`)
+/// and 4:4:0 have no matching `PixelFormat` variant here yet, so they return
+/// `None` rather than emitting mislabeled frames.
+fn output_pixel_format(
+    bit_depth: u8,
+    subsampling_x: bool,
+    subsampling_y: bool,
+) -> Option<PixelFormat> {
+    match (bit_depth, subsampling_x, subsampling_y) {
+        (8, true, true) => Some(PixelFormat::Yuv420p),
+        (8, true, false) => Some(PixelFormat::Yuv422p),
+        (8, false, false) => Some(PixelFormat::Yuv444p),
+        (10, true, true) => Some(PixelFormat::Yuv420p10le),
+        (10, true, false) => Some(PixelFormat::Yuv422p10le),
+        (10, false, false) => Some(PixelFormat::Yuv444p10le),
+        (12, true, true) => Some(PixelFormat::Yuv420p12le),
+        (12, true, false) => Some(PixelFormat::Yuv422p12le),
+        (12, false, false) => Some(PixelFormat::Yuv444p12le),
+        _ => None,
     }
 }
 
@@ -1000,5 +1052,49 @@ mod tests {
             // vp9.c:569: invisible = !show_frame.
             last_invisible = !show_frame;
         }
+    }
+
+    #[test]
+    fn output_pixel_format_matches_ffmpeg_pix_fmt_for_ss_table() {
+        // FFmpeg vp9.c:497-504, indexed by [bits][ss_v][ss_h].
+        assert_eq!(
+            output_pixel_format(8, true, true),
+            Some(PixelFormat::Yuv420p)
+        );
+        assert_eq!(
+            output_pixel_format(8, true, false),
+            Some(PixelFormat::Yuv422p)
+        );
+        assert_eq!(
+            output_pixel_format(8, false, false),
+            Some(PixelFormat::Yuv444p)
+        );
+        assert_eq!(
+            output_pixel_format(10, true, true),
+            Some(PixelFormat::Yuv420p10le)
+        );
+        assert_eq!(
+            output_pixel_format(10, true, false),
+            Some(PixelFormat::Yuv422p10le)
+        );
+        assert_eq!(
+            output_pixel_format(10, false, false),
+            Some(PixelFormat::Yuv444p10le)
+        );
+        assert_eq!(
+            output_pixel_format(12, true, true),
+            Some(PixelFormat::Yuv420p12le)
+        );
+        assert_eq!(
+            output_pixel_format(12, true, false),
+            Some(PixelFormat::Yuv422p12le)
+        );
+        assert_eq!(
+            output_pixel_format(12, false, false),
+            Some(PixelFormat::Yuv444p12le)
+        );
+        // 4:4:0 and RGB have no PixelFormat variant here.
+        assert_eq!(output_pixel_format(8, false, true), None);
+        assert_eq!(output_pixel_format(14, true, true), None);
     }
 }

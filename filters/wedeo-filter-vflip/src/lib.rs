@@ -51,7 +51,9 @@ fn log2_chroma_h(format: PixelFormat) -> u32 {
         | PixelFormat::Yuv420p16le
         | PixelFormat::Yuv420p16be
         | PixelFormat::Yuv420p10le
-        | PixelFormat::Yuv420p10be => 1,
+        | PixelFormat::Yuv420p10be
+        | PixelFormat::Yuv420p12le
+        | PixelFormat::Yuv420p12be => 1,
         PixelFormat::Yuv410p => 2,
         _ => 0,
     }

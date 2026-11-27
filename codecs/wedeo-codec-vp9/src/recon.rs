@@ -24,7 +24,11 @@ use crate::types::{IntraMode, TxSize, TxType};
 // Frame buffer
 // ---------------------------------------------------------------------------
 
-/// YUV 4:2:0 frame buffer holding one decoded frame.
+/// YUV frame buffer holding one decoded frame.
+///
+/// Chroma plane geometry follows the frame's subsampling flags
+/// (`s->ss_h` / `s->ss_v` in FFmpeg): 4:2:0 shifts both dimensions,
+/// 4:2:2 only height, 4:4:4 neither.
 pub struct FrameBuffer {
     pub y: Vec<u8>,
     pub u: Vec<u8>,
@@ -37,17 +41,20 @@ pub struct FrameBuffer {
 
 impl FrameBuffer {
     /// Allocate a zeroed frame buffer for a frame of the given dimensions.
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(width: u32, height: u32, subsampling_x: bool, subsampling_y: bool) -> Self {
         let w = width as usize;
         let h = height as usize;
         // Round strides up to a multiple of 64 for alignment headroom.
         let y_stride = (w + 63) & !63;
-        let uv_w = w.div_ceil(2);
+        let shift_h = usize::from(subsampling_x);
+        let shift_v = usize::from(subsampling_y);
+        let uv_w = (w + ((1 << shift_h) - 1)) >> shift_h;
+        let uv_h = (h + ((1 << shift_v) - 1)) >> shift_v;
         let uv_stride = (uv_w + 63) & !63;
         // Pad rows to the next superblock boundary (64 luma, 32 chroma)
         // so edge-SB intra prediction can write past the visible frame.
         let y_rows = (h + 63) & !63;
-        let uv_rows = (h.div_ceil(2) + 31) & !31;
+        let uv_rows = (uv_h + 31) & !31;
         Self {
             y: vec![0u8; y_stride * y_rows],
             u: vec![0u8; uv_stride * uv_rows],

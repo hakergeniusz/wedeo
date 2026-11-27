@@ -62,9 +62,23 @@ fn vp9_keyframe_decode_64x64() {
     if let FrameData::Video(v) = &frames[0].data {
         assert_eq!(v.width, 64, "Expected width 64");
         assert_eq!(v.height, 64, "Expected height 64");
-        assert_eq!(v.format, PixelFormat::Yuv420p, "Expected YUV420p");
+        // This IVF file is VP9 Profile 1 with 4:4:4 chroma. FFmpeg reports
+        // `gbrp` for it, but wedeo has no GBRP variant and the decoder stores
+        // three equal-size planar samples, so `Yuv444p` labels the layout
+        // correctly without changing the sample data.
+        assert_eq!(v.format, PixelFormat::Yuv444p, "Expected YUV 4:4:4");
         assert_eq!(v.planes.len(), 3, "Expected 3 planes");
-        assert!(v.planes[0].buffer.size() > 0, "Y plane should be non-empty");
+        for (index, plane) in v.planes.iter().enumerate() {
+            assert_eq!(
+                plane.linesize, v.width as usize,
+                "plane {index} should have full luma width in 4:4:4"
+            );
+            assert_eq!(
+                plane.buffer.size(),
+                (v.width * v.height) as usize,
+                "plane {index} should have full-size chroma samples"
+            );
+        }
     } else {
         panic!("Expected video frame");
     }
