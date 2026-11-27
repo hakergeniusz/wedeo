@@ -486,30 +486,36 @@ fn sao_ctb(
                 };
                 for yy in 0..height + 3 {
                     for xx in 0..width + 3 {
-                        let px = x0 + xx.saturating_sub(1);
-                        let py = y0 + yy.saturating_sub(1);
-                        let cx = px.min(pw.saturating_sub(1));
-                        let cy = py.min(ph.saturating_sub(1));
+                        // FFmpeg's `sao_filter_CTB()` (filter.c:388-459) builds a
+                        // block with one sample of padding on each side. The
+                        // padding on an outer picture edge is left zero in
+                        // `edge_emu_buffer`; on an internal edge it comes from
+                        // the neighbouring CTB's saved row/column (or the
+                        // picture itself when that CTB has not applied SAO).
+                        let sx = x0 as isize + xx as isize - 1;
+                        let sy = y0 as isize + yy as isize - 1;
+                        let cx = sx.clamp(0, pw as isize - 1) as usize;
+                        let cy = sy.clamp(0, ph as isize - 1) as usize;
                         let is_top = yy == 0;
                         let is_bottom = yy == height + 2;
                         let is_left = xx == 0;
                         let is_right = xx == width + 2;
-                        let value = if is_top && y_ctb > 0 && applied(x_ctb, y_ctb - 1) {
+                        let value = if (is_top && edges[1])
+                            || (is_bottom && edges[3])
+                            || (is_left && edges[0])
+                            || (is_right && edges[2])
+                        {
+                            0
+                        } else if is_top && applied(x_ctb, y_ctb - 1) {
                             let v = sao_h.get((2 * y_ctb - 1) * pw + cx).copied();
                             v.unwrap_or_else(|| pic.sample(c_idx, cx, cy))
-                        } else if is_bottom
-                            && y_ctb + 1 < sps.ctb_height as usize
-                            && applied(x_ctb, y_ctb + 1)
-                        {
+                        } else if is_bottom && applied(x_ctb, y_ctb + 1) {
                             let v = sao_h.get((2 * (y_ctb + 1)) * pw + cx).copied();
                             v.unwrap_or_else(|| pic.sample(c_idx, cx, cy))
-                        } else if is_left && x_ctb > 0 && applied(x_ctb - 1, y_ctb) {
+                        } else if is_left && applied(x_ctb - 1, y_ctb) {
                             let v = sao_v.get((2 * x_ctb - 1) * ph + cy).copied();
                             v.unwrap_or_else(|| pic.sample(c_idx, cx, cy))
-                        } else if is_right
-                            && x_ctb + 1 < sps.ctb_width as usize
-                            && applied(x_ctb + 1, y_ctb)
-                        {
+                        } else if is_right && applied(x_ctb + 1, y_ctb) {
                             let v = sao_v.get((2 * (x_ctb + 1)) * ph + cy).copied();
                             v.unwrap_or_else(|| pic.sample(c_idx, cx, cy))
                         } else {
