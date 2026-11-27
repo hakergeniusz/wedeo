@@ -1018,8 +1018,11 @@ pub fn reconstruct_inter_block(
     // Chroma residual (U and V).
     let ss_h = if header.subsampling_x { 1usize } else { 0 };
     let ss_v = if header.subsampling_y { 1usize } else { 0 };
-    let uv_w4 = BWH_TAB[1][bs][0] as usize;
-    let uv_h4 = BWH_TAB[1][bs][1] as usize;
+    // FFmpeg vp9recon.c:631-632 shifts the *luma* dimensions by ss_h/ss_v.
+    // BWH_TAB[1] is the 4:2:0 table; using it unconditionally would halve
+    // chroma residual coverage again in 4:2:2/4:4:4 frames.
+    let uv_w4 = w4 >> ss_h;
+    let uv_h4 = h4 >> ss_v;
     let uv_end_x = uv_w4.min(end_x >> ss_h);
     let uv_end_y = uv_h4.min(end_y >> ss_v);
     let uv_tx_step = 1usize << (block.uv_tx_size as usize);

@@ -431,8 +431,12 @@ pub fn inter_pred(
     }
 
     // --- Chroma MC for ref[0] ---
-    let uv_bw4 = BWH_TAB[1][bs][0] as usize;
-    let uv_bh4 = BWH_TAB[1][bs][1] as usize;
+    // FFmpeg vp9_mc_template.c:408-410 derives chroma dimensions from the
+    // subsampling flags: `uvbw = ff_vp9_bwh_tab[s->ss_h][bs][0] * 4` and
+    // `uvbh = ff_vp9_bwh_tab[s->ss_v][bs][1] * 4`. For 4:4:4 (no subsampling)
+    // that is table[0] (luma-sized); table[1] is only correct for 4:2:0.
+    let uv_bw4 = BWH_TAB[ss_h as usize][bs][0] as usize;
+    let uv_bh4 = BWH_TAB[ss_v as usize][bs][1] as usize;
     let uv_bw = uv_bw4 * 4;
     let uv_bh = uv_bh4 * 4;
     let uv_col = col_px >> ss_h as usize;
@@ -500,7 +504,9 @@ pub fn inter_pred(
             (bw, bh)
         };
         let (avg_uv_bw, avg_uv_bh) = if bs > BlockSize::Bs8x8 as usize {
-            (4, 4)
+            // Sub-8x8 blocks cover an 8x8 luma region; in 4:4:4 chroma
+            // covers the same 8x8 region (FFmpeg vp9_mc_template.c).
+            if !ss_h && !ss_v { (8, 8) } else { (4, 4) }
         } else {
             (uv_bw, uv_bh)
         };
@@ -704,6 +710,114 @@ fn sub8x8_luma_mc_buf(
     }
 }
 
+/// MC chroma for sub-8x8 blocks when neither dimension is subsampled.
+///
+/// In 4:4:4 the chroma geometry matches luma, so FFmpeg issues one
+/// `mc_chroma_dir` per luma sub-block, each with its own MV (see the
+/// `BS_8x4`, `BS_4x8` and `BS_4x4` branches of `vp9_mc_template.c` with
+/// `ss_h == ss_v == 0`). A single averaged MV would leave most of the
+/// chroma block unwritten.
+#[allow(clippy::too_many_arguments)]
+fn sub8x8_chroma_mc_444(
+    dst_u: &mut [u8],
+    dst_v: &mut [u8],
+    dst_stride: usize,
+    block: &BlockInfo,
+    ref_frame: &RefFrame,
+    uv_col: usize,
+    uv_row: usize,
+    ref_uv_w: usize,
+    ref_uv_h: usize,
+    filter: u8,
+    emu_buf: &mut [u8],
+    ri: usize,
+) {
+    let ref_u = &ref_frame.fb.u;
+    let ref_v = &ref_frame.fb.v;
+    let ref_stride = ref_frame.fb.uv_stride;
+    match block.bs {
+        BlockSize::Bs8x4 => {
+            for sub in 0..2 {
+                let y = uv_row + sub * 4;
+                // Destination offsets are relative to the caller's block
+                // origin; the compound-prediction scratch buffers start at 0.
+                let off = sub * 4 * dst_stride;
+                mc_chroma(
+                    &mut dst_u[off..],
+                    &mut dst_v[off..],
+                    dst_stride,
+                    ref_u,
+                    ref_v,
+                    ref_stride,
+                    ref_uv_w,
+                    ref_uv_h,
+                    y,
+                    uv_col,
+                    &block.mv[sub * 2][ri],
+                    8,
+                    4,
+                    filter,
+                    false,
+                    false,
+                    emu_buf,
+                );
+            }
+        }
+        BlockSize::Bs4x8 => {
+            for sub in 0..2 {
+                let x = uv_col + sub * 4;
+                let off = sub * 4;
+                mc_chroma(
+                    &mut dst_u[off..],
+                    &mut dst_v[off..],
+                    dst_stride,
+                    ref_u,
+                    ref_v,
+                    ref_stride,
+                    ref_uv_w,
+                    ref_uv_h,
+                    uv_row,
+                    x,
+                    &block.mv[sub][ri],
+                    4,
+                    8,
+                    filter,
+                    false,
+                    false,
+                    emu_buf,
+                );
+            }
+        }
+        BlockSize::Bs4x4 => {
+            for sub in 0..4 {
+                let x = uv_col + (sub & 1) * 4;
+                let y = uv_row + (sub >> 1) * 4;
+                let off = (sub >> 1) * 4 * dst_stride + (sub & 1) * 4;
+                mc_chroma(
+                    &mut dst_u[off..],
+                    &mut dst_v[off..],
+                    dst_stride,
+                    ref_u,
+                    ref_v,
+                    ref_stride,
+                    ref_uv_w,
+                    ref_uv_h,
+                    y,
+                    x,
+                    &block.mv[sub][ri],
+                    4,
+                    4,
+                    filter,
+                    false,
+                    false,
+                    emu_buf,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 /// MC chroma for sub-8x8 blocks into arbitrary buffers (for compound ref[1]).
 ///
 /// `ri` selects which reference MV to use: 0 or 1.
@@ -726,6 +840,13 @@ fn sub8x8_chroma_mc_buf(
     emu_buf: &mut [u8],
     ri: usize,
 ) {
+    if !ss_h && !ss_v {
+        sub8x8_chroma_mc_444(
+            dst_u, dst_v, dst_stride, block, ref_frame, uv_col, uv_row, ref_uv_w, ref_uv_h, filter,
+            emu_buf, ri,
+        );
+        return;
+    }
     let bs = block.bs;
     let chroma_mv = match bs {
         BlockSize::Bs8x4 if ss_v => rounded_div_mv_x2(block.mv[0][ri], block.mv[2][ri]),
@@ -862,6 +983,24 @@ fn sub8x8_chroma_mc(
     ss_v: bool,
     emu_buf: &mut [u8],
 ) {
+    if !ss_h && !ss_v {
+        let off = uv_row * fb.uv_stride + uv_col;
+        sub8x8_chroma_mc_444(
+            &mut fb.u[off..],
+            &mut fb.v[off..],
+            fb.uv_stride,
+            block,
+            ref_frame,
+            uv_col,
+            uv_row,
+            ref_uv_w,
+            ref_uv_h,
+            filter,
+            emu_buf,
+            0,
+        );
+        return;
+    }
     let bs = block.bs;
 
     // For 4:2:0, sub-8x8 chroma uses averaged MVs from the luma sub-blocks.
