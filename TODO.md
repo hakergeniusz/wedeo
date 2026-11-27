@@ -17,10 +17,10 @@
 - [x] **Pixel format conversion** — wedeo-scale now wraps dcv-color-primitives for I420/NV12↔RGB24/BGR24/RGBA/BGRA conversions. Converter struct with metadata preservation. 11 unit tests.
 
 ### Video codecs (native Rust, no existing crate covers these)
-- [x] **H.264 decoder** — 79/79 progressive BITEXACT (52 CAVLC + 27 CABAC), 42/69 JVT FRext. See `H264.md` for detailed status.
+- [x] **H.264 decoder** — 77/77 decodable progressive BITEXACT (50 CAVLC + 27 CABAC; two FMO CAVLC vectors produce no frames in either decoder), 42/69 JVT FRext. See `H264.md` for detailed status.
   - [ ] FMO (Flexible Macroblock Ordering) — out of scope, rarely used
   - [ ] Interlaced (MBAFF/PAFF) — field-aware DPB metadata (`ref_mask`, `field_poc`) and field-aware ref-list construction are in place (parity-carrying `RefListEntry` / `RefPic`), but field pairing, field MB addressing, and field-view MC are not enabled: PAFF vectors still emit 2x frames (e.g. FREXT16-19: 10 frames vs FFmpeg 5) and must be decoded with frame-only paths. MBAFF pixel reconstruction partial. See `PAFF_RESEARCH.md`.
-  - [ ] 10-bit / 4:2:2 — progressive 4:2:2 8/10-bit and Hi422FR1-4,6-9,10-13 are BITEXACT; remaining 10-bit 4:2:0 (FREH10) and 4:2:2 (FR14-15) have MC/residual rounding diffs
+  - [ ] 10-bit / 4:2:2 — progressive 4:2:2 8/10-bit and Hi422FR1-4,6-9,10-15 are BITEXACT; remaining 10-bit 4:2:0 (FREH10) and interlaced vectors have MC/residual or field-handling diffs
 - [x] **AV1 decoder via rav1d** — `adapters/wedeo-rav1d/` wraps rav1d behind wedeo `Decoder` trait.
 - [x] **Video player with audio** — `bins/wedeo-play/` has full A/V playback: wgpu+winit GPU rendering, cpal audio output, ffplay-style A/V sync (pts_drift audio clock), resampling via wedeo-resample, 5.1→stereo downmix, volume control, pause. Supports H.264/AV1 video + symphonia audio codecs.
   - [ ] Seek — removed (was buggy), needs proper reimplementation with ffplay serial mechanism
@@ -28,7 +28,7 @@
   - [x] VP9 inter prediction — MV parsing/prediction (spatial+temporal), 8-tap subpel MC, compound prediction, reference frame management. 21 bugs fixed 2026-04-03.
   - [x] VP9 keyframe pixel conformance — 64/64 standard-size keyframes match FFmpeg bit-for-bit
   - [x] VP9 inter-frame bool decoder parity — symbol counts verified identical to FFmpeg (927 blocks). 4 bugs fixed: mode ctx indexing (1-per-8×8 vs 2-per-8×8), end_x_y edge clamping, MV clamping bounds, MC emu_edge offset (2026-04-05).
-  - [ ] VP9 inter frame pixel conformance — 211/225 vectors and 1826/2027 frames BITEXACT. Remaining 8-bit failures: `210x198`, `210x202`, `segkey_adpq`; the other 11 are 10/12-bit or 4:2:2/4:4:4. No vectors panic today.
+  - [ ] VP9 inter frame pixel conformance — 211/226 vectors BITEXACT. Remaining 8-bit failures include `210x202` and `segkey_adpq`; the other 11 are 10/12-bit or 4:2:2/4:4:4. No vectors panic today.
   - [x] VP9 odd-size OOB panics — the 74 historical `intra_pred.rs` panics no longer reproduce; odd-size vectors decode with correct geometry.
   - [ ] VP9 probability adaptation — `adapt_probs` not yet wired up after each frame decode
   - [ ] VP9 scaled prediction — silently skipped when ref/current dimensions differ

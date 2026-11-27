@@ -11,8 +11,8 @@ Essentially all code in this fork was written by **OpenCode (Hy4 flash Free)**, 
 
 ## Highlights
 
-- **Bit-exact verification:** 178/178 committed FATE and JVT vectors match FFmpeg across four suites.
-- **Native video decoders:** H.264 (79/79 progressive FATE vectors bitexact), VP9, VP8, MPEG-1/2, FLAC, and HEVC (wired end-to-end, pixel parity still in progress).
+- **Bit-exact verification:** 197/283 vectors match FFmpeg across four H.264 suites (50/52 FATE CAVLC, 27/27 FATE CABAC, 78/135 JVT-AVC_V1, 42/69 JVT-FR-EXT). Two CAVLC FMO vectors produce no frames in either decoder; see `H264.md` for details.
+- **Native video decoders:** H.264 (77/77 decodable progressive FATE vectors bitexact), VP9, VP8, MPEG-1/2, FLAC, and HEVC (wired end-to-end, pixel parity still in progress).
 - **Containers:** demuxers for WAV, IVF, MP4/MOV, Matroska/WebM, MPEG-TS, Ogg, FLV, AVI, and raw H.264/HEVC. Muxers for WAV, IVF, MP4/MOV, Matroska/WebM, MPEG-TS, and FLV.
 - **Bitstream filters:** H.264 and HEVC MP4-to-Annex B, and AAC ADTS-to-ASC, with registry-driven initialization.
 - **Filters:** a DAG-based filter graph with FFmpeg 8 style format negotiation, options, and EOF flush, plus crop, copy, format, fps, flip, pad, and transpose filters.
