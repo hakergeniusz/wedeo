@@ -140,3 +140,21 @@ unchanged at 9/227 with no new errors.
 Remaining: FFmpeg's CIP sample replacement macros (`EXTEND_LEFT_CIP`,
 `EXTEND_DOWN_CIP`, `EXTEND_UP_CIP`, `EXTEND_RIGHT_CIP`) are not implemented;
 reference samples still differ slightly (t15 114 vs 112, t31 128 vs 130).
+
+## Intra prediction exonerated on IPRED/CIP vectors (2026-11-27)
+
+`IPRED_C_Mitsubishi_3.bit`: first frame diff Y(384,31) Wedeo 139 vs FFmpeg 140,
+Cb(176,0) 133 vs 136. gdb at `pred_template.c:383` captured four luma TUs
+covering the point; FFmpeg predictions 154, 83, 158, 60 for the respective
+(x0,y0,log2,mode) tuples. Wedeo tracing produced the identical four values
+with matching neighbor-availability flags on the same TUs and modes.
+
+`cip_B_NEC_2.bit`: frame 0 exact, frame 1 first diff Y(360,32) 97 vs 95.
+gdb on an 8x8 planar TU (x0=360,y0=32,mode=0) gave FFmpeg prediction samples
+82 77 75 77 81 84 83 81 ...; all 64 Wedeo samples matched byte-for-byte.
+
+`IPRED_C_Mitsubishi_2.bit` and `IPRED_A_docomo_2.bit` show only small +/-1 to
++/-3 edge differences, consistent with deblock/SAO rather than prediction.
+
+Conclusion: intra prediction is not the cause for these vectors. Do not repeat
+this investigation; focus on post-prediction deblock/SAO stages. No patch.
