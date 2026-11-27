@@ -28,3 +28,17 @@ dates and commits; the numbers below are the current ones.
 - Older docs recording 3/227, 8/227, 211/226, 42/69, 197/283 or "PAFF not
   implemented" describe earlier measurements or states; use the linked gap
   docs for the measured progression.
+
+## JVT-AVC_V1 failure classification (2026-11-27)
+
+Of the 55 JVT-AVC_V1 FAIL entries, only `FM1_BT_B`, `FM1_FT_E` (FMO, which
+FFmpeg w62 also rejects) and `SP1_BT_A` are nominally progressive. `SP1_BT_A`
+was measured: Wedeo and the debug FFmpeg produce byte-identical raw YUV for all
+400 frames (MD5 `8f1fe866...` on both). The suite's expected hash `ca0b3580...`
+differs from FFmpeg's own output, so this FAIL is a stale reference hash, not a
+decoding divergence. `sp2_bt_b` has no vector file in the reference directory.
+
+`CABREF3_Sand_D` was inspected and is PAFF (`frame_mbs_only_flag=0,
+mb_adaptive_frame_field_flag=0`), so it belongs to the interlaced workstream.
+
+Evidence: `/tmp/ai-agent/H264_JVT_TRIAGE_GT.md` (ephemeral).
