@@ -43,3 +43,15 @@ decoding divergence. `sp2_bt_b` has no vector file in the reference directory.
 mb_adaptive_frame_field_flag=0`), so it belongs to the interlaced workstream.
 
 Evidence: `/tmp/ai-agent/H264_JVT_TRIAGE_GT.md` (ephemeral).
+
+## FRext remaining 25 failures (2026-11-27)
+
+All 25 failing JVT-FR-EXT vectors report `field_order=tt` under ffprobe, which
+means `frame_mbs_only_flag=0` (PAFF/MBAFF interlaced). Pixel comparison shows
+they diverge from frame 0 near the top-left Y plane with roughly 150k to 600k
+differing bytes in a single frame, i.e. a global field reconstruction/deblock
+effect rather than a localized single-cause bug. They belong to the interlaced
+workstream, not a progressive fixable target. Previously timing-out FREH10-1/2
+now pass.
+
+Evidence: `/tmp/ai-agent/frext_no_fix_evidence.md` (ephemeral).
