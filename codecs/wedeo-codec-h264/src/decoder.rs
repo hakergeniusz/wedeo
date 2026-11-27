@@ -2154,7 +2154,7 @@ impl H264Decoder {
                     &mut cache,
                     fdc.direct_8x8_inference_flag,
                     fdc.decode_chroma,
-                    false, // non-MBAFF: always frame mode
+                    hdr.field_pic_flag, // pure PAFF: every MB is field-coded
                     sps.chroma_format_idc,
                     &nb,
                 )?;

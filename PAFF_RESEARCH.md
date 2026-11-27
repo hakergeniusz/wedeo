@@ -1108,3 +1108,27 @@ The earliest measured divergence is the coefficient block after CABAC residual
 decode + dequant, with prediction and placement identical. Extract the raw
 bitstream levels from both decoders (FFmpeg `STORE_BLOCK` with `j` in scope,
 Wedo before `dequant_8x8`) before changing any scan/dequant logic.
+
+---
+
+## Appendix H: Field CABAC `mb_field` plumbing (2026-11-27, measured)
+
+Gdb ground truth (`/tmp/ai-agent/PAFF_LEVELS_GROUND_TRUTH.md`) on the same
+top I field MB(0,0) (using the retained `Freh7_B.264` vector after /tmp was
+cleaned) settles the field-mode coefficient divergence:
+
+- FFmpeg's raw pre-dequant levels (40 coefficients) and scan positions were
+  extracted directly at the `STORE_BLOCK` multiply site.
+- Wedeo with `mb_field` threaded into `decode_mb_cabac` decodes the **identical
+  40 scan positions and every raw level**; its raster block is the exact
+  transpose of FFmpeg's, which cancels with the opposite IDCT pass order.
+- The committed path passed a hardcoded `false` ("non-MBAFF: always frame
+  mode") so the field scan was never used; that produced only 10 coefficients.
+- The scan/dequant transposes are intentional and self-consistent. **No table
+  change is justified.**
+
+Fix: pass `hdr.field_pic_flag` to `decode_mb_cabac` in the non-MBAFF CABAC
+slice loop. Verified: JVT FRext remains 42/69 with no regressions.
+
+Full PAFF still needs field pairing, field MB addressing, field-view MC and
+field-aware deblocking; this only makes the entropy decode correct.
