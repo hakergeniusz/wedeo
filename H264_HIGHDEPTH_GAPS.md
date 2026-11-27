@@ -91,3 +91,13 @@ to `idct4x4_add_wide`.
 Verified FREH10-2 is 358/358 frames bit-exact, FREH10-1 stays 360/360, JVT-FR-EXT
 stays 43/69 with no new timeouts, and `cargo clippy -p wedeo-codec-h264
 --all-targets -- -D warnings` plus `cargo fmt --check` pass.
+
+---
+
+## RESOLVED: FREH10-2 i32 coefficient precision (commit b46b0fc, 2026-11-27)
+
+FREH10-2's remaining 13 divergent frames came from i16 truncation of
+dequantized coefficients reaching 34496. `cavlc.rs`, `dequant.rs`, `hires.rs`,
+`idct.rs` and `mb.rs` now keep high-depth coefficients at i32 precision end to
+end. Verified FREH10-2 358/358 frames bit-exact, FREH10-1 stays 360/360, and
+FRext rose from 43/69 to 44/69 with zero errors and no new timeouts.
