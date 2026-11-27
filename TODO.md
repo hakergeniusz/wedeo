@@ -88,3 +88,13 @@ Remaining optimizations:
 - [ ] **Big-endian PCM through symphonia** — untested (we have no BE test files running through symphonia path)
 - [ ] **MKV with multiple audio tracks** — test stream_index handling in symphonia demuxer
 - [x] **Seek correctness** — seek tests added for WAV, FLAC, and MP3 via symphonia demuxer
+
+## Performance experiments with no measured win
+
+- SSE2/AVX2 H.264 MC lowpass (`h_lowpass_direct`, `v_lowpass_direct`,
+  `hv_lowpass_direct`, `avg_pixels`) was implemented with runtime dispatch and
+  verified bit-exact on 9 vectors (329 release tests). Alternating A/B on a
+  720x480 inter-heavy vector gave a 1.006x median speedup with individual runs
+  from 0.886x to 1.101x, i.e. within noise. The scalar loops are already
+  auto-vectorized by LLVM. Do not retry this without a new profile showing a
+  real bottleneck. Evidence: /tmp/ai-agent/ (ephemeral).
