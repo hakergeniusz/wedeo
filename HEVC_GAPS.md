@@ -25,7 +25,7 @@ pixels.
 
 ## Overall parity
 
-Current at HEAD `58d2c0c`: 10/227 bit-exact vectors. The progression below is
+Current at HEAD `58d2c0c`: 18/227 bit-exact vectors. The progression below is
 recorded at the commits named in each step.
 
 Baseline at `f6d844c` was 3/227 bit-exact vectors: one real match,
@@ -75,7 +75,7 @@ edges, while `cbf_luma` is used only for a TU's own top/left edges. Wedeo's
 internal loops of `boundary_strengths()`.
 
 Verified: both frames byte-exact on all planes; full 227-vector sweep 8/227 ->
-10/227 with no regressions (`DSLICE_B_HHI_5.bit` only load-timeout, already
+18/227 with no regressions (`DSLICE_B_HHI_5.bit` only load-timeout, already
 failing before).
 
 ## CIP_A_Panasonic_3.bit first divergence (2026-11-27, no patch)
@@ -135,12 +135,12 @@ flags, including an `on_pu_edge` condition. Wedeo now follows that rule.
 
 Verified: target vector luma diffs 2353 -> 1867, total differing bytes
 3287 -> 2809, first diff moved from (80,61) to (72,62). Full 227-vector sweep
-unchanged at 10/227 with no new errors.
+unchanged at 18/227 with no new errors.
 
 Resolved later by `e7a65a6`: FFmpeg's CIP sample replacement macros
 (`EXTEND_LEFT_CIP`, `EXTEND_DOWN_CIP`, `EXTEND_UP_CIP`, `EXTEND_RIGHT_CIP`) are
 now applied after neighbour collection. `CIP_A_Panasonic_3.bit` became
-byte-exact (2809 -> 0 differing bytes) and HEVC parity rose to 10/227.
+byte-exact (2809 -> 0 differing bytes) and HEVC parity rose to 18/227.
 
 ## Intra prediction exonerated on IPRED/CIP vectors (2026-11-27)
 
@@ -174,7 +174,7 @@ FFmpeg (Y(320,1) 28->29, Cb(160,0) 151->152). Wedeo's SAO left neighbour was
 
 After the fix: Cb(160,0)=153, Cr(160,0)=123, both first chroma diffs gone.
 IPRED differing bytes 5901 -> 5577 (Y 170->54). Full 227-vector sweep stays
-10/227 with no new errors; the DSLICE_B_HHI_5 timeout disappeared (errors
+18/227 with no new errors; the DSLICE_B_HHI_5 timeout disappeared (errors
 3 -> 2). CIP_A_Panasonic_3 was unchanged (2809 diffs) at that point; the later
 CIP sample-replacement fix `e7a65a6` made it byte-exact (0 diffs).
 
@@ -197,3 +197,19 @@ changed the padding value to 174 but left all 757 differences unchanged, so
 that hypothesis is incomplete and was reverted. Next step: reproduce FFmpeg's
 one-CTB-delayed interleaved deblock/SAO ordering, then pair corner padding
 again. Evidence: `/tmp/ai-agent/merge_next_*` (ephemeral).
+
+---
+
+## SAO edge fixes combined result (2026-11-27)
+
+Two complementary SAO fixes were merged at HEAD: `b07857b` selects the
+diagonal neighbour CTB for padding corners with correct `height+1`/`width+1`
+bounds, and `1c1693d` allocates separate edge buffers per component (FFmpeg
+`hevcdec.c:150-166`). Their conflict in `filter.rs` was resolved by keeping
+both the diagonal-CTB selection and the per-component indexing.
+
+Full 227-vector sweep: 10/227 -> **18/227 MATCH** with zero regressions. Newly
+matching vectors: `EXT_A_ericsson_4.bit`, `POC_A_Bossen_3.bit`,
+`IPRED_A_docomo_2.bit`, `IPRED_B_Nokia_3.bit`, `IPRED_C_Mitsubishi_2.bit`,
+`IPRED_C_Mitsubishi_3.bit`, `MAXBINS_A_TI_4.bit`, `OPFLAG_B_Qualcomm_1.bit`.
+Both ERROR entries remain vectors where neither decoder emits frames.
