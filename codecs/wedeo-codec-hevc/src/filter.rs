@@ -639,7 +639,7 @@ pub fn boundary_strengths(
         if !is_intra {
             for j in (8..size).step_by(8) {
                 for i in (0..size).step_by(4) {
-                    let bs = edge_bs(pic, sps, x0 + i, y0 + j - 1, x0 + i, y0 + j, true);
+                    let bs = internal_edge_bs(pic, sps, x0 + i, y0 + j - 1, x0 + i, y0 + j);
                     if let Some(slot) = pic.bs_h_mut((x0 + i) as usize, (y0 + j) as usize) {
                         *slot = bs;
                     }
@@ -647,7 +647,7 @@ pub fn boundary_strengths(
             }
             for j in (0..size).step_by(4) {
                 for i in (8..size).step_by(8) {
-                    let bs = edge_bs(pic, sps, x0 + i - 1, y0 + j, x0 + i, y0 + j, true);
+                    let bs = internal_edge_bs(pic, sps, x0 + i - 1, y0 + j, x0 + i, y0 + j);
                     if let Some(slot) = pic.bs_v_mut((x0 + i) as usize, (y0 + j) as usize) {
                         *slot = bs;
                     }
@@ -691,6 +691,27 @@ fn edge_bs(pic: &Picture, sps: &Sps, xp: i32, yp: i32, xq: i32, yq: i32, same_sl
         return 0;
     }
     boundary_strength(*p, *q)
+}
+
+/// Boundary strength for TU internal boundaries of inter TUs.
+///
+/// FFmpeg's `ff_hevc_deblocking_boundary_strengths()` (filter.c 858-902) only
+/// compares MvFields here; it does not consult `cbf_luma`, which is used only
+/// for the TU's own top/left edges. Treating a coded residual as a boundary
+/// would filter every 8x8 edge inside an inter TU.
+fn internal_edge_bs(pic: &Picture, sps: &Sps, xp: i32, yp: i32, xq: i32, yq: i32) -> u8 {
+    let pu = |v: i32| (v as u32 >> sps.log2_min_pu_size) as usize;
+    let (Some(p), Some(q)) = (
+        pic.tab_mvf.get(pu(xp), pu(yp)),
+        pic.tab_mvf.get(pu(xq), pu(yq)),
+    ) else {
+        return 2;
+    };
+    if mvf_equal(*p, *q) {
+        0
+    } else {
+        boundary_strength(*p, *q)
+    }
 }
 
 fn mvf_equal(a: MvField, b: MvField) -> bool {
