@@ -19,7 +19,7 @@ dates and commits; the numbers below are the current ones.
 
 - PAFF top/bottom field pairing and field-view motion compensation are
   implemented as a bounded step (commit `e61b4af`), with documented trade-offs:
-  the top-field first row loses byte-exactness from paired-row deblocking,
+  the top-field first row was double-deblocked (fixed at 056ffec),
   high-depth bottom fields skip `post_decode_mb_hires`, and `mark_complete()`
   is a temporary guard for self-reference waits. Full interlaced parity is
   still open. See `PAFF_RESEARCH.md` Appendix Q.

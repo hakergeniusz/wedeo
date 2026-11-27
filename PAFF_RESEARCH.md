@@ -1783,3 +1783,23 @@ Trade-offs explicitly retained for the next pass:
 
 Do not reapply the older wholesale attempt of Appendix K; this patch is the
 measured successor.
+
+---
+
+## Appendix R: top-field double-deblock fix (commit 056ffec, 2026-11-27)
+
+gdb on Freh7_B.264 showed FFmpeg filters each field row exactly once (top
+rows 0,2,4,..., then bottom rows 1,3,5,...). Wedeo tracing showed frame row 0
+being filtered twice: the top slice's `inline_deblock_row` filtered it on
+completing row 1, then the bottom slice's `inline_deblock_paff_bottom_row`
+filtered `completed_row - 2 = 0` again. That produced about 50 +/-1 pixel
+differences and was the sole cause of the top-field regression recorded in
+Appendix Q.
+
+Fix: pass the bottom slice's first frame row to
+`inline_deblock_paff_bottom_row` and skip any target row above it. Bottom-field
+row filtering is unchanged.
+
+Verified: Freh7_B.264 row 0 byte-exact; even rows 0-15 have 0 differences
+(was 473); odd rows 1-15 keep 2034 differences (the Appendix Q improvement).
+FRext 43/69 MATCH, 0 errors, 0 timeouts.
