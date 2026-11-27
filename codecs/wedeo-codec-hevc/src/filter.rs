@@ -462,14 +462,16 @@ fn sao_ctb(
                     bit_depth,
                 )
                 .map_err(|e| wedeo_core::Error::Other(e.to_string()))?;
+                // FFmpeg's copy_CTB_to_hv() (filter.c:346) saves the pre-SAO
+                // samples for neighbouring CTBs' EO edge padding.
+                store_hv(
+                    pic, c_idx, sao_h, sao_v, x_ctb, y_ctb, x0, y0, width, height, pw, ph,
+                );
                 for yy in 0..height {
                     for xx in 0..width {
                         pic.set_sample(c_idx, x0 + xx, y0 + yy, filtered[yy * width + xx]);
                     }
                 }
-                store_hv(
-                    pic, c_idx, sao_h, sao_v, x_ctb, y_ctb, x0, y0, width, height, pw, ph,
-                );
                 params.type_idx[c_idx] = SaoType::Applied;
             }
             SaoType::Edge => {
@@ -552,6 +554,11 @@ fn sao_ctb(
                     bit_depth,
                 )
                 .map_err(|e| wedeo_core::Error::Other(e.to_string()))?;
+                // FFmpeg's copy_CTB_to_hv() (filter.c:459) saves the pre-SAO
+                // samples for neighbouring CTBs' EO edge padding.
+                store_hv(
+                    pic, c_idx, sao_h, sao_v, x_ctb, y_ctb, x0, y0, width, height, pw, ph,
+                );
                 for yy in 0..height {
                     for xx in 0..width {
                         pic.set_sample(
@@ -562,9 +569,6 @@ fn sao_ctb(
                         );
                     }
                 }
-                store_hv(
-                    pic, c_idx, sao_h, sao_v, x_ctb, y_ctb, x0, y0, width, height, pw, ph,
-                );
                 params.type_idx[c_idx] = SaoType::Applied;
             }
             SaoType::Applied | SaoType::NotApplied => unreachable!(),
