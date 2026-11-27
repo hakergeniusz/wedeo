@@ -1357,3 +1357,183 @@ are the sub_mb_type context derivation (FFmpeg `decode_cabac_p_mb_sub_type`
 uses neighbor sub-partition state) and the `mb_skip_flag`/`mb_type` bin order
 for field slices, but this is a hypothesis only and must not be patched
 without a measured bin-level divergence.
+
+---
+
+## Appendix M: MBAFF first divergence (HCAMFF1_HHI, 2026-11-27)
+
+# H.264 MBAFF measured ground truth: HCAMFF1_HHI (2026-11-27)
+
+Agent worktree: `/home/hakergeniusz/.local/share/opencode/worktree/695063/h264-mbaff`
+Base: HEAD `5e47eb4`, tree left clean. No patch committed.
+
+## Vector and reproduction
+
+Chosen vector: `/var/cache/zstd5/wedeo-ref/jvt-vectors/JVT-FR-EXT/HCAMFF1_HHI.264`
+(19,978 bytes, 352x288, yuv420p, 10 frames). Per `PAFF_RESEARCH.md` Appendix B
+this is MBAFF-only (0 top / 0 bottom / 10 frame slices), so the PAFF pairing path
+is not involved. It is not `Freh7_B.264` (owned by another agent) and is not one
+of the vectors that previously hit 120 s timeouts.
+
+Commands (both decoders, raw YUV byte comparison):
+
+```
+wedeo-framecrc <vec> --raw-yuv <wedeo.yuv>
+/var/cache/zstd5/ffmpeg-src-w62/ffmpeg_g -y -v error -threads 1 -bitexact \
+  -i <vec> -f rawvideo -pix_fmt yuv420p <ffmpeg.yuv>
+python3 /tmp/ai-agent/mbaff_compare.py <vec>
+```
+
+Reproduction is deterministic: the prebuilt
+`/var/cache/zstd5/wedeo-target/release/wedeo-framecrc` and a fresh release build
+from this worktree produced identical first-divergence values.
+
+Baseline (deblocking on): all 10 frames DIFF; frame 0 first divergence at
+Y x=95, y=0, Wedeo 85 vs FFmpeg 84; 80,609 differing Y pixels, 11,830 U,
+11,824 V; max abs delta 255.
+
+With `-skip_loop_filter all` / `WEDEO_NO_DEBLOCK=1`: frame 0 first divergence
+at Y x=96, y=0, Wedeo 81 vs FFmpeg 80; 79,944 differing Y pixels. The divergence
+is therefore in reconstruction, not deblocking.
+
+First-frame difference map (16x16 MB grid, no deblock), rows 0-5:
+
+```
+   0    0    0    2  128  128  232  256  256  256  256  256  256  256  256  256  256  256  256  256  256  256
+   0    0    0    0  128  128  128  216  256  256  256  256  256  256  256  256  256  256  256  256  256  256
+   0    0    0    0  128  171  256  208  256  256  256  256  256  256  256  256  256  256  256  256  256  256
+   0    0    0    0    0   64  256  240  256  255  256  256  256  256  256  256  256  256  256  256  256  256
+   0    0    0    0    0   64  255  256  256  256  256  256  256  256  256  256  256  256  256  256  256  256
+   0    0    0    0    0  156  256  256  256  256  256  256  256  256  256  256  256  256  256  256  256  256
+```
+
+The first field-mode pair is MB x=3 (MB addresses 3 and 26, mb_stride=22).
+Pixels of MB x=5,6 and onward diverge by a constant +1/255 pattern on many
+rows, consistent with an intra prediction / coefficient placement divergence
+at the field/frame transition (MB x=3 field, MB x=6 frame).
+
+## FFmpeg ground truth (gdb, debug build)
+
+Debug binary: `/var/cache/zstd5/ffmpeg-src-w62/ffmpeg_g`
+(`--disable-optimizations --enable-debug=3 --disable-stripping --disable-asm`),
+`-threads 1 -bitexact`. GDB scripts are in `/tmp/ai-agent/mbaff_*.gdb`, raw output
+in `/tmp/ai-agent/mbaff_ffmpeg_*.txt`.
+
+### Field flags (`h264_cabac.c:1966`, 2859 records)
+
+Frame 0, `pict_type=1` (I): pairs x=0,1,2 are frame mode; x=3,4,5 are field mode
+(`mb_field_decoding_flag=1`, `mb_mbaff=1`); x=6 is frame mode; x=7 onward is
+field mode. Wedeo's `MBAFF_MB_START` trace for frame 0 shows the same
+`mb_field=true/false` sequence, so the field flags themselves agree.
+
+### Field-mode MB(3,1), mb_xy=26 (`h264_cabac.c:2069` / `:2090` / `:2341`)
+
+```
+mb_type=16777345 (INTRA4x4 | INTERLACED), QP=34, cbp=0x1f,
+left_cbp=0xa, top_cbp=0x7cf,
+intra4x4 mode cache (scan8 order) = 8 8 8 8 2 2 2 2 2 2 2 2 2 2 2 2,
+nnz cache = 5 5 5 5 7 7 7 7 2 2 2 2 3 3 3 3,
+decoded coefficients (raster, first 16): 384 150 0 -240 0 0 0 0 -150 0 0 0 0 0 0 0,
+chroma DC: -1 0 0 0 0 0 0 0.
+```
+
+FFmpeg intra mode decode at `h264_cabac.c:2077` (before
+`ff_h264_check_intra4x4_pred_mode`) for `sl->mb_xy == 26`:
+
+```
+pred=2 for every 8x8 group; states s68=2/4/2/0, s69=3/9/9/9, s399=15;
+cabac low/range = 4354816/358, 34838528/281, 29569024/256, 25583616/256;
+decoded modes = 1, 9, 1, 4 (then write_back/check).
+```
+
+The reconstruction-time 8x8 modes at `h264_mb.c:651` are `8, 9, 2, 2` with
+nnz=4 for each 8x8 block; first 8x8 prediction samples `p0=100, p1=95`.
+
+### Field-mode MB(3,0), mb_xy=3
+
+```
+mb_type=16777345, QP=33, cbp=0x1f, left_cbp=0xa, top_cbp=0x7cf,
+coefficients: 192 150 0... ; chroma DC 1 0 ...
+stored intra4x4 modes (mb2br layout) = 1 1 4 4 4 2 2 0
+```
+
+### QP progression frame 0 (gdb `h264_cabac.c:2491`)
+
+QP increments by 1 for each of the first 8 MBs, reaching 34 at MB(3,1);
+Wedeo's `decoded MB` trace shows the same QP sequence.
+
+### FFmpeg field scan tables (`gdb print h->field_scan8x8`)
+
+`h->field_scan[0..16]` = `0 1 4 2 3 5 6 7 8 9 10 11 12 13 14 15`
+`h->field_scan8x8[0..16]` = `0 1 2 8 9 3 4 10 16 11 5 6 7 12 17 24`
+
+These are the *transposed* variants from `init_scan_tables`
+(`h264_slice.c:764-795`); the raw `field_scan`/`field_scan8x8` constants in
+`h264_slice.c:53-78` are different. CABAC residual uses the transposed variants
+(`h264_cabac.c:2424-2432`).
+
+## Wedeo traces (matching equivalent points)
+
+Wedeo run with `RUST_LOG=wedeo_codec_h264=trace`, copied to
+`/tmp/ai-agent/mbaff-work/wedeo-framecrc-trace`.
+
+Field flags at `MBAFF_MB_START` agree with FFmpeg. At MB(3,1):
+
+```
+INTRA_MODE_CTX mb_x=3 mb_y=1 scan_idx=0 left_mode=2 top_mode=-1 predicted=2 mode=8
+INTRA_MODE_CTX mb_x=3 mb_y=1 scan_idx=4 left_mode=8 top_mode=-1 predicted=2 mode=2
+INTRA_MODE_CTX mb_x=3 mb_y=1 scan_idx=8 left_mode=2 top_mode=8 predicted=2 mode=2
+INTRA_MODE_CTX mb_x=3 mb_y=1 scan_idx=12 left_mode=2 top_mode=2 predicted=2 mode=2
+```
+
+FFmpeg decoded `1, 9, 1, 4` from the same `pred=2`; Wedeo decoded `8, 2, 2, 2`.
+Both decoders agree on the predictor input (`pred=2`), but Wedeo's decoded
+CABAC bins differ at the first 8x8 group. The most likely root cause is an
+earlier divergence in CABAC state, most plausibly in MB(3,0) residual decoding,
+because the decoded coefficient values for that field MB also differ
+(FFmpeg `[192,150,0,...]` vs Wedeo `DEQUANT coeff_sum=924 dc=384` for i8x8=0).
+
+Caveat: FFmpeg's `intra4x4_pred_mode_cache` layout (scan8) and Wedeo's
+`mode_cache` (raster) are different, so the raw cached mode arrays are not
+directly comparable. The `pred=2` values above are from FFmpeg's
+`pred_intra_mode` return value and Wedeo's `predicted` field respectively,
+which are directly comparable.
+
+## Hypotheses tested and rejected (measured)
+
+1. Left-block intra mode remap for field-mode bottom MB
+   (`compute_mbaff_neighbors` option 3 / `LEFT_LUMA_NZ_ROW`). Checked against
+   FFmpeg `left_block_options[3]` and `pred_intra_mode`; both decoders use
+   `pred=2` for the first 8x8 group, so the predictor is not the cause.
+2. Missing transpose of the field scan tables in Wedeo's CABAC residual:
+   changed `FIELD_SCAN_4X4` to `[0,1,4,2,3,5,6,7,8,9,10,11,12,13,14,15]` and
+   `FIELD_SCAN_8X8_USIZE` to the transposed `tables::FIELD_SCAN_8X8`, matching
+   FFmpeg `init_scan_tables`. Built and measured on HCAMFF1_HHI: first diff
+   moved *earlier* (Y x=47,y=0 vs x=95,y=0) and the differing Y pixel count
+   grew from 80,609 to 97,457. Reverted.
+
+The transposed-scan hypothesis is rejected: it changes the bin stream and
+makes the vector worse, so it is not a valid single-cause fix.
+
+## Next step recommendation
+
+Extract Wedeo's `CabacReader::low`, `range` and `state[68]/[69]/[399]` immediately
+before `decode_cabac_mb_intra4x4_pred_mode` at MB(3,1) i=0, and compare with
+FFmpeg's `4354816/358, s68=2, s69=3, s399=15`. Then walk one MB back to
+MB(3,0) residual decoding and compare the first CABAC bin at which `low`/`range`
+diverge, following the `h264_cabac.c:2077` - `h264_mvpred.h:42` -
+`h264_cabac.c:2424` chain. Do not apply hypothesis-only patches: both tried
+hypotheses were rejected by measurement.
+
+## Files produced
+
+- `/tmp/ai-agent/mbaff_compare.py`, `mbaff_diffmap.py` (raw YUV comparison)
+- `/tmp/ai-agent/mbaff_work/HCAMFF1_HHI.{wedeo,ffmpeg}.yuv`
+- `/tmp/ai-agent/mbaff_wedeo_trace.log`, `mbaff_wedeo_trace2.log`
+- `/tmp/ai-agent/mbaff_ffmpeg_flags.txt`, `mbaff_ffmpeg_neighbors.txt`,
+  `mbaff_ffmpeg_mb6.txt`, `mbaff_ffmpeg_mb6b.txt`, `mbaff_ffmpeg_qp.txt`,
+  `mbaff_ffmpeg_mv.txt`, `mbaff_ffmpeg_mb6*.txt`
+- `/tmp/ai-agent/mbaff_*.gdb` (gdb scripts)
+- `/tmp/ai-agent/mbaff_compare_baseline.txt`, `mbaff_compare_nodeblock.txt`,
+  `mbaff_compare_scanfix.txt`
+- `/tmp/ai-agent/mbaff_build*.log`
