@@ -111,13 +111,21 @@ Stage 1 is self-contained: format descriptors and output labeling can be
 verified with unit tests and an 8-bit framecrc comparison, without changing
 sample data.
 
-## Stage 2: sample storage
+## Stage 2: sample storage (implemented and verified)
 
-Introduce a `u8`/`u16` plane storage enum in `FrameBuffer` with accessor
-helpers. `new(width, height, bit_depth)` allocates `u16` planes for 10/12-bit
-frames, with strides in samples (as FFmpeg does) and output byte size
-`stride_samples * 2`. Reference frames must carry the same variant. Keep the
-`u8` path byte-for-byte identical for 8-bit vectors.
+`FrameBuffer` now holds `Plane::{U8(Vec<u8>), U16(Vec<u16>)}` for Y/U/V.
+`FrameBuffer::new(width, height, bit_depth, ss_h, ss_v)` allocates `u16`
+planes for 10/12-bit frames; strides stay in samples and the output
+`linesize` is `stride_samples * bytes_per_sample` (1 or 2). `RefFrame`
+clones the whole buffer, so reference slots keep the same variant. Byte
+views (`as_u8`/`as_u8_mut` plus `Deref`/`Index`) keep the 8-bit call sites,
+including the loop filter, source-compatible; no reconstruction math
+changed and the early return stays in place.
+
+Verification: `cargo test --workspace`, `cargo clippy -p wedeo-codec-vp9
+--all-targets -- -D warnings`, `cargo fmt -p wedeo-codec-vp9`, and full
+FATE VP9 framecrc parity (211 bit-exact, 7 known differences, 8 high-depth
+zero-frame vectors).
 
 ## Stage 3: reconstruction math
 

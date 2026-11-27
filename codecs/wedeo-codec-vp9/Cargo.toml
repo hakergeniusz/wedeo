@@ -12,6 +12,7 @@ description = "VP9 video codec for wedeo"
 [dependencies]
 wedeo-core = { workspace = true }
 wedeo-codec = { workspace = true }
+bytemuck = "1.25"
 inventory = { workspace = true }
 tracing = { workspace = true }
 

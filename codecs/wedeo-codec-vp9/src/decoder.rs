@@ -181,19 +181,19 @@ impl Vp9Decoder {
             if let FrameData::Video(ref mut video) = frame.data {
                 video.planes = vec![
                     FramePlane {
-                        buffer: Buffer::from_slice(&fb.y),
+                        buffer: Buffer::from_slice(fb.y.as_u8()),
                         offset: 0,
-                        linesize: fb.y_stride,
+                        linesize: fb.y_byte_stride(),
                     },
                     FramePlane {
-                        buffer: Buffer::from_slice(&fb.u),
+                        buffer: Buffer::from_slice(fb.u.as_u8()),
                         offset: 0,
-                        linesize: fb.uv_stride,
+                        linesize: fb.uv_byte_stride(),
                     },
                     FramePlane {
-                        buffer: Buffer::from_slice(&fb.v),
+                        buffer: Buffer::from_slice(fb.v.as_u8()),
                         offset: 0,
-                        linesize: fb.uv_stride,
+                        linesize: fb.uv_byte_stride(),
                     },
                 ];
                 video.picture_type = PictureType::P;
@@ -263,7 +263,13 @@ impl Vp9Decoder {
         // --- 2. Set up frame buffer and contexts ---
         let width = header.width;
         let height = header.height;
-        let mut fb = FrameBuffer::new(width, height, header.subsampling_x, header.subsampling_y);
+        let mut fb = FrameBuffer::new(
+            width,
+            height,
+            header.bit_depth,
+            header.subsampling_x,
+            header.subsampling_y,
+        );
 
         // FFmpeg's coding grid is 8x8-based: `cols = (w + 7) >> 3`,
         // `rows = (h + 7) >> 3` (vp9.c:282-283). All frame-boundary
@@ -490,15 +496,10 @@ impl Vp9Decoder {
 
         // --- 7. Reference frame management ---
         let ref_frame = Arc::new(RefFrame {
-            fb: FrameBuffer {
-                y: fb.y.clone(),
-                u: fb.u.clone(),
-                v: fb.v.clone(),
-                y_stride: fb.y_stride,
-                uv_stride: fb.uv_stride,
-                width,
-                height,
-            },
+            // Cloning the buffer keeps the same u8/u16 plane variant in
+            // every reference slot (FFmpeg's ref frames share the AVFrame
+            // layout, including bytesperpixel).
+            fb: fb.clone(),
             mv_grid: cur_mv_grid.clone(),
             width,
             height,
@@ -534,23 +535,23 @@ impl Vp9Decoder {
 
         // --- 7. Build output Frame (only if show_frame is set) ---
         if header.show_frame {
-            let y_buf = Buffer::from_slice(&fb.y);
-            let u_buf = Buffer::from_slice(&fb.u);
-            let v_buf = Buffer::from_slice(&fb.v);
+            let y_buf = Buffer::from_slice(fb.y.as_u8());
+            let u_buf = Buffer::from_slice(fb.u.as_u8());
+            let v_buf = Buffer::from_slice(fb.v.as_u8());
             let y_plane = FramePlane {
                 buffer: y_buf,
                 offset: 0,
-                linesize: fb.y_stride,
+                linesize: fb.y_byte_stride(),
             };
             let u_plane = FramePlane {
                 buffer: u_buf,
                 offset: 0,
-                linesize: fb.uv_stride,
+                linesize: fb.uv_byte_stride(),
             };
             let v_plane = FramePlane {
                 buffer: v_buf,
                 offset: 0,
-                linesize: fb.uv_stride,
+                linesize: fb.uv_byte_stride(),
             };
 
             let Some(format) =

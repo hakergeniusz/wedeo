@@ -7,8 +7,10 @@
 //
 // LGPL-2.1-or-later — same licence as FFmpeg.
 
+use std::ops::{Deref, DerefMut, Index, IndexMut, RangeFrom};
 use std::sync::Arc;
 
+use bytemuck::{cast_slice, cast_slice_mut};
 use wedeo_core::error::Result;
 
 use crate::block::BlockInfo;
@@ -24,24 +26,150 @@ use crate::types::{IntraMode, TxSize, TxType};
 // Frame buffer
 // ---------------------------------------------------------------------------
 
+/// Sample storage for one plane of a decoded frame.
+///
+/// FFmpeg keeps plane pointers as `uint8_t *` and scales every sample offset
+/// by `s->bytesperpixel` (`vp9dec.h:120`, `vp9.c:1136`). Keeping the two
+/// widths in separate variants lets the reconstruction math be generalised
+/// over `u8`/`u16` later without changing the 8-bit byte path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Plane {
+    /// One byte per sample (VP9 profiles 0 and 1).
+    U8(Vec<u8>),
+    /// Two bytes per sample, native little-endian (VP9 profiles 2 and 3).
+    U16(Vec<u16>),
+}
+
+impl Plane {
+    /// Allocate `samples` zeroed samples for the given bit depth.
+    ///
+    /// VP9 defines only 8, 10 and 12-bit profiles. Any depth above 8 uses the
+    /// 16-bit container so samples are never truncated.
+    pub fn zeros(samples: usize, bit_depth: u8) -> Self {
+        if bit_depth == 8 {
+            Self::U8(vec![0u8; samples])
+        } else {
+            Self::U16(vec![0u16; samples])
+        }
+    }
+
+    /// Bytes occupied by one sample.
+    pub fn bytes_per_sample(&self) -> usize {
+        match self {
+            Self::U8(_) => 1,
+            Self::U16(_) => 2,
+        }
+    }
+
+    /// Number of samples in the plane.
+    pub fn len_samples(&self) -> usize {
+        match self {
+            Self::U8(data) => data.len(),
+            Self::U16(data) => data.len(),
+        }
+    }
+
+    /// Number of bytes in the plane (`stride_samples * rows * bytes_per_sample`).
+    pub fn len_bytes(&self) -> usize {
+        self.len_samples() * self.bytes_per_sample()
+    }
+
+    /// Raw byte view used by output frames and the legacy 8-bit math.
+    pub fn as_u8(&self) -> &[u8] {
+        match self {
+            Self::U8(data) => data,
+            // Native-endian byte view, matching FFmpeg's `uint8_t *` plane
+            // pointers on little-endian hosts (the output formats are *le).
+            Self::U16(data) => cast_slice(data),
+        }
+    }
+
+    /// Mutable raw byte view used by the legacy 8-bit math.
+    pub fn as_u8_mut(&mut self) -> &mut [u8] {
+        match self {
+            Self::U8(data) => data,
+            Self::U16(data) => cast_slice_mut(data),
+        }
+    }
+
+    /// Typed 16-bit view, available only for high-depth planes.
+    pub fn as_u16(&self) -> Option<&[u16]> {
+        match self {
+            Self::U8(_) => None,
+            Self::U16(data) => Some(data),
+        }
+    }
+
+    /// Mutable typed 16-bit view, available only for high-depth planes.
+    pub fn as_u16_mut(&mut self) -> Option<&mut [u16]> {
+        match self {
+            Self::U8(_) => None,
+            Self::U16(data) => Some(data),
+        }
+    }
+}
+
+// These byte views keep the existing 8-bit call sites (loop filter, MC and
+// output framing) source-compatible while stage 3 moves the reconstruction
+// math to `as_u16`/`as_u16_mut`.
+impl Deref for Plane {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.as_u8()
+    }
+}
+
+impl DerefMut for Plane {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        self.as_u8_mut()
+    }
+}
+
+impl Index<RangeFrom<usize>> for Plane {
+    type Output = [u8];
+
+    fn index(&self, range: RangeFrom<usize>) -> &[u8] {
+        &self.as_u8()[range]
+    }
+}
+
+impl IndexMut<RangeFrom<usize>> for Plane {
+    fn index_mut(&mut self, range: RangeFrom<usize>) -> &mut [u8] {
+        &mut self.as_u8_mut()[range]
+    }
+}
+
 /// YUV frame buffer holding one decoded frame.
 ///
 /// Chroma plane geometry follows the frame's subsampling flags
 /// (`s->ss_h` / `s->ss_v` in FFmpeg): 4:2:0 shifts both dimensions,
-/// 4:2:2 only height, 4:4:4 neither.
+/// 4:2:2 only height, 4:4:4 neither. Strides are in samples, as in FFmpeg;
+/// only the output `linesize` is converted to bytes.
+#[derive(Clone)]
 pub struct FrameBuffer {
-    pub y: Vec<u8>,
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
+    pub y: Plane,
+    pub u: Plane,
+    pub v: Plane,
+    /// Luma row stride in samples.
     pub y_stride: usize,
+    /// Chroma row stride in samples.
     pub uv_stride: usize,
     pub width: u32,
     pub height: u32,
+    /// Sample bit depth of this frame (8, 10 or 12).
+    pub bit_depth: u8,
 }
 
 impl FrameBuffer {
     /// Allocate a zeroed frame buffer for a frame of the given dimensions.
-    pub fn new(width: u32, height: u32, subsampling_x: bool, subsampling_y: bool) -> Self {
+    pub fn new(
+        width: u32,
+        height: u32,
+        bit_depth: u8,
+        subsampling_x: bool,
+        subsampling_y: bool,
+    ) -> Self {
         let w = width as usize;
         let h = height as usize;
         // Round strides up to a multiple of 64 for alignment headroom.
@@ -56,14 +184,25 @@ impl FrameBuffer {
         let y_rows = (h + 63) & !63;
         let uv_rows = (uv_h + 31) & !31;
         Self {
-            y: vec![0u8; y_stride * y_rows],
-            u: vec![0u8; uv_stride * uv_rows],
-            v: vec![0u8; uv_stride * uv_rows],
+            y: Plane::zeros(y_stride * y_rows, bit_depth),
+            u: Plane::zeros(uv_stride * uv_rows, bit_depth),
+            v: Plane::zeros(uv_stride * uv_rows, bit_depth),
             y_stride,
             uv_stride,
             width,
             height,
+            bit_depth,
         }
+    }
+
+    /// Luma `linesize` in bytes (FFmpeg `f->linesize[0]`).
+    pub fn y_byte_stride(&self) -> usize {
+        self.y_stride * self.y.bytes_per_sample()
+    }
+
+    /// Chroma `linesize` in bytes (FFmpeg `f->linesize[1]`).
+    pub fn uv_byte_stride(&self) -> usize {
+        self.uv_stride * self.u.bytes_per_sample()
     }
 }
 
@@ -953,4 +1092,74 @@ pub fn reconstruct_inter_block(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u8_frame_layout_matches_legacy_byte_allocation() {
+        let fb = FrameBuffer::new(64, 64, 8, true, true);
+        assert_eq!(fb.bit_depth, 8);
+        assert!(matches!(fb.y, Plane::U8(_)));
+        assert!(matches!(fb.u, Plane::U8(_)));
+        assert!(matches!(fb.v, Plane::U8(_)));
+        assert_eq!(fb.y_stride, 64);
+        assert_eq!(fb.uv_stride, 64);
+        assert_eq!(fb.y.len_samples(), 64 * 64);
+        assert_eq!(fb.u.len_samples(), 64 * 32);
+        assert_eq!(fb.y.len_bytes(), 64 * 64);
+        assert_eq!(fb.y_byte_stride(), fb.y_stride);
+        assert_eq!(fb.uv_byte_stride(), fb.uv_stride);
+        assert!(fb.y.as_u16().is_none());
+    }
+
+    #[test]
+    fn high_depth_frames_allocate_u16_with_byte_strides() {
+        for bit_depth in [10, 12] {
+            let fb = FrameBuffer::new(64, 64, bit_depth, true, true);
+            assert_eq!(fb.bit_depth, bit_depth);
+            assert!(matches!(fb.y, Plane::U16(_)));
+            assert!(matches!(fb.u, Plane::U16(_)));
+            assert!(matches!(fb.v, Plane::U16(_)));
+            // Strides stay in samples; the byte size doubles.
+            assert_eq!(fb.y_stride, 64);
+            assert_eq!(fb.uv_stride, 64);
+            assert_eq!(fb.y_byte_stride(), 64 * 2);
+            assert_eq!(fb.uv_byte_stride(), 64 * 2);
+            assert_eq!(fb.y.len_samples(), 64 * 64);
+            assert_eq!(fb.y.len_bytes(), 64 * 64 * 2);
+            assert_eq!(fb.u.len_bytes(), 64 * 32 * 2);
+            assert_eq!(fb.y.as_u16().unwrap().len(), 64 * 64);
+        }
+    }
+
+    #[test]
+    fn plane_byte_view_exposes_high_depth_samples() {
+        let mut fb = FrameBuffer::new(4, 4, 10, true, true);
+        let y = fb.y.as_u16_mut().expect("10-bit plane is u16");
+        y[0] = 0x1234;
+        y[1] = 0x00ff;
+        let bytes = fb.y.as_u8();
+        assert_eq!(&bytes[..2], &0x1234u16.to_ne_bytes());
+        assert_eq!(&bytes[2..4], &0x00ffu16.to_ne_bytes());
+        assert_eq!(bytes.len(), fb.y.len_bytes());
+    }
+
+    #[test]
+    fn cloned_frame_buffer_keeps_plane_variant() {
+        // RefFrame stores a clone of the working frame buffer, so the
+        // reference must carry the same u8/u16 variant as the source.
+        let fb = FrameBuffer::new(16, 16, 12, false, false);
+        let copy = fb.clone();
+        assert!(matches!(copy.y, Plane::U16(_)));
+        assert_eq!(copy.bit_depth, 12);
+        assert_eq!(copy.y_byte_stride(), fb.y_byte_stride());
+        assert_eq!(copy.y.len_bytes(), fb.y.len_bytes());
+    }
 }

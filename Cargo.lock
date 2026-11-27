@@ -4243,6 +4243,7 @@ dependencies = [
 name = "wedeo-codec-vp9"
 version = "0.2.0"
 dependencies = [
+ "bytemuck",
  "inventory",
  "tracing",
  "wedeo-codec",
