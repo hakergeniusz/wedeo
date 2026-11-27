@@ -22,8 +22,9 @@ use crate::mb::{
 };
 use crate::mc;
 use crate::pixel::Pixel;
-use crate::shared_picture::{RefPic, SharedPicture};
+use crate::shared_picture::RefPic;
 use crate::slice::SliceHeader;
+use std::sync::Arc;
 
 #[inline]
 fn gather_top<P: Pixel>(plane: &[P], offset: usize, stride: usize) -> [P; 16] {
@@ -182,12 +183,24 @@ fn gather_left4<P: Pixel>(plane: &[P], offset: usize, stride: usize, has_left: b
 }
 
 /// 4:2:2/4:2:0 chroma geometry for a macroblock in a u16 plane.
-fn chroma_offset(pic: &PictureBuffer, mb_x: u32, mb_y: u32) -> (usize, usize) {
+///
+/// In field mode the chroma stride is doubled and a bottom field starts one
+/// original chroma line in, matching FFmpeg `hl_decode_mb`'s dest adjustment.
+fn chroma_offset(pic: &PictureBuffer, mb_x: u32, mb_y: u32, mb_field: bool) -> (usize, usize) {
     let rows = if pic.chroma_format_idc == 2 { 16 } else { 8 };
-    (
-        mb_y as usize * rows * pic.uv_stride + mb_x as usize * 8,
-        pic.uv_stride,
-    )
+    if mb_field {
+        let pair_base = (mb_y & !1) as usize * rows;
+        let field_offset = if mb_y & 1 == 1 { pic.uv_stride } else { 0 };
+        (
+            pair_base * pic.uv_stride + field_offset + mb_x as usize * 8,
+            pic.uv_stride * 2,
+        )
+    } else {
+        (
+            mb_y as usize * rows * pic.uv_stride + mb_x as usize * 8,
+            pic.uv_stride,
+        )
+    }
 }
 
 fn chroma_block_offset(
@@ -196,13 +209,34 @@ fn chroma_block_offset(
     mb_y: u32,
     blk_x: u32,
     blk_y: u32,
+    mb_field: bool,
 ) -> (usize, usize) {
-    let rows = if pic.chroma_format_idc == 2 { 16 } else { 8 };
+    let (base, stride) = chroma_offset(pic, mb_x, mb_y, mb_field);
     (
-        (mb_y as usize * rows + blk_y as usize * 4) * pic.uv_stride
-            + mb_x as usize * 8
-            + blk_x as usize * 4,
-        pic.uv_stride,
+        base + blk_y as usize * 4 * stride + blk_x as usize * 4,
+        stride,
+    )
+}
+
+/// Destination chroma offset for the 2x2 (4:2:0) or 2x4 (4:2:2) chroma
+/// block belonging to one 4x4 luma block, with field-mode stride.
+fn inter_chroma_block_offset(
+    pic: &PictureBuffer,
+    mb_x: u32,
+    mb_y: u32,
+    blk_x: u32,
+    blk_y: u32,
+    mb_field: bool,
+) -> (usize, usize) {
+    let y_in_mb = if pic.chroma_format_idc == 2 {
+        blk_y * 4
+    } else {
+        blk_y * 2
+    };
+    let (base, stride) = chroma_offset(pic, mb_x, mb_y, mb_field);
+    (
+        base + y_in_mb as usize * stride + blk_x as usize * 2,
+        stride,
     )
 }
 
@@ -228,7 +262,7 @@ fn decode_chroma_hires(
     let cbp_chroma = (mb.cbp >> 4) & 3;
 
     for (plane_idx, &c_qp) in c_qps.iter().enumerate() {
-        let (offset, stride) = chroma_offset(&ctx.pic, mb_x, mb_y);
+        let (offset, stride) = chroma_offset(&ctx.pic, mb_x, mb_y, ctx.mb_field);
         let plane = if plane_idx == 0 {
             &mut ctx.pic.u16
         } else {
@@ -279,7 +313,8 @@ fn decode_chroma_hires(
             for (blk_idx, &dc_val) in chroma_dc_out.iter().enumerate().take(num_blocks) {
                 let blk_x = (blk_idx & 1) as u32;
                 let blk_y = (blk_idx >> 1) as u32;
-                let (c_offset, c_stride) = chroma_block_offset(&ctx.pic, mb_x, mb_y, blk_x, blk_y);
+                let (c_offset, c_stride) =
+                    chroma_block_offset(&ctx.pic, mb_x, mb_y, blk_x, blk_y, ctx.mb_field);
                 let plane = if plane_idx == 0 {
                     &mut ctx.pic.u16
                 } else {
@@ -538,9 +573,8 @@ pub fn decode_pcm_mb_hires(
     } else {
         8
     };
-    let uv_stride = ctx.pic.uv_stride;
+    let (base, uv_stride) = chroma_offset(&ctx.pic, mb_x, mb_y, ctx.mb_field);
     for plane_idx in 0..2usize {
-        let base = mb_y as usize * rows * uv_stride + mb_x as usize * 8;
         let plane = if plane_idx == 0 {
             &mut ctx.pic.u16
         } else {
@@ -581,6 +615,8 @@ pub fn reconstruct_inter_mb_hires(
 ) {
     let max_pixel = ctx.pic.max_pixel() as i32;
     let chroma422 = ctx.pic.chroma_format_idc == 2;
+    let ctx_field = ctx.mb_field;
+    let self_pic = Arc::clone(ctx.pic.shared());
     let mut luma = [0u16; 16];
     let mut luma1 = [0u16; 16];
     let mut chroma = [0u16; 32];
@@ -600,28 +636,56 @@ pub fn reconstruct_inter_mb_hires(
         }
 
         let dst_x = (mb_x * 16 + blk_x * 4) as i32;
-        let dst_y = (mb_y * 16 + blk_y * 4) as i32;
+        // A field reference has `pic_as_field()` applied in FFmpeg: its stride
+        // is doubled, a bottom field starts one original line in, and the MV
+        // is relative to field rows. Mirror `mb::apply_mc_partition`.
+        let field_geometry = |ref_pic: &RefPic| {
+            let field_view = ref_pic.is_field() && ctx_field;
+            let ref_mb_y = if field_view { mb_y / 2 } else { mb_y };
+            (field_view, ref_mb_y)
+        };
 
-        let mc_luma_from = |pic: &SharedPicture, mv: [i16; 2], out: &mut [u16; 16]| {
-            // SAFETY: the reference row this block reads was published by the
-            // decoder before this MB (frame threading uses wait_for_row).
-            let rp = unsafe { pic.data() };
-            let needed_row =
-                ((dst_y + (mv[1] as i32 >> 2) + 6).max(0) as u32 / 16).min(pic.mb_height() - 1);
-            pic.wait_for_row(needed_row as i32);
+        let mc_luma_from = |ref_pic: &RefPic, mv: [i16; 2], out: &mut [u16; 16]| {
+            let (field_view, ref_mb_y) = field_geometry(ref_pic);
+            let ref_y = (ref_mb_y * 16 + blk_y * 4) as i32;
+            let mvy = mv[1] as i32;
+            // Quarter-pel MV; the 6-tap filter reads 2 above and 3 below.
+            let ref_y_bottom = ref_y + (mvy >> 2) + 4 + 3;
+            let needed_row = (ref_y_bottom.max(0) as u32 / 16).min(ref_pic.mb_height() - 1);
+            // A bottom field may reference the already-decoded top field of
+            // the same picture; waiting there would deadlock (FFmpeg
+            // h264_mb.c:60-70 skips the same check).
+            let self_field_ref = Arc::ptr_eq(&ref_pic.pic, &self_pic) && ref_pic.is_field();
+            if !self_field_ref {
+                ref_pic.wait_for_row(needed_row as i32);
+            }
+            // SAFETY: self-field rows are complete before the bottom field
+            // starts; all other rows are guaranteed by wait_for_row.
+            let rp = unsafe { ref_pic.data() };
+            let field_luma_offset = if field_view && ref_pic.parity == 2 {
+                rp.y_stride
+            } else {
+                0
+            };
+            let ref_luma_stride = if field_view {
+                rp.y_stride * 2
+            } else {
+                rp.y_stride
+            };
+            let ref_luma_height = if field_view { rp.height / 2 } else { rp.height };
             mc::mc_luma_u16(
                 out,
                 4,
-                &rp.y16,
-                rp.y_stride,
+                &rp.y16[field_luma_offset..],
+                ref_luma_stride,
                 dst_x + (mv[0] as i32 >> 2),
-                dst_y + (mv[1] as i32 >> 2),
+                ref_y + (mvy >> 2),
                 (mv[0] as i32 & 3) as u8,
-                (mv[1] as i32 & 3) as u8,
+                (mvy & 3) as u8,
                 4,
                 4,
                 rp.width,
-                rp.height,
+                ref_luma_height,
                 max_pixel,
             );
         };
@@ -633,48 +697,64 @@ pub fn reconstruct_inter_mb_hires(
             mc_luma_from(&ref_pics_l1[ref1 as usize], mv1, &mut luma1);
         }
 
-        // Chroma geometry for this 4x4 luma block (frame-mode coordinates).
-        let c_dst_x = (mb_x * 8 + blk_x * 2) as i32;
-        let c_dst_y = if chroma422 {
-            (mb_y * 16 + blk_y * 4) as i32
-        } else {
-            (mb_y * 8 + blk_y * 2) as i32
-        };
         let cw = 2usize;
         let ch = if chroma422 { 4usize } else { 2usize };
-        let mc_chroma_from =
-            |pic: &SharedPicture, mv: [i16; 2], plane: usize, out: &mut [u16; 32]| {
-                let rp = unsafe { pic.data() };
-                let src = if plane == 0 { &rp.u16 } else { &rp.v16 };
-                // 4:2:2 chroma is full-resolution vertically: reference row
-                // uses `my >> 2` and the 1/8-pel phase is `(my << 1) & 7`
-                // (FFmpeg h264_mb.c mc_dir_part, ysh = 3 - (chroma_idc == 2)).
-                let chroma_ref_y = if chroma422 {
-                    c_dst_y + (mv[1] as i32 >> 2)
-                } else {
-                    c_dst_y + (mv[1] as i32 >> 3)
-                };
-                let chroma_dy = if chroma422 {
-                    (mv[1] as i32) << 1 & 7
-                } else {
-                    mv[1] as i32 & 7
-                };
-                mc::mc_chroma_u16(
-                    &mut out[..cw * ch],
-                    cw,
-                    src,
-                    rp.uv_stride,
-                    c_dst_x + (mv[0] as i32 >> 3),
-                    chroma_ref_y,
-                    (mv[0] as i32 & 7) as u8,
-                    chroma_dy as u8,
-                    cw,
-                    ch,
-                    rp.width / 2,
-                    if chroma422 { rp.height } else { rp.height / 2 },
-                    max_pixel,
-                );
+        let mc_chroma_from = |ref_pic: &RefPic, mv: [i16; 2], plane: usize, out: &mut [u16; 32]| {
+            let (field_view, ref_mb_y) = field_geometry(ref_pic);
+            let c_dst_x = (mb_x * 8 + blk_x * 2) as i32;
+            let c_dst_y = if chroma422 {
+                (ref_mb_y * 16 + blk_y * 4) as i32
+            } else {
+                (ref_mb_y * 8 + blk_y * 2) as i32
             };
+            let rp = unsafe { ref_pic.data() };
+            let src = if plane == 0 { &rp.u16 } else { &rp.v16 };
+            // 4:2:2 chroma is full-resolution vertically: reference row
+            // uses `my >> 2` and the 1/8-pel phase is `(my << 1) & 7`
+            // (FFmpeg h264_mb.c mc_dir_part, ysh = 3 - (chroma_idc == 2)).
+            let chroma_ref_y = if chroma422 {
+                c_dst_y + (mv[1] as i32 >> 2)
+            } else {
+                c_dst_y + (mv[1] as i32 >> 3)
+            };
+            let chroma_dy = if chroma422 {
+                (mv[1] as i32) << 1 & 7
+            } else {
+                mv[1] as i32 & 7
+            };
+            let field_chroma_offset = if field_view && ref_pic.parity == 2 {
+                rp.uv_stride
+            } else {
+                0
+            };
+            let ref_chroma_stride = if field_view {
+                rp.uv_stride * 2
+            } else {
+                rp.uv_stride
+            };
+            let ref_chroma_height = if field_view && !chroma422 {
+                rp.height / 4
+            } else if chroma422 && !field_view {
+                rp.height
+            } else {
+                rp.height / 2
+            };
+            mc::mc_chroma_u16(
+                &mut out[..cw * ch],
+                cw,
+                &src[field_chroma_offset..],
+                ref_chroma_stride,
+                c_dst_x + (mv[0] as i32 >> 3),
+                chroma_ref_y,
+                (mv[0] as i32 & 7) as u8,
+                chroma_dy as u8,
+                cw,
+                ch,
+                rp.width / 2,
+                ref_chroma_height,
+                max_pixel,
+            );
+        };
 
         // Combine L0/L1 at full precision. Unweighted bi-prediction is the
         // rounded average; explicit weights use the slice's denom/offset.
@@ -725,16 +805,8 @@ pub fn reconstruct_inter_mb_hires(
         if !ctx.decode_chroma {
             continue;
         }
-        let chroma_off = if chroma422 {
-            (mb_y as usize * 16 + blk_y as usize * 4) * ctx.pic.uv_stride
-                + mb_x as usize * 8
-                + blk_x as usize * 2
-        } else {
-            (mb_y as usize * 8 + blk_y as usize * 2) * ctx.pic.uv_stride
-                + mb_x as usize * 8
-                + blk_x as usize * 2
-        };
-        let uv_stride = ctx.pic.uv_stride;
+        let (chroma_off, uv_stride) =
+            inter_chroma_block_offset(&ctx.pic, mb_x, mb_y, blk_x, blk_y, ctx_field);
         for plane_idx in 0..2usize {
             if use_l0 {
                 mc_chroma_from(&ref_pics[ref0 as usize], mv0, plane_idx, &mut chroma);
@@ -853,7 +925,7 @@ pub fn reconstruct_inter_mb_hires(
                 .map(|b| {
                     let bx = (b & 1) as u32;
                     let by = (b >> 1) as u32;
-                    chroma_block_offset(&ctx.pic, mb_x, mb_y, bx, by)
+                    chroma_block_offset(&ctx.pic, mb_x, mb_y, bx, by, ctx_field)
                 })
                 .collect();
             let plane = if plane_idx == 0 {

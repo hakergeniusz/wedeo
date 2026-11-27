@@ -2250,12 +2250,7 @@ impl H264Decoder {
                         } else {
                             mb::decode_skip_mb(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1);
                         }
-                        // The high-depth reconstruction pass addresses
-                        // references in frame mode and waits on frame rows;
-                        // it cannot safely run on PAFF bottom fields yet.
-                        if !is_paff_bottom {
-                            post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, None);
-                        }
+                        post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, None);
                         fdc.last_qscale_diff = 0;
 
                         // Update CABAC neighbor context for skip MB
@@ -2333,17 +2328,7 @@ impl H264Decoder {
 
                 // Apply entropy-agnostic processing (dequant, IDCT, pred, MC, neighbor update)
                 mb::apply_macroblock(fdc, &mut mb, hdr, pps, mb_x, mb_y, ref_pics, ref_pics_l1)?;
-                if !is_paff_bottom {
-                    post_decode_mb_hires(
-                        fdc,
-                        hdr,
-                        mb_x,
-                        mb_y,
-                        ref_pics,
-                        ref_pics_l1,
-                        Some(&mut mb),
-                    );
-                }
+                post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, Some(&mut mb));
 
                 // Write back MVD/ref from scan8 cache to flat storage, then update scalar fields
                 cache.write_back(&mut cabac_nb, mb_idx);
