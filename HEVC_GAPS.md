@@ -28,15 +28,22 @@ Baseline at `f6d844c` was 3/227 bit-exact vectors: one real match,
 `cbf_cr_cb_TUDepth_4_circle.h265`, and two trivial 384-byte constant
 frame-packing vectors. The PCM fix does not change that count because its
 target vector still has chroma differences. A full 227-vector framecrc sweep
-after the fix completed: 3/227 MATCH, 222 FAIL, 2 ERROR (both vectors where neither decoder emits frames), so there was no regression.
+after the PCM fix completed: 3/227 MATCH, 222 FAIL, 2 ERROR (no regression).
+Commit `9f0d242` then fixed the chroma TU width passed to neighbour
+availability, lifting parity to 8/227 (five IPCM vectors newly matching, the
+original three retained).
 
 `wedeo-framecrc` links only the native decoder (priority 100), not the
 `oxideav` adapter, so HEVC parity numbers describe the native port.
 
 ## Next measured targets
 
-- Chroma difference at Cb x=160, y=0 in `ipcm_B_NEC_2.bit` after correct PCM
-  sample reads. Extract the sample source with gdb before changing code.
+- `ipcm_B_NEC_2.bit` is now fully bit-exact: framecrc `0xc80d43f8`, with Y,
+  Cb and Cr byte-identical. The chroma bug was not in PCM sample reading:
+  `hls_transform_unit()` passed the luma TU width `size << hshift` to
+  `predict_chroma_tu()` / `set_neighbour_available()`. FFmpeg `hevcdec.c:1428`
+  uses the chroma width `1 << (log2_trafo_size_c + hshift)`. Four call sites
+  now pass `size_c << hshift`.
 - `cbf_cr_cb_TUDepth_4_circle.h265` is already fully bit-exact at HEAD: Y 0,
   Cb 0 and Cr 0 differing bytes, framecrc `0x0127a0d9` on both decoders. Older
   notes claiming a residual +2 Cr offset were stale; `1973a7d` (cross-component
