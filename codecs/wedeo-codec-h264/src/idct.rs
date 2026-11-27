@@ -66,11 +66,14 @@ impl IdctPixel for u8 {
 impl IdctPixel for u16 {
     #[inline]
     fn idct4_add(dst: &mut [Self], stride: usize, coeffs: &mut [i16; 16]) {
-        idct4x4_add_impl(dst, stride, coeffs);
+        // FFmpeg compiles this template with `dctcoef = int32_t` when
+        // BIT_DEPTH > 8. The first butterfly pass can exceed i16 at high QP;
+        // truncating there zeroes whole columns of the 4x4 block.
+        idct4x4_add_impl_wide(dst, stride, coeffs);
     }
     #[inline]
     fn idct4_dc_add(dst: &mut [Self], stride: usize, dc: &mut i16) {
-        idct4x4_dc_add_impl(dst, stride, dc);
+        idct4x4_add_impl_wide_dc(dst, stride, dc);
     }
     #[inline]
     fn idct8_add(dst: &mut [Self], stride: usize, coeffs: &mut [i16; 64]) {
@@ -161,6 +164,72 @@ fn idct4x4_add_impl<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 1
 
     // Zero the coefficient block (FFmpeg: memset(block, 0, 16 * sizeof(dctcoef)))
     *coeffs = [0i16; 16];
+}
+
+/// High-depth 4x4 IDCT with 32-bit butterfly intermediates.
+///
+/// FFmpeg's `h264idct_template.c` uses `dctcoef = int32_t` for BIT_DEPTH > 8,
+/// so the first pass keeps values such as `z1 = 44800` intact. Wedeo's row-major
+/// coefficients use the swapped pass order of [`idct4x4_add_impl`]; only the
+/// storage width differs here.
+fn idct4x4_add_impl_wide<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 16]) {
+    let mut c = [0i32; 16];
+    for (d, s) in c.iter_mut().zip(coeffs.iter()) {
+        *d = *s as i32;
+    }
+    c[0] += 32;
+
+    for i in 0..4 {
+        let row = 4 * i;
+        let z0 = c[row] + c[row + 2];
+        let z1 = c[row] - c[row + 2];
+        let z2 = (c[row + 1] >> 1) - c[row + 3];
+        let z3 = c[row + 1] + (c[row + 3] >> 1);
+
+        c[row] = z0 + z3;
+        c[row + 1] = z1 + z2;
+        c[row + 2] = z1 - z2;
+        c[row + 3] = z0 - z3;
+    }
+
+    assert!(3 * stride + 3 < dst.len());
+    for i in 0..4 {
+        let z0 = c[i] + c[i + 8];
+        let z1 = c[i] - c[i + 8];
+        let z2 = (c[i + 4] >> 1) - c[i + 12];
+        let z3 = c[i + 4] + (c[i + 12] >> 1);
+
+        // SAFETY: 3*stride+3 < dst.len() proven by the assert above; i<4, stride>=4.
+        unsafe {
+            let p = dst.as_mut_ptr();
+            *p.add(i) = P::from_i32((*p.add(i)).to_i32() + ((z0 + z3) >> 6));
+            *p.add(stride + i) = P::from_i32((*p.add(stride + i)).to_i32() + ((z1 + z2) >> 6));
+            *p.add(2 * stride + i) =
+                P::from_i32((*p.add(2 * stride + i)).to_i32() + ((z1 - z2) >> 6));
+            *p.add(3 * stride + i) =
+                P::from_i32((*p.add(3 * stride + i)).to_i32() + ((z0 - z3) >> 6));
+        }
+    }
+
+    *coeffs = [0i16; 16];
+}
+
+/// High-depth DC-only 4x4 add with a 32-bit intermediate, matching FFmpeg's
+/// `dctcoef` width for BIT_DEPTH > 8.
+fn idct4x4_add_impl_wide_dc<P: Pixel>(dst: &mut [P], stride: usize, dc: &mut i16) {
+    let val = (*dc as i32 + 32) >> 6;
+    *dc = 0;
+
+    assert!(3 * stride + 3 < dst.len());
+    for j in 0..4 {
+        for i in 0..4 {
+            // SAFETY: 3*stride+3 < dst.len() proven by the assert above.
+            unsafe {
+                let p = dst.as_mut_ptr().add(j * stride + i);
+                *p = P::from_i32((*p).to_i32() + val);
+            }
+        }
+    }
 }
 
 /// Like [`idct8x8_add`] but leaves `coeffs` unmodified. The in-place transform
