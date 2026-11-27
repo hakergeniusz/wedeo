@@ -1874,3 +1874,23 @@ already agree. The wrong MV is then the input to MC, so reconstruction/MC/
 deblock patches cannot fix it. This belongs to the CABAC workstream.
 
 Evidence: `/tmp/ai-agent/paffrecon_evidence.md` (ephemeral).
+
+---
+
+## Appendix V: MBAFF 8x8 intra above-left neighbor fix (commit 1f5a1fb, 2026-11-27)
+
+gdb on FFmpeg MB(4,1) of `HCAMFF1_HHI.264` measured 8x8 intra prediction sums
+5632/6656/6244/6464; Wedeo's values were all 64 higher (+1 per pixel). The
+cause was in `decode_intra8x8`: `has_above_left` used `mb_y - 1`, but in MBAFF
+field mode the previous field row is two frame MB rows up (FFmpeg
+`h264_mvpred.h:500`: `top_xy = mb_xy - (mb_stride << MB_FIELD)`). For a
+bottom-field MB in the first pair (mb_y=1) no above-left sample exists, yet
+Wedeo treated a fallback 128 as available, shifting `fl[0]` from 77 to 91 and
+DC prediction from 88 to 89. The +1 propagated through left neighbors to
+frame-mode MB(6,0), explaining the even-row exact / odd-row biased pattern.
+
+Fix: when `ctx.is_mbaff && ctx.mb_field`, use `mb_y - 2` with availability
+`mb_y >= 2`; otherwise keep `mb_y - 1`. Verified prediction sums now match
+FFmpeg exactly. With deblock off, frame 0 first diff moved (96,0) -> (288,128)
+and differing Y pixels fell 79944 -> 70275; with deblock on, (95,0) ->
+(36,30) and 80609 -> 71193. FRext stays 44/69 with no new timeouts.
