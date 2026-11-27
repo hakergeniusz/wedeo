@@ -239,3 +239,103 @@ exact vectors out of 226, with zero regressions. Earlier docs about NNZ
 context, loop-filter inputs and segmentation timing in these vectors are
 historical evidence of the same root cause and no longer describe current
 behaviour.
+
+---
+
+## Remaining 4 non-high-depth VP9 differences (2026-11-27)
+
+# VP9 remaining 8-bit differences: ground truth (2026-11-27)
+
+Worktree: `/home/hakergeniusz/.local/share/opencode/worktree/695063/vp9-remaining`
+Base: `d86b9d2` (clean; all experiments were reverted, no commit).
+Corpus: `/var/cache/zstd5/wedeo-ref/fate-suite/vp9-test-vectors/` (226 files).
+FFmpeg: `/var/cache/zstd5/ffmpeg-src-w62/ffmpeg_g`, run with
+`-threads 1 -loglevel error -bitexact -i FILE -f framecrc -`.
+Wedeo: release `wedeo-framecrc` built in
+`CARGO_TARGET_DIR=/var/cache/zstd5/wedeo-target-vp9-rem`.
+
+## Enumerated set (current HEAD, baseline binary)
+
+`214 exact, 4 diff, 8 high-depth zero-frame`:
+
+- `vp90-2-05-resize.ivf`: first CRC difference at frame 3.
+- `vp91-2-04-yuv422.webm`: first CRC difference at frame 1.
+- `vp91-2-04-yuv440.webm`: Wedeo 9 frames vs FFmpeg 10, first difference at frame 0.
+- `vp91-2-04-yuv444.webm`: first CRC difference at frame 1.
+
+## Experiment A: sticky colour config (measured, insufficient)
+
+GDB at `libavcodec/vp9.c:805` on all 11 headers of `vp91-2-04-yuv444.webm`
+prints `kf=1 ss=0,0 pixfmt=5 bd=8` for the keyframe and `kf=0 ss=0,0
+pixfmt=5 bd=8` for every subsequent header. FFmpeg only reads colour config
+for keyframes / intra-only frames (`vp9.c:580-610`); `s->ss_h`, `s->ss_v`,
+`s->bpp_index`, `s->pix_fmt` persist across ordinary inter frames.
+
+Wedeo `header.rs:640-644` defaults inter headers to 8-bit 4:2:0. Baseline
+`vp91-2-04-yuv444.webm` output sizes: frame 0 304128 bytes (correct 4:4:4),
+frames 1+ 152064 bytes (4:2:0), while FFmpeg emits 304128 for every frame.
+
+A patch added a sticky `(bit_depth, ss_x, ss_y)` to `Vp9Decoder`, updated it
+on keyframes / intra-only frames and restored it into inter headers, guarded
+by `output_pixel_format(...).is_some()` so 4:4:0 frames keep their old output
+count. Result: output sizes became correct for 4:2:2 and 4:4:4, no regression
+in the 226-vector sweep (`214 exact, 4 diff, 8 zero`), but **no CRC became
+exact**. Hypothesis "wrong output format is the only cause" is disproved.
+
+Raw YUV after experiment A (`--raw-yuv` in wedeo-framecrc, FFmpeg
+`-f rawvideo -pix_fmt yuv444p`), frame 1, 352x288:
+
+- Y plane: 0 differing pixels (bit-exact).
+- U plane: 81156 differing pixels, first at (x=32,y=0), Wedeo 0 / FFmpeg 135.
+- V plane: 81007 differing pixels, first at (x=32,y=0), Wedeo 0 / FFmpeg 124.
+- The first 32 columns of both chroma planes match; from x=32 onward Wedeo
+  is largely zero, so chroma reconstruction/writeback coverage is suspect.
+
+## Experiment B: chroma MV scaling (measured, disproved)
+
+FFmpeg GDB (`inter_pred_8bpp`, shown frame 1 = header index 3 in the
+breakpoint counter) first blocks:
+
+```text
+n=2 row=0 col=0 bs=6 mv=(32,-64)
+n=3 row=0 col=2 bs=7 mv=(0,-84)
+n=7 row=0 col=4 bs=5 mv=(18,-70)
+n=10 row=4 col=4 bs=8 mv=(16,-90)
+```
+
+FFmpeg C passes the luma MV directly to chroma MC when `ss_h == 0`
+(`vp9_mc_template.c:81`, `:122`, `:157`); there is no rescale.
+
+Temporary Wedeo `trace!(target: "vp9_mc", ...)` in `mc.rs::mc_chroma` for
+row=0, col=32 measured:
+
+```text
+mv=(22,-90) ss_h=false ss_v=false mx=44 my=-180
+mv=(6,-19)  ss_h=false ss_v=false mx=12 my=-38
+```
+
+i.e. Wedeo doubled the MV via `1 << !ss_h`. Removing that scaling and
+rebuilding produced **no CRC improvement**: frame 1 still first differs at
+U(32,0), Wedeo 0 / FFmpeg 135, with 83778 U and 83506 V differing pixels.
+Hypothesis B is disproved; the change was reverted.
+
+## State at handoff
+
+- No source changes remain; `git status --short` is empty; HEAD `d86b9d2`.
+- No commit was made and nothing was pushed.
+- `/var/cache/zstd5/wedeo-target-vp9-rem/release/wedeo-framecrc` still holds
+  the experiment-B binary; rebuild from the clean worktree before reuse.
+- Scripts/logs: `/tmp/ai-agent/vp9_rem_sweep.py`, `vp9-rem-verify.log`,
+  `vp9_rem_ff_hdr.out`, `vp9_rem_ff_chroma2.out`, `vp9_rem_w_mc_trace.log`,
+  `vp9_rem_w444_patched.yuv`, `vp9_rem_ff444_f01.yuv`,
+  `vp9_rem_w444_fix.yuv`.
+
+## Suggested next step (not attempted)
+
+For 4:4:4 (`ss_h=false, ss_v=false`), trace chroma reconstruction coverage
+in `recon.rs` (`uv_end_x`, `uv_end_y`, `uv_w4`, `uv_frame_w`, `uv_stride`) and
+compare the first 4x4 chroma write at pixel (32,0) against FFmpeg
+`vp9recon.c` / `vp9_mc_template.c`. The measured symptom is not the MV value:
+the whole chroma region from x=32 is left at zero while luma is already
+bit-exact. Do not patch `loopfilter.rs` or high-depth-format code on this
+evidence.
