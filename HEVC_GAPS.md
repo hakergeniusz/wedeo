@@ -119,3 +119,24 @@ blocked by cargo registry locks and concurrent rav1d/rav1e NASM scripts,
 exceeding the 20-minute budget. Probes were reverted; tree clean at d86b9d2.
 Next step: add Wedeo deblock/SAO traces at the CTB(5,0) boundaries and pair
 with the FFmpeg values above. Evidence: `/tmp/ai-agent/HEVC_D_GT.md`.
+
+## RESOLVED: CIP neighbour availability per PU (commit 39c6b34, 2026-11-27)
+
+On `CIP_A_Panasonic_3.bit` frame 1, both decoders reconstructed 128 and
+vertical deblock produced 123, but Wedeo's horizontal deblock at (80,64) made
+it 124 because the q-side samples differed. Tracing back to TU(64,64) 32x32
+intra planar: FFmpeg predicted 122/121/120/119 while Wedeo predicted 128
+because it treated all reference samples as unavailable.
+
+gdb values: FFmpeg `cip=1` with cand_up/left/up_right/bottom_left all 1;
+Wedeo's per-pixel AND check made all four false. FFmpeg
+`pred_template.c:167-207` samples every 2 pixels per PU and ORs the intra
+flags, including an `on_pu_edge` condition. Wedeo now follows that rule.
+
+Verified: target vector luma diffs 2353 -> 1867, total differing bytes
+3287 -> 2809, first diff moved from (80,61) to (72,62). Full 227-vector sweep
+unchanged at 9/227 with no new errors.
+
+Remaining: FFmpeg's CIP sample replacement macros (`EXTEND_LEFT_CIP`,
+`EXTEND_DOWN_CIP`, `EXTEND_UP_CIP`, `EXTEND_RIGHT_CIP`) are not implemented;
+reference samples still differ slightly (t15 114 vs 112, t31 128 vs 130).
