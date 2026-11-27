@@ -1,12 +1,12 @@
 # Wedeo measured status
 
-Snapshot at commit `d86b9d2` (2026-11-27). Counts are bit-exact framecrc matches
+Snapshot at commit `8e13c1e` (2026-11-27). Counts are bit-exact framecrc matches
 against FFmpeg unless an SNR is stated. Research appendices keep their original
 dates and commits; the numbers below are the current ones.
 
 | Area | Measured result | Details / gaps |
 |---|---|---|
-| H.264, four suites combined | **198/283** | [H264.md](H264.md) |
+| H.264, four suites combined | **199/283** | [H264.md](H264.md) |
 | FATE CAVLC | 50/52 | Two FMO vectors yield no frames in either decoder; [H264_FMO_NOTES.md](H264_FMO_NOTES.md) |
 | FATE CABAC | 27/27 | [H264.md](H264.md) |
 | JVT-AVC_V1 | 78/135 | [H264.md](H264.md) |

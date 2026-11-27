@@ -25,7 +25,7 @@ pixels.
 
 ## Overall parity
 
-Current at `d86b9d2`: 9/227 bit-exact vectors. The progression below is
+Current at `8e13c1e`: 9/227 bit-exact vectors. The progression below is
 recorded at the commits named in each step.
 
 Baseline at `f6d844c` was 3/227 bit-exact vectors: one real match,

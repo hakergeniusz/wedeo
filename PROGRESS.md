@@ -4,10 +4,10 @@
 
 See [STATUS.md](STATUS.md) for the compact measured-state table.
 
-- H.264, four suites: **198/283** vectors BITEXACT
+- H.264, four suites: **199/283** vectors BITEXACT
 - H.264 FATE CAVLC: **50/52** (two FMO vectors produce no frames in either decoder)
 - H.264 FATE CABAC: **27/27** progressive conformance files BITEXACT
-- H.264 JVT-AVC_V1: **78/135**; JVT-FR-EXT: **43/69**
+- H.264 JVT-AVC_V1: **78/135**; JVT-FR-EXT: **44/69**
 - H.264 interlaced: PAFF field pairing and field-view MC landed as a bounded step with documented trade-offs; full MBAFF/PAFF pixel parity remains open. See `PAFF_RESEARCH.md` Appendix Q.
 - VP9: **214/226** vectors BITEXACT (4 CRC differences, 8 high-depth zero-frame vectors)
 - HEVC, native port: **9/227** conformance vectors BITEXACT

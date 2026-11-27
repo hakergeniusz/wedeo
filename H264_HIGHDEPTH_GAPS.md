@@ -1,7 +1,7 @@
 # H.264 high-depth gaps
 
 The first section below is the historical ground truth recorded before the fix;
-the RESOLVED section at the end records the current state (FRext 43/69).
+the RESOLVED section at the end records the current state (FRext 44/69).
 
 ## FREH10: localized high-depth intra 4x4 reconstruction
 

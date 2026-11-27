@@ -45,7 +45,7 @@ silently wrong.
 
 ### Sweep status
 
-Current at `d86b9d2`: 226 local VP9 vectors, 214 bit-exact, 4 CRC differences,
+Current at `8e13c1e`: 226 local VP9 vectors, 214 bit-exact, 4 CRC differences,
 8 zero-frame vectors (the high-depth set). The earlier 211 bit-exact / 7 CRC
 baseline was recorded before the `d7ac5ba` clipped-NNZ edge-context fix. No
 regressions.

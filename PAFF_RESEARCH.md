@@ -7,8 +7,8 @@ Source: `/var/cache/zstd5/ffmpeg-src-w62/libavcodec/` (FFmpeg 8.0.git, commit `0
 Wedeo now pairs top/bottom fields and uses field-view MC as a bounded step
 (commit `e61b4af`, Appendix Q), with documented trade-offs. Full interlaced
 pixel parity is still open. Appendices before Q record the earlier state and
-the then-current FRext baseline of 42/69; current FRext parity is 43/69 and the
-four-suite total is 198/283. See `STATUS.md` for the compact snapshot.
+the then-current FRext baseline of 42/69; current FRext parity is 44/69 and the
+four-suite total is 199/283. See `STATUS.md` for the compact snapshot.
 
 ## CRITICAL CORRECTION TO THE INITIAL ASSUMPTION
 
@@ -1771,13 +1771,15 @@ and temporarily skipping high-depth reconstruction on bottom fields.
 Measured on Freh7_B.264: 105 output rows (baseline 205, FFmpeg 106). First 16
 luma rows: even-row differences 2344 -> 473, odd-row differences 2718 -> 2034.
 Full FRext: 42/69 MATCH at that commit, identical FAIL set to baseline, 0 ERROR
-and 0 timeouts (43/69 at HEAD after the high-depth IDCT fix).
+and 0 timeouts (43/69 after the high-depth IDCT fix, 44/69 at HEAD).
 
-Trade-offs explicitly retained for the next pass:
+Trade-offs originally retained for the next pass (the first two were later
+superseded by Appendices R and S):
 - Top-field first row is no longer byte-exact (about 50 +/-1 deblock differences)
-  because deblock now runs on paired frame rows.
+  because deblock now runs on paired frame rows. Fixed at `056ffec` (Appendix R).
 - High-depth bottom fields skip `post_decode_mb_hires`; those streams are not
-  bit-exact and this pass does not make them worse in the suite.
+  bit-exact and this pass does not make them worse in the suite. Removed at
+  `9636f08` (Appendix S).
 - `mark_complete()` on pairing is a deliberate guard against self-reference
   waits; a proper per-field row-progress model should replace it.
 
@@ -1817,5 +1819,6 @@ and a skipped `wait_for_row()` for same-picture field references (no
 Verified no hang on `Hi422FREXT16` and `Hi422FREXT18` with 30 s timeouts.
 `Hi422FREXT16` luma absolute error fell from 1.7353e9 to 1.6780e9 and differing
 pixels from 5,218,985 to 5,145,856; U/V diffs also fell about 1.6%. Four-suite
-baseline stays 198/283 with identical pass sets and no new timeouts or errors.
+baseline stays 198/283 with identical pass sets and no new timeouts or errors
+(199/283 at HEAD after `b46b0fc`).
 The vector is still not frame-exact; remaining error is from other stages.

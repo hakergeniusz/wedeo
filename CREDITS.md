@@ -52,17 +52,26 @@ algorithms and implementations are essential to the rewrite.
 | [rav1d](https://github.com/memorysafety/rav1d) (git, commit `9d78516`) | AV1 decoding; pure-Rust port of dav1d | BSD-2-Clause | `adapters/wedeo-rav1d`. Its `COPYING` credits VideoLAN, the dav1d authors and the Internet Security Research Group; retain that notice in distributions |
 | [av-bitstream](https://github.com/rust-av/rust-av) 0.2.1 | Exp-Golomb / bit-reader primitives (Luca Barbato, rust-av) | MIT | `crates/wedeo-codec/src/bitstream.rs` |
 | [aligned-vec](https://github.com/sarah-ek/aligned-vec/) 0.6.4 | Aligned picture/sample buffers (`AVec`) | MIT | `crates/wedeo-core` |
+| [bytemuck](https://github.com/Lokathor/bytemuck) 1.25.0 | `Pod` casts for VP9 reconstruction buffers (`cast_slice`, `cast_slice_mut`) | Zlib OR Apache-2.0 OR MIT | `codecs/wedeo-codec-vp9` (dependency only) |
 | [rav1e](https://github.com/xiph/rav1e/) 0.8 | AV1 encoding | BSD-2-Clause | `adapters/wedeo-rav1e` |
 | [Rusopus / opus-decoder](https://github.com/TadeuszWolfGang/Rusopus) 0.1.1 | Opus decoding | MIT OR Apache-2.0 | `adapters/wedeo-symphonia/src/opus.rs` |
 | [rubato](https://github.com/HEnquist/rubato) 1.0.1 | Audio resampling | MIT | `crates/wedeo-resample` |
+| [audioadapter-buffers](https://crates.io/crates/audioadapter-buffers) 2.0.0 | `InterleavedSlice` sample-buffer abstraction used by the resampler | MIT | `crates/wedeo-resample` (dependency only) |
 | [dcv-color-primitives](https://github.com/aws/dcv-color-primitives) 1.0.0 | I420/NV12 to RGB pixel conversion | MIT-0 | `crates/wedeo-scale` |
 | [adler2](https://github.com/oyvindln/adler2) 2.0.1 | FFmpeg-style non-standard Adler-32 in framecrc | 0BSD OR MIT OR Apache-2.0 | `tests/fate` harness |
 | [md-5](https://github.com/RustCrypto/hashes) 0.10.6 | MD5 for conformance vectors | MIT OR Apache-2.0 | `tests/fate` harness |
-| [bitflags](https://github.com/bitflags/bitflags) 2, [inventory](https://github.com/dtolnay/inventory) 0.3, [tracing](https://github.com/tokio-rs/tracing) 0.1 / `tracing-subscriber` 0.3 | Flags, registry and diagnostics | MIT or MIT OR Apache-2.0 | workspace-wide |
+| [bitflags](https://github.com/bitflags/bitflags) 2.11.0 | Flags | MIT OR Apache-2.0 | workspace-wide |
+| [inventory](https://github.com/dtolnay/inventory) 0.3.22 | Codec/format registry | MIT OR Apache-2.0 | workspace-wide |
+| [tracing](https://github.com/tokio-rs/tracing) 0.1.44 / `tracing-subscriber` 0.3.23 | Diagnostics | MIT | workspace-wide |
 
-Platform/utility crates (`cpal`, `wgpu`, `winit`, `pollster`, `ringbuf`,
-`cc`, `libc`, `divan`) are used by the player, CLI and build harness; their
-licenses are recorded in `Cargo.lock` and in each crate's published manifest.
+Platform/utility crates (`cpal` 0.17.3, Apache-2.0; `wgpu` 29.0.1, MIT OR
+Apache-2.0; `winit` 0.30.13, Apache-2.0; `pollster` 0.4.0, Apache-2.0/MIT;
+`ringbuf` 0.5.3, MIT OR Apache-2.0; `cc` 1.2.57, MIT OR Apache-2.0; `libc`
+0.2.183, MIT OR Apache-2.0; `divan` 0.1.21, MIT OR Apache-2.0) are used by the
+player, CLI and build harness. `minifb` 0.28 is declared in the workspace but
+is not resolved in `Cargo.lock` and is not compiled by any current target.
+`Cargo.lock` has no license field; the licenses above come from each crate's
+published manifest.
 
 ## Upstream Wedeo project
 

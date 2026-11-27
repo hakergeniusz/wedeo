@@ -51,7 +51,7 @@ cause:
 Do not patch either on hypothesis alone. The next pass must reproduce the hang
 with a trace, confirm which wait never returns, then add a bounded wait or
 panic-safe result delivery and verify zero frames plus a fast exit, with no new
-timeouts in the four-suite baseline (198/283 at HEAD).
+timeouts in the four-suite baseline (199/283 at HEAD).
 
 ## Resolution
 
@@ -81,7 +81,7 @@ Two verified changes:
 
 Measured after the fix: FM1_BT_B exits in ~0.08 s with zero framecrc frames
 (FFmpeg: zero frames), and the four-suite baseline was 197/283 at that commit
-with no new timeouts (198/283 at HEAD after the high-depth IDCT fix).
+with no new timeouts (199/283 at HEAD after the later high-depth fixes).
 
 Full source excerpts, the seven map types and the raster-remap rules are in
 `/tmp/ai-agent/H264_FMO_GT.md` (ephemeral; regenerate if needed).
