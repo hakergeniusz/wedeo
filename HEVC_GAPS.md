@@ -28,7 +28,7 @@ Baseline at `f6d844c` was 3/227 bit-exact vectors: one real match,
 `cbf_cr_cb_TUDepth_4_circle.h265`, and two trivial 384-byte constant
 frame-packing vectors. The PCM fix does not change that count because its
 target vector still has chroma differences. A full 227-vector framecrc sweep
-after the fix was started to confirm no regressions.
+after the fix completed: 3/227 MATCH, 222 FAIL, 2 ERROR (both vectors where neither decoder emits frames), so there was no regression.
 
 `wedeo-framecrc` links only the native decoder (priority 100), not the
 `oxideav` adapter, so HEVC parity numbers describe the native port.
@@ -37,7 +37,9 @@ after the fix was started to confirm no regressions.
 
 - Chroma difference at Cb x=160, y=0 in `ipcm_B_NEC_2.bit` after correct PCM
   sample reads. Extract the sample source with gdb before changing code.
-- `cbf_cr_cb_TUDepth_4_circle.h265`: Cr still differs by 2 after the committed
-  cross-component prediction gate fix. Use the bin trace in
-  `HEVC_BINTRACE_GROUND_TRUTH.md` (currently in /tmp, regenerate if missing).
+- `cbf_cr_cb_TUDepth_4_circle.h265` is already fully bit-exact at HEAD: Y 0,
+  Cb 0 and Cr 0 differing bytes, framecrc `0x0127a0d9` on both decoders. Older
+  notes claiming a residual +2 Cr offset were stale; `1973a7d` (cross-component
+  prediction gate plus no Cb-to-Cr SAO copy) already fixed it. Do not spend
+  another pass on that vector.
 - Do not reapply the odd-pointer CABAC init experiment; it made parity worse.

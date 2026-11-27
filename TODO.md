@@ -18,7 +18,7 @@
 
 ### Video codecs (native Rust, no existing crate covers these)
 - [x] **H.264 decoder** — 77/77 decodable progressive BITEXACT (50 CAVLC + 27 CABAC; two FMO CAVLC vectors produce no frames in either decoder), 42/69 JVT FRext. See `H264.md` for detailed status.
-  - [ ] FMO (Flexible Macroblock Ordering) — out of scope, rarely used
+  - [ ] FMO (Flexible Macroblock Ordering) - do not implement: FFmpeg w62 rejects it with Patchwelcome and emits zero frames, while Wedeo already rejects it with the same effect. Measured evidence in `H264_FMO_NOTES.md`. The real gap is the FM1_BT_B failure-path timeout, likely an unbounded `wait_for_row()` Condvar or panic-unsafe thread-pool join; needs reproduction before patching.
   - [ ] Interlaced (MBAFF/PAFF) — field-aware DPB metadata (`ref_mask`, `field_poc`) and field-aware ref-list construction are in place (parity-carrying `RefListEntry` / `RefPic`), but field pairing, field MB addressing, and field-view MC are not enabled: PAFF vectors still emit 2x frames (e.g. FREXT16-19: 10 frames vs FFmpeg 5) and must be decoded with frame-only paths. MBAFF pixel reconstruction partial. See `PAFF_RESEARCH.md`, especially Appendix L: the first measured bottom-field divergence is in the CABAC bin sequence before the mvd, not in MV prediction.
   - [ ] 10-bit / 4:2:2 — progressive 4:2:2 8/10-bit and Hi422FR1-4,6-9,10-15 are BITEXACT; remaining 10-bit 4:2:0 (FREH10) and interlaced vectors have MC/residual or field-handling diffs
 - [x] **AV1 decoder via rav1d** — `adapters/wedeo-rav1d/` wraps rav1d behind wedeo `Decoder` trait.
