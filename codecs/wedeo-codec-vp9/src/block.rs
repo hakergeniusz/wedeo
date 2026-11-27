@@ -2155,7 +2155,11 @@ fn merge_ctx(ctx: &mut [u8], end: usize, step: usize) {
         let v = if n + step <= ctx.len() {
             ctx[n..n + step].iter().any(|&x| x != 0) as u8
         } else {
-            ctx.get(n).copied().unwrap_or(0)
+            // FFmpeg's MERGE reads a full `step`-wide word from the backing
+            // NNZ array even when the block is clipped at the frame edge.
+            // Our local copy is clipped to `end`, so OR whatever entries are
+            // present instead of keeping only the first one.
+            ctx[n..].iter().any(|&x| x != 0) as u8
         };
         if n < ctx.len() {
             ctx[n] = v;
