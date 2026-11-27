@@ -51,3 +51,19 @@ dumping the prediction before IDCT and the 16 dequantized coefficients before
 `codecs/wedeo-codec-h264/src/hires.rs::decode_intra4x4_hires` for the same
 block to print u16 prediction, coefficients and post-IDCT rows. Patch only the
 kernel that actually diverges, then verify all 20 frames and FRext >= 42/69.
+
+---
+
+## RESOLVED: high-depth 4x4 IDCT overflow (commit 4a0c0ea, 2026-11-27)
+
+Measured at MB(37,60) block 7 of FREH10-1: u16 4x4 prediction and dequantized
+coefficients match FFmpeg exactly, so both were exonerated. The divergence is
+after the IDCT: FFmpeg produces 468/994/1011/540 in column 3 while Wedeo's
+column was all zero. FFmpeg compiles `h264idct_template.c` with
+`dctcoef = int32_t` for BIT_DEPTH > 8; Wedeo reused the i16 butterfly and
+truncated a first-pass value of 44800, zeroing the whole column.
+
+`idct.rs` now uses i32 intermediates for u16 4x4 IDCT and DC-only add; the 8-bit
+path is unchanged. Verified FREH10-1 is 360/360 frames bit-exact, FREH10-2
+differences fell from 160 to 13 frames (a separate issue), and FRext rose from
+42/69 to 43/69 with zero errors and no new timeouts.
