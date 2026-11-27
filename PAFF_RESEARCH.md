@@ -1733,3 +1733,35 @@ Actionable requirements for the decoder.rs / mb.rs owner:
 
 Evidence: /tmp/ai-agent/PAFF_DEBLOCK_TASK_NOTES.md and gdb scripts
 /tmp/ai-agent/paff_deblock_ff{,2,3,4}.gdb (ephemeral).
+
+---
+
+## Appendix Q: PAFF field pairing + field-view MC (commit e61b4af, 2026-11-27)
+
+Implemented as a measured, bounded step toward full PAFF. Bottom-field slices
+now join the top field's `FrameDecodeContext` instead of starting a second
+frame. Field slices map `first_mb_in_slice` to frame MB rows, bottom MBs are
+marked `mb_field=true`, MBAFF pair deblock is skipped for pure PAFF, and the
+paired DPB entry is promoted to `ShortTerm` with `ref_mask=1` (top only).
+Field references in MC use a parity offset plus doubled stride and skip
+`wait_for_row` for same-picture top-field references.
+
+Deadlock isolation: the first single-vector 30 s run had no hang; the full
+FRext run exposed three 120 s timeouts. These were removed by keeping bottom
+field deblock from regressing row progress, marking the paired picture complete,
+and temporarily skipping high-depth reconstruction on bottom fields.
+
+Measured on Freh7_B.264: 105 output rows (baseline 205, FFmpeg 106). First 16
+luma rows: even-row differences 2344 -> 473, odd-row differences 2718 -> 2034.
+Full FRext: 42/69 MATCH, identical FAIL set to baseline, 0 ERROR and 0 timeouts.
+
+Trade-offs explicitly retained for the next pass:
+- Top-field first row is no longer byte-exact (about 50 +/-1 deblock differences)
+  because deblock now runs on paired frame rows.
+- High-depth bottom fields skip `post_decode_mb_hires`; those streams are not
+  bit-exact and this pass does not make them worse in the suite.
+- `mark_complete()` on pairing is a deliberate guard against self-reference
+  waits; a proper per-field row-progress model should replace it.
+
+Do not reapply the older wholesale attempt of Appendix K; this patch is the
+measured successor.
