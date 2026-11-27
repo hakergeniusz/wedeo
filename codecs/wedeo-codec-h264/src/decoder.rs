@@ -2155,6 +2155,7 @@ impl H264Decoder {
                     fdc.direct_8x8_inference_flag,
                     fdc.decode_chroma,
                     hdr.field_pic_flag, // pure PAFF: every MB is field-coded
+                    false,              // pure PAFF: no MBAFF frame pairs
                     sps.chroma_format_idc,
                     &nb,
                 )?;
@@ -2499,6 +2500,7 @@ impl H264Decoder {
                     fdc.direct_8x8_inference_flag,
                     fdc.decode_chroma,
                     mb_field_decoding_flag,
+                    true, // MBAFF frame: pairs of field/frame MBs
                     sps.chroma_format_idc,
                     &nb,
                 )?;

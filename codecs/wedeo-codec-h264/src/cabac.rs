@@ -2062,16 +2062,19 @@ pub fn decode_mb_cabac(
     direct_8x8_inference_flag: bool,
     decode_chroma: bool,
     mb_field: bool,
+    // MBAFF frame flag (FFmpeg `h->mb_mbaff`). Only this doubles the effective
+    // reference count (FFmpeg `rc = ref_count[list] << MB_MBAFF(sl)`).
+    // Pure PAFF field pictures have `mb_field = 1` but `mb_mbaff = 0`.
+    mb_mbaff: bool,
     chroma_format_idc: u8,
     nb: &crate::mb::MbaffNeighbors,
 ) -> Result<Macroblock> {
     let mut mb = Macroblock::default();
     // FFmpeg h264_cabac.c: `unsigned rc = sl->ref_count[list] << MB_MBAFF(sl)`.
-    // Field-coded MBAFF MBs address top/bottom field references separately,
-    // so the effective ref count doubles and a ref_idx bin must be decoded
-    // even when the slice has a single frame reference.
-    let ref_count_l0 = num_ref_idx_l0_active << u32::from(mb_field);
-    let ref_count_l1 = num_ref_idx_l1_active << u32::from(mb_field);
+    // Only MBAFF frames double the effective reference count; pure PAFF field
+    // pictures keep `mb_mbaff = 0` even though `mb_field = 1`.
+    let ref_count_l0 = num_ref_idx_l0_active << u32::from(mb_mbaff);
+    let ref_count_l1 = num_ref_idx_l1_active << u32::from(mb_mbaff);
     let _mb_idx = (mb_y * mb_width + mb_x) as usize;
     let nb_left = nb.left_idx;
     let nb_left_bot = nb.left_idx_bot;
