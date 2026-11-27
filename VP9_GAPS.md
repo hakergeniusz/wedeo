@@ -378,3 +378,19 @@ Added `PixelFormat::Yuv440p` and the mapping, plus framecrc chroma geometry
 CRC exact (`0x4a56762b`), all luma bytes exact, full sweep unchanged at
 215/226 with no new failures. Remaining inter-frame chroma differences are a
 separate root cause (suspected sub-8x8 chroma MV under mixed subsampling).
+
+---
+
+## Stage 3 complete: u16 MC (commit 366b35a, 2026-11-27)
+
+`mc.rs` now has a `McSample` trait: 8-bit keeps the original SIMD dispatch,
+10/12-bit uses scalar 8tap/avg kernels with i32 intermediates clipped to
+`(1<<bit_depth)-1`. `mc_luma`, `mc_chroma`, `mc_apply` and `emu_edge` are generic
+over u8/u16 with bit depth from frame config. Seven new tests use golden values
+from a direct copy of FFmpeg's `vp9dsp_template.c` reference program (the first
+version of that program mistakenly applied the -3 offset twice, making the Rust
+code look wrong; after correction they matched exactly).
+
+Verified: 8-bit sweep unchanged at 215/226 with identical match names, 1226
+workspace tests pass. The 8-bit gate remains; stage 4 (u16 loop filter with
+bit-depth-scaled thresholds, then gate removal) is still open.
