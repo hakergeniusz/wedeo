@@ -28,11 +28,11 @@
   - [x] VP9 inter prediction — MV parsing/prediction (spatial+temporal), 8-tap subpel MC, compound prediction, reference frame management. 21 bugs fixed 2026-04-03.
   - [x] VP9 keyframe pixel conformance — 64/64 standard-size keyframes match FFmpeg bit-for-bit
   - [x] VP9 inter-frame bool decoder parity — symbol counts verified identical to FFmpeg (927 blocks). 4 bugs fixed: mode ctx indexing (1-per-8×8 vs 2-per-8×8), end_x_y edge clamping, MV clamping bounds, MC emu_edge offset (2026-04-05).
-  - [ ] VP9 inter frame pixel conformance — 211/226 vectors BITEXACT. Remaining 8-bit failures include `210x202` and `segkey_adpq`; the other 11 are 10/12-bit or 4:2:2/4:4:4. No vectors panic today.
+  - [ ] VP9 inter frame pixel conformance — 211/226 vectors BITEXACT, 7 CRC differences, 8 zero-frame high-depth vectors. Remaining 8-bit failures include `210x202` and `segkey_adpq`. No vectors panic today.
   - [x] VP9 odd-size OOB panics — the 74 historical `intra_pred.rs` panics no longer reproduce; odd-size vectors decode with correct geometry.
   - [ ] VP9 probability adaptation — `adapt_probs` not yet wired up after each frame decode
   - [ ] VP9 scaled prediction — silently skipped when ref/current dimensions differ
-  - [ ] VP9 10/12-bit support
+  - [ ] VP9 10/12-bit support — blocked by a deliberate early return in `decoder.rs`; the whole sample path is `u8`-only. Measured root cause and FFmpeg ground truth in `VP9_GAPS.md`.
   - [ ] VP9 superframe parsing
 - [x] **HEVC decoder and encoder** - `adapters/wedeo-h265-oxideav` wraps pure-Rust `oxideav-h265` (MIT): full decode and I/P/B encode registered as `hevc_oxideav`. MP4 (hvcC + length-prefixed samples) and MPEG-TS (Annex B) output verified against FFmpeg. The native HEVC port remains partial.
   - [ ] VP9 8-bit odd-size - `vp90-2-03-size-210x202.webm`: frame 0 exact, frame 1 first inter divergence at Y(157,203) (154 vs 155). MV/mode/MC bytes/loop-filter levels and masks all match; FFmpeg changes the pixel in `filter_plane_rows`, Wedeo does not. Isolation points to the horizontal loop filter (`loopfilter.rs:557-646`) but p7 differs by 3 (152 vs ~155), suggesting an earlier row-filter pass divergence. Ground truth: `/tmp/ai-agent/VP9_TRIAGE.md`.
