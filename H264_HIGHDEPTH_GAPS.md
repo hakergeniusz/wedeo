@@ -101,3 +101,15 @@ dequantized coefficients reaching 34496. `cavlc.rs`, `dequant.rs`, `hires.rs`,
 `idct.rs` and `mb.rs` now keep high-depth coefficients at i32 precision end to
 end. Verified FREH10-2 358/358 frames bit-exact, FREH10-1 stays 360/360, and
 FRext rose from 43/69 to 44/69 with zero errors and no new timeouts.
+
+---
+
+## 4:2:2 regression verification (2026-11-27, no change needed)
+
+At HEAD `8e13c1e`, all 14 vectors claimed bit-exact were re-verified with
+`ffmpeg_g -v error -threads 1 -bitexact -f framecrc -`, 5/5 frames each:
+8-bit 4:2:2 Hi422FR1-4 and FR10-12, 10-bit 4:2:2 Hi422FR6-9 and FR13-15.
+The three 8-bit TANDBERG 4:2:2 vectors (FREXT1/2/3_TANDBERG_A) also matched.
+Hi422FREXT16-19 remain DIFF as expected (interlaced, known open issue).
+FRext suite 44/69 with zero errors and zero timeouts. The i32 precision fixes
+(4a0c0ea, b46b0fc) caused no regression in 4:2:2.
