@@ -56,6 +56,12 @@ pub struct RefFrame {
     pub width: u32,
     /// Frame height in pixels.
     pub height: u32,
+    /// Sample bit depth of the stored frame (8, 10 or 12).
+    pub bit_depth: u8,
+    /// Horizontal chroma subsampling (`s->ss_h` in FFmpeg).
+    pub subsampling_x: bool,
+    /// Vertical chroma subsampling (`s->ss_v` in FFmpeg).
+    pub subsampling_y: bool,
     /// Columns in 4×4 units (`ceil(width / 4)`).
     pub cols_4x4: usize,
     /// Rows in 4×4 units (`ceil(height / 4)`).

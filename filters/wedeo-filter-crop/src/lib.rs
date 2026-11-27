@@ -120,6 +120,16 @@ fn format_info(format: PixelFormat) -> FormatInfo {
         PixelFormat::Yuv444p10le | PixelFormat::Yuv444p10be => {
             FormatInfo::new(0, 0, [2, 2, 2, 0], false)
         }
+        // 12-bit planar variants (VP9 profiles 2/3).
+        PixelFormat::Yuv420p12le | PixelFormat::Yuv420p12be => {
+            FormatInfo::new(1, 1, [2, 2, 2, 0], false)
+        }
+        PixelFormat::Yuv422p12le | PixelFormat::Yuv422p12be => {
+            FormatInfo::new(1, 0, [2, 2, 2, 0], false)
+        }
+        PixelFormat::Yuv444p12le | PixelFormat::Yuv444p12be => {
+            FormatInfo::new(0, 0, [2, 2, 2, 0], false)
+        }
         PixelFormat::None => FormatInfo::new(0, 0, [0, 0, 0, 0], false),
     }
 }

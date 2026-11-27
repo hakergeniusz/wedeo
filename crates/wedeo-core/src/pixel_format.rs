@@ -34,18 +34,41 @@ pub enum PixelFormat {
     Yuv420p16be = 56,
     Rgb48be = 41,
     Rgb48le = 42,
+    // The discriminants below are the numeric AVPixelFormat values from
+    // FFmpeg's libavutil/pixfmt.h, so they can be compared with FFmpeg
+    // output directly.
     /// planar YUV 4:2:2, 20bpp, (1 Cr & Cb sample per 2x1 Y samples), little-endian.
     /// Matches FFmpeg's `AV_PIX_FMT_YUV422P10LE` (libavutil/pixfmt.h).
-    Yuv422p10le = 71,
+    Yuv422p10le = 64,
     /// planar YUV 4:2:2, 20bpp, (1 Cr & Cb sample per 2x1 Y samples), big-endian.
-    Yuv422p10be = 72,
+    Yuv422p10be = 63,
     /// planar YUV 4:4:4, 30bpp, 10-bit per component, little-endian.
     /// Matches FFmpeg's `AV_PIX_FMT_YUV444P10LE`.
-    Yuv444p10le = 73,
+    Yuv444p10le = 68,
     /// planar YUV 4:4:4, 30bpp, 10-bit per component, big-endian.
-    Yuv444p10be = 74,
-    Yuv420p10le = 90,
-    Yuv420p10be = 91,
+    Yuv444p10be = 67,
+    /// planar YUV 4:2:0, 15bpp, 10-bit per component, little-endian.
+    Yuv420p10le = 62,
+    /// planar YUV 4:2:0, 15bpp, 10-bit per component, big-endian.
+    Yuv420p10be = 61,
+    /// planar YUV 4:2:0, 18bpp, 12-bit per component, little-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV420P12LE`.
+    Yuv420p12le = 123,
+    /// planar YUV 4:2:0, 18bpp, 12-bit per component, big-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV420P12BE`.
+    Yuv420p12be = 122,
+    /// planar YUV 4:2:2, 24bpp, 12-bit per component, little-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV422P12LE`.
+    Yuv422p12le = 127,
+    /// planar YUV 4:2:2, 24bpp, 12-bit per component, big-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV422P12BE`.
+    Yuv422p12be = 126,
+    /// planar YUV 4:4:4, 36bpp, 12-bit per component, little-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV444P12LE`.
+    Yuv444p12le = 131,
+    /// planar YUV 4:4:4, 36bpp, 12-bit per component, big-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV444P12BE`.
+    Yuv444p12be = 130,
 }
 
 impl PixelFormat {
@@ -86,6 +109,12 @@ impl PixelFormat {
             PixelFormat::Yuv444p10be => "yuv444p10be",
             PixelFormat::Yuv420p10le => "yuv420p10le",
             PixelFormat::Yuv420p10be => "yuv420p10be",
+            PixelFormat::Yuv420p12le => "yuv420p12le",
+            PixelFormat::Yuv420p12be => "yuv420p12be",
+            PixelFormat::Yuv422p12le => "yuv422p12le",
+            PixelFormat::Yuv422p12be => "yuv422p12be",
+            PixelFormat::Yuv444p12le => "yuv444p12le",
+            PixelFormat::Yuv444p12be => "yuv444p12be",
         }
     }
 }

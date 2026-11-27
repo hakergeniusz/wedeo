@@ -103,6 +103,10 @@ fn plane_layout(format: PixelFormat) -> Result<PlaneLayout> {
         // 10-bit 4:2:2/4:4:4 (H.264 FRext).
         PixelFormat::Yuv422p10le | PixelFormat::Yuv422p10be => (1, 0, [2, 2, 2, 0], 3),
         PixelFormat::Yuv444p10le | PixelFormat::Yuv444p10be => (0, 0, [2, 2, 2, 0], 3),
+        // 12-bit planar variants (VP9 profiles 2/3).
+        PixelFormat::Yuv420p12le | PixelFormat::Yuv420p12be => (1, 1, [2, 2, 2, 0], 3),
+        PixelFormat::Yuv422p12le | PixelFormat::Yuv422p12be => (1, 0, [2, 2, 2, 0], 3),
+        PixelFormat::Yuv444p12le | PixelFormat::Yuv444p12be => (0, 0, [2, 2, 2, 0], 3),
         _ => return Err(Error::InvalidArgument),
     };
 
