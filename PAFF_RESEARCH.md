@@ -1822,3 +1822,25 @@ pixels from 5,218,985 to 5,145,856; U/V diffs also fell about 1.6%. Four-suite
 baseline stays 198/283 with identical pass sets and no new timeouts or errors
 (199/283 at HEAD after `b46b0fc`).
 The vector is still not frame-exact; remaining error is from other stages.
+
+---
+
+## Appendix T: MBAFF CABAC exonerated at current HEAD (2026-11-27)
+
+Measured on `HCAMFF1_HHI.264` at HEAD `8e13c1e`. The earlier Appendix M
+divergence (FFmpeg sub-MB modes 1,9,1,4 vs Wedeo 8,2,2,2) was from the old
+`5e47eb4` baseline and was resolved by subsequent CABAC fixes, including the
+mb_mbaff ref-count fix. The pixel divergence remains: first luma diff x=95,
+y=0 with 80,609 differing Y pixels.
+
+gdb on FFmpeg `ff_h264_decode_mb_cabac` gated on MB(3,0) captured 1400
+contextual CABAC bins; Wedeo temporary tracing recorded ctx, bin, low and
+range for each. After alignment, 1399 consecutive contextual bins matched in
+ctx, bin and range from MB(3,0) through MB(10,0), including MB(6,0) where the
+pixel divergence starts. MB(3,1) intra4x4 bins also matched with identical
+decoded modes.
+
+Conclusion: CABAC entropy decoding and context derivation are no longer the
+cause. The remaining divergence is downstream in reconstruction (coefficient
+placement, prediction or field deblock). Do not repeat a CABAC-bin search on
+this vector. Evidence: `/tmp/ai-agent/mbaff_paff_evidence.md` (ephemeral).
