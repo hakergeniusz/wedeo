@@ -1844,3 +1844,33 @@ Conclusion: CABAC entropy decoding and context derivation are no longer the
 cause. The remaining divergence is downstream in reconstruction (coefficient
 placement, prediction or field deblock). Do not repeat a CABAC-bin search on
 this vector. Evidence: `/tmp/ai-agent/mbaff_paff_evidence.md` (ephemeral).
+
+---
+
+## Appendix U: PAFF bottom MB mvd divergence on HCAFF1_HHI (2026-11-27)
+
+Vector `HCAFF1_HHI.264` (352x288, yuv420p, 10 frames, PAFF+frame mixed).
+Even rows of frame 0 match byte-for-byte; odd rows differ by about 300 pixels
+each (95023 Y diffs total), first at Y(14,1) FFmpeg 88 / Wedeo 89. With
+deblocking disabled on both decoders the odd rows still differ by 94586
+pixels and the first diff moves to (16,1) FFmpeg 92 / Wedeo 105, so deblocking
+only propagates an upstream error.
+
+First inconsistent MB is bottom MB(1,1). Syntax parses identically on both
+sides: `mb_type=P_L0_16x16`, qp=31, cbp=0, ref_count[0]=1, mb_skip_flag=0,
+reference is the top field (ref_mask=1, linesize=704, offset 0). Paired
+ground truth:
+
+| Quantity | FFmpeg | Wedeo |
+|---|---|---|
+| MB(0,1) mb_type / mvd | 12432 (16x8|L0) / [38,3], [1,0] | 1 (16x8) / [38,3], [1,0] |
+| MB(1,1) MV predictor | [38,3] | [38,3] |
+| MB(1,1) mvd | [1,0] | [1,-2] |
+| MB(1,1) final MV | [39,3] | [39,1] |
+
+The first measurable divergence is one CABAC `mvd_y` bin in the second bottom
+MB. MB type, CBP, skip flag, reference selection and mvd prediction context
+already agree. The wrong MV is then the input to MC, so reconstruction/MC/
+deblock patches cannot fix it. This belongs to the CABAC workstream.
+
+Evidence: `/tmp/ai-agent/paffrecon_evidence.md` (ephemeral).
