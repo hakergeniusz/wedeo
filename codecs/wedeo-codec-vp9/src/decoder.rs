@@ -74,6 +74,10 @@ pub struct Vp9Decoder {
     prev_seg: SegmentationParams,
     /// Persistent loop-filter ref/mode deltas (`s->s.h.lf_delta` in FFmpeg).
     prev_lf_delta: ([i8; 4], [i8; 2]),
+    /// Persistent colour configuration (bit depth and subsampling flags).
+    /// FFmpeg vp9.c:580-610 reads it only for keyframes / intra-only frames;
+    /// ordinary inter frames inherit `s->bpp_index`, `s->ss_h` and `s->ss_v`.
+    prev_color_config: (u8, bool, bool),
 }
 
 impl Vp9Decoder {
@@ -105,11 +109,25 @@ impl Vp9Decoder {
             last_height: 0,
             prev_seg: SegmentationParams::default(),
             prev_lf_delta: ([1, 0, -1, -1], [0, 0]),
+            prev_color_config: (8, true, true),
         })
     }
 
     /// Decode one VP9 frame from `data` and push the result to `output_queue`.
     fn decode_frame(&mut self, data: &[u8], pts: i64) -> Result<()> {
+        // Restore the sticky colour configuration into the header. FFmpeg
+        // vp9.c:580-610 only reads colour config for keyframes / intra-only
+        // frames; ordinary inter frames keep `s->bpp_index`, `s->ss_h` and
+        // `s->ss_v`. Keep the 8-bit 4:2:0 default for formats that have no
+        // output pixel format here (e.g. 4:4:0), so those frames retain
+        // their existing output count.
+        let (bit_depth, subsampling_x, subsampling_y) = self.prev_color_config;
+        let prev_color = if output_pixel_format(bit_depth, subsampling_x, subsampling_y).is_some() {
+            self.prev_color_config
+        } else {
+            (8, true, true)
+        };
+
         // --- 1. Parse frame header ---
         let (header, _hdr_bytes) = decode_frame_header(
             data,
@@ -117,6 +135,7 @@ impl Vp9Decoder {
             &self.coef_ctx,
             &self.prev_seg,
             self.prev_lf_delta,
+            prev_color,
             |i| {
                 self.ref_store.slots[i]
                     .as_ref()
@@ -532,6 +551,11 @@ impl Vp9Decoder {
         // keeps `s->s.h.segmentation` across frames (vp9.c:724-746).
         self.prev_seg = header.segmentation.clone();
         self.prev_lf_delta = (header.ref_deltas, header.mode_deltas);
+        // FFmpeg vp9.c:580-610 only updates colour config state on
+        // keyframes / intra-only frames.
+        if is_kf {
+            self.prev_color_config = (header.bit_depth, header.subsampling_x, header.subsampling_y);
+        }
 
         // --- 7. Build output Frame (only if show_frame is set) ---
         if header.show_frame {

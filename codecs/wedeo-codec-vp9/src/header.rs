@@ -519,12 +519,17 @@ fn get_sbits_inv(gb: &mut GetBits<'_>, n: usize) -> Result<i8> {
 ///
 /// Returns the parsed `FrameHeader` and the byte offset in `data` where the
 /// tile bitstream begins (i.e. after the compressed header).
+///
+/// `prev_color` is the sticky colour configuration (bit depth and subsampling
+/// flags) from decoder state. FFmpeg vp9.c:580-610 reads a colour config only
+/// for keyframes / intra-only frames; ordinary inter frames inherit it.
 pub fn decode_frame_header<F>(
     data: &[u8],
     prob_ctx: &[ProbContext; 4],
     coef_ctx: &[CoefProbArray; 4],
     prev_seg: &SegmentationParams,
     prev_lf_delta: ([i8; 4], [i8; 2]),
+    prev_color: (u8, bool, bool),
     ref_dims: F,
 ) -> Result<(FrameHeader, usize)>
 where
@@ -637,11 +642,14 @@ where
     // on every frame and break vectors that only signal features once.
     let mut seg = prev_seg.clone();
 
-    let mut bit_depth = 8u8;
+    // FFmpeg vp9.c:580-610 reads colour config only for keyframes /
+    // intra-only frames. Ordinary inter frames inherit the decoder's sticky
+    // `bpp_index`, `ss_h` and `ss_v` instead of defaulting to 8-bit 4:2:0.
+    let mut bit_depth = prev_color.0;
     let mut color_space = ColorSpace::Unknown;
     let mut color_range = ColorRange::Limited;
-    let mut subsampling_x = true;
-    let mut subsampling_y = true;
+    let mut subsampling_x = prev_color.1;
+    let mut subsampling_y = prev_color.2;
 
     let width: u32;
     let height: u32;
@@ -1334,6 +1342,7 @@ mod tests {
             &[DEFAULT_COEF_PROBS; 4],
             &SegmentationParams::default(),
             ([1, 0, -1, -1], [0, 0]),
+            (8, true, true),
             |_| None,
         );
         assert!(result.is_err(), "Expected error for bad frame marker");
@@ -1347,6 +1356,7 @@ mod tests {
             &[DEFAULT_COEF_PROBS; 4],
             &SegmentationParams::default(),
             ([1, 0, -1, -1], [0, 0]),
+            (8, true, true),
             |_| None,
         );
         assert!(result.is_err());
