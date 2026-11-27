@@ -1132,3 +1132,37 @@ slice loop. Verified: JVT FRext remains 42/69 with no regressions.
 
 Full PAFF still needs field pairing, field MB addressing, field-view MC and
 field-aware deblocking; this only makes the entropy decode correct.
+
+---
+
+## Appendix I: Field-view MC ground truth (2026-11-27)
+
+Measured (`/tmp/ai-agent/PAFF_MC_PLAN.md`) on bottom P field MB(0,1) of
+`Freh7_B.264`, n=0 in gdb:
+- Reference = top field (`reference=1`), `data[0]` = frame base, stride **704**.
+- Destination = frame base + **352** (one original linesize), MV `[0,-5]`,
+  offset -1408, `emu=1`; prediction `[0,33,214,255]` plus all partitions/chroma.
+- `pic_as_field`: bottom parity shifts each plane by one original frame
+  linesize (352 luma / 176 chroma) then doubles strides (352->704, 176->352);
+  top parity only doubles strides. Ref parent == current picture parent.
+- Wedeo mapping: `mb.rs` MC call sites need a field-view branch
+  (`&rp.y[parity*stride..]`, doubled stride, field-coordinate ref_y);
+  `decoder.rs` needs field MB rows plus `fdc.mb_field=true`.
+- **Deadlock rule:** skip `wait_for_row` when
+  `Arc::ptr_eq(ref_pic.pic, ctx.pic.shared()) && ref_pic.is_field()`, and derive
+  needed rows as `2*field_ref_bottom + parity`.
+
+## Appendix J: Field-aware deblocking ground truth (2026-11-27)
+
+Measured (`/tmp/ai-agent/PAFF_DEBLOCK_PLAN.md`) on the same vector:
+- Bottom MB(0,1): `dest_y - data0 = 352`, `dest_cb - data1 = 176`,
+  deblock stride 704/352, `block_offset` index 48 (reconstruction only).
+- Its top horizontal edge is NOT filtered (`top_type=0`); first filtered edge
+  at `pix=3168`, `bS=[2,2,2,2]`, `tc=[1,1,1,1]`, alpha=20, beta=7, stepping
+  4 rows by 704 (frame rows 9,11,13,15).
+- Bottom MB(0,3) top edge runs; above MB = bottom field MB(0,1).
+- Wedeo's `deblock_luma_offset` / `deblock_chroma_offset` / tables already match
+  numerically. Required: `mb_field = hdr.field_pic_flag` for pure PAFF, pass
+  frame MB rows into `inline_deblock_row`/`deblock_last_row`, and never route
+  PAFF through MBAFF pair deblocking. Shared `row_progress` means the top field
+  must be published complete at pair start to avoid self-deadlock.
