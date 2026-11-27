@@ -145,6 +145,11 @@ pub struct H264Decoder {
     output_queue: VecDeque<Frame>,
     /// True once send_packet(None) has been called (drain mode).
     draining: bool,
+    /// A PPS requested an unsupported feature (currently FMO). FFmpeg w62
+    /// rejects the whole stream in that case and emits no frames; keep that
+    /// behaviour here instead of decoding slices that reference pictures
+    /// which were never decoded because their PPS was rejected.
+    fmo_rejected: bool,
     /// NALFF length size for MP4/avcC-style streams (0 = Annex B).
     nalff_length_size: u8,
     /// Codec descriptor for the Decoder trait.
@@ -376,6 +381,7 @@ impl H264Decoder {
             frame_num: 0,
             output_queue: VecDeque::new(),
             draining: false,
+            fmo_rejected: false,
             nalff_length_size: 0,
             codec_descriptor: CodecDescriptor {
                 id: CodecId::H264,
@@ -491,11 +497,18 @@ impl H264Decoder {
             if pos + pps_len > extradata.len() {
                 return Err(Error::InvalidData);
             }
-            if pps_len > 1
-                && let Ok(pps) = parse_pps_from_nal(&extradata[pos..pos + pps_len], &self.sps_list)
-            {
-                let id = pps.pps_id as usize;
-                self.pps_list[id] = Some(pps);
+            if pps_len > 1 {
+                match parse_pps_from_nal(&extradata[pos..pos + pps_len], &self.sps_list) {
+                    Ok(pps) => {
+                        let id = pps.pps_id as usize;
+                        self.pps_list[id] = Some(pps);
+                    }
+                    Err(Error::PatchwelcomeNotImplemented) => {
+                        warn!("FMO PPS in extradata rejected");
+                        self.fmo_rejected = true;
+                    }
+                    Err(_) => {}
+                }
             }
             pos += pps_len;
         }
@@ -733,23 +746,26 @@ impl H264Decoder {
             let (pic, poc) = if let Some((prev_pic, prev_poc)) = &prev_pic {
                 (Arc::clone(prev_pic), *prev_poc + 2 * steps as i32)
             } else {
-                (
-                    SharedPicture::new(PictureBuffer {
-                        y: vec![128u8; y_stride * pic_h as usize],
-                        u: vec![128u8; uv_stride * (pic_h / 2) as usize],
-                        v: vec![128u8; uv_stride * (pic_h / 2) as usize],
-                        y_stride,
-                        uv_stride,
-                        width: pic_w,
-                        height: pic_h,
-                        mb_width: mb_w,
-                        mb_height: mb_h,
-                        bit_depth: sps.bit_depth_luma,
-                        chroma_format_idc: sps.chroma_format_idc,
-                        ..PictureBuffer::empty()
-                    }),
-                    0,
-                )
+                let pic = SharedPicture::new(PictureBuffer {
+                    y: vec![128u8; y_stride * pic_h as usize],
+                    u: vec![128u8; uv_stride * (pic_h / 2) as usize],
+                    v: vec![128u8; uv_stride * (pic_h / 2) as usize],
+                    y_stride,
+                    uv_stride,
+                    width: pic_w,
+                    height: pic_h,
+                    mb_width: mb_w,
+                    mb_height: mb_h,
+                    bit_depth: sps.bit_depth_luma,
+                    chroma_format_idc: sps.chroma_format_idc,
+                    ..PictureBuffer::empty()
+                });
+                // FFmpeg h264_slice.c:1547-1548 reports INT_MAX progress for
+                // gap frames. No decode worker will publish rows for this
+                // mid-grey placeholder, so mark it complete here to keep
+                // `wait_for_row()` on later reference frames from blocking.
+                pic.mark_complete();
+                (pic, 0)
             };
 
             let entry = DpbEntry {
@@ -826,10 +842,20 @@ impl H264Decoder {
                     self.pps_list[id] = Some(pps);
                 }
                 Err(e) => {
+                    if e == Error::PatchwelcomeNotImplemented {
+                        // FFmpeg w62 leaves the PPS unset and rejects every
+                        // slice that follows. Do the same: slices using the
+                        // remaining valid PPS would reference pictures that
+                        // were never decoded, producing garbage frames.
+                        self.fmo_rejected = true;
+                    }
                     warn!(error = ?e, "PPS parse failed");
                 }
             },
             NalUnitType::Idr | NalUnitType::Slice => {
+                if self.fmo_rejected {
+                    return Ok(());
+                }
                 // Parse slice header
                 let hdr = parse_slice_header(
                     &nalu.data,

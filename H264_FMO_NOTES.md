@@ -52,5 +52,35 @@ with a trace, confirm which wait never returns, then add a bounded wait or
 panic-safe result delivery and verify zero frames plus a fast exit, with no new
 timeouts in the four-suite baseline (197/283).
 
+## Resolution
+
+Reproduced at HEAD `ce02fc5` with a 30 s timeout and `tracing` probes in
+`wait_for_row()`, `worker_loop()` and `join_oldest_in_flight()`. Neither
+candidate above was the cause. The trace showed:
+
+- main thread blocked in `join_oldest_in_flight()`, waiting for `sequence_id=0`;
+- worker blocked in `wait_for_row(row=1)` on a reference picture with
+  `row_progress=-1`;
+- no worker panic and no closed result channel.
+
+That picture came from `fill_frame_num_gap()`. FFmpeg's
+`h264_slice.c:1547-1548` reports `INT_MAX` progress for gap frames, because no
+decode worker will ever publish their rows. Wedeo's mid-grey fallback did not,
+so later slices using the non-FMO PPS0 waited forever on a placeholder created
+for the FMO-rejected frames.
+
+Two verified changes:
+
+1. `decoder.rs`: mark the mid-grey gap picture complete, matching FFmpeg's
+   `ff_thread_report_progress(..., INT_MAX, ...)`.
+2. `decoder.rs`: once a PPS is rejected with `PatchwelcomeNotImplemented`, skip
+   subsequent slice NALs. FFmpeg w62 leaves the rejected PPS unset and emits no
+   frames for FM1_BT_B; Wedeo must not decode the remaining PPS0 slices against
+   pictures that were never decoded.
+
+Measured after the fix: FM1_BT_B exits in ~0.08 s with zero framecrc frames
+(FFmpeg: zero frames), and the four-suite baseline stays at 197/283 with no new
+timeouts.
+
 Full source excerpts, the seven map types and the raster-remap rules are in
 `/tmp/ai-agent/H264_FMO_GT.md` (ephemeral; regenerate if needed).
