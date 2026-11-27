@@ -54,3 +54,23 @@ original three retained).
   by gdb extraction; SAO parameters are the next measured comparison. See
   `HEVC_MERGE_TRIAGE.md`.
 - Do not reapply the odd-pointer CABAC init experiment; it made parity worse.
+
+---
+
+## RESOLVED: inter TU internal deblock edges (commit f32250c, 2026-11-27)
+
+Vector `hevc-conformance/CIP_C_Panasonic_2.bit`: frame 0 exact, frame 1 had
+1713 differing luma bytes, first at x=271,y=0 (Wedeo 152, FFmpeg 150); chroma
+matched. gdb on both decoders showed identical MC output (162) and residual
+coefficient c[15]=-12, exonerating motion compensation and residual coding.
+
+FFmpeg `filter.c:551` measured `bs0=bs1=0` at x=264/272, y=0..24; its
+`ff_hevc_deblocking_boundary_strengths()` compares only MvField for internal
+edges, while `cbf_luma` is used only for a TU's own top/left edges. Wedeo's
+`edge_bs()` used cbf on internal edges (`pcbf=qcbf=1` gave bs=1) and filtered
+150,159 into 152,157 at x=272. A new `internal_edge_bs()` skips cbf in the two
+internal loops of `boundary_strengths()`.
+
+Verified: both frames byte-exact on all planes; full 227-vector sweep 8/227 ->
+9/227 with no regressions (`DSLICE_B_HHI_5.bit` only load-timeout, already
+failing before).
