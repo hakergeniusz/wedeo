@@ -42,3 +42,22 @@ values above. If they match, extract the post-prediction/pre-SAO chroma sample
 at (67,0) in both decoders. Do not patch on these partial results.
 
 All gdb logs and scripts are under `/tmp/ai-agent/HEVC_TRIAGE2_*` (ephemeral).
+
+---
+
+## Update at HEAD ce02fc5 (2026-11-27): stale Cb/Cr(67,0) claim
+
+Measured again with temporary tracing and gdb; probes were reverted and no
+source change was committed. Commit `9f0d242` (chroma TU width passed to
+neighbour availability) already fixed the Cb/Cr(67,0) divergence described
+above, so this file's original "first divergence" is historical.
+
+- SAO parameters match exactly: c1 Edge eo=3 offsets `0/2/0/0/0`, c2 Edge
+  eo=3 offsets `0/0/0/-1/-2` on both decoders.
+- Sample (67,0) also matches: FFmpeg prediction 101 + residual 55 = 156,
+  Wedeo identical; deblock and SAO leave it at 156 (EO=3 top row uses
+  `offset_val[0]=0`).
+- The first luma difference at current HEAD moved to Y(384,6).
+
+A clean release sweep in that worktree and in the main checkout both measured
+8/227 at `ce02fc5`, with no regression. Do not chase Cb/Cr(67,0) again.
