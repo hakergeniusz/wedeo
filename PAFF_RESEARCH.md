@@ -1803,3 +1803,19 @@ row filtering is unchanged.
 Verified: Freh7_B.264 row 0 byte-exact; even rows 0-15 have 0 differences
 (was 473); odd rows 1-15 keep 2034 differences (the Appendix Q improvement).
 FRext 43/69 MATCH, 0 errors, 0 timeouts.
+
+---
+
+## Appendix S: high-depth bottom-field reconstruction restored (commit 9636f08, 2026-11-27)
+
+Removed the temporary `post_decode_mb_hires()` skip on PAFF bottom fields from
+Appendix Q. `hires.rs` now uses `pic_as_field` semantics for field references:
+doubled stride, one-linesize offset for the bottom field, field-relative MVs,
+and a skipped `wait_for_row()` for same-picture field references (no
+`mark_complete()` hack). u16 chroma destinations use the field stride too.
+
+Verified no hang on `Hi422FREXT16` and `Hi422FREXT18` with 30 s timeouts.
+`Hi422FREXT16` luma absolute error fell from 1.7353e9 to 1.6780e9 and differing
+pixels from 5,218,985 to 5,145,856; U/V diffs also fell about 1.6%. Four-suite
+baseline stays 198/283 with identical pass sets and no new timeouts or errors.
+The vector is still not frame-exact; remaining error is from other stages.
