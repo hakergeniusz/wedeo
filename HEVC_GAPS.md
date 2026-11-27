@@ -98,3 +98,24 @@ blocked by 13 concurrent cargo processes / rav1d nasm scripts and exceeded the
 time budget. Deblocking, SAO and reconstruction remain unexonerated. Next step:
 pair the Wedeo pre-deblock samples at the coordinates above with the FFmpeg
 values. Evidence: `/tmp/ai-agent/HEVC_C_GT.md` (ephemeral).
+
+## IPRED_B_Nokia_3.bit first divergence (2026-11-27, no patch)
+
+Vector: `hevc-conformance/IPRED_B_Nokia_3.bit` (29168 bytes, 1 frame,
+1920x1080 yuv420p). FFmpeg framecrc `0x11ef5ddd`, Wedeo `0xe0e6497a`.
+First luma difference (320,1): Wedeo 30, FFmpeg 29. First chroma differences
+(160,0): Cb 152 vs 153, Cr 124 vs 123. All differences are +/-1 at CTB
+boundaries (multiples of 64), pointing at deblock or SAO edge handling.
+
+FFmpeg gdb measurements for CTB(5,0): all three components use SAO_EDGE with
+EO_HORIZ, offsets Y `{0,1,0,0,-1}`, Cb `{0,1,1,0,0}`, Cr `{0,0,1,0,-1}`.
+Vertical deblock: luma bs=2, qp=22, tc=1; Cb bs=2, c_tc=1. Y(320,1) goes
+28 -> 29 from deblock with SAO unchanged; Cb(160,0) goes 151 -> 152 from
+deblock then +1 to 153 from SAO. FFmpeg pads the row above the first line
+with zeros, not a copy of row 0.
+
+No Wedeo-side staged values were captured: the isolated trace build was
+blocked by cargo registry locks and concurrent rav1d/rav1e NASM scripts,
+exceeding the 20-minute budget. Probes were reverted; tree clean at d86b9d2.
+Next step: add Wedeo deblock/SAO traces at the CTB(5,0) boundaries and pair
+with the FFmpeg values above. Evidence: `/tmp/ai-agent/HEVC_D_GT.md`.
