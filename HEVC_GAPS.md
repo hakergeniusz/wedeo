@@ -42,4 +42,8 @@ after the fix completed: 3/227 MATCH, 222 FAIL, 2 ERROR (both vectors where neit
   notes claiming a residual +2 Cr offset were stale; `1973a7d` (cross-component
   prediction gate plus no Cb-to-Cr SAO copy) already fixed it. Do not spend
   another pass on that vector.
+- `hevc-conformance/MERGE_E_TI_3.bit`: frame 0 luma is byte-exact but Cb/Cr
+  differ from x=67, y=0. Chroma QP/dequant and intra prediction were ruled out
+  by gdb extraction; SAO parameters are the next measured comparison. See
+  `HEVC_MERGE_TRIAGE.md`.
 - Do not reapply the odd-pointer CABAC init experiment; it made parity worse.
