@@ -85,6 +85,8 @@ fn format_info(format: PixelFormat) -> FormatInfo {
         PixelFormat::Yuv420p | PixelFormat::Yuvj420p => FormatInfo::new([1, 1, 1, 0], 1, 1),
         // Planar 4:2:2, 8-bit.
         PixelFormat::Yuv422p | PixelFormat::Yuvj422p => FormatInfo::new([1, 1, 1, 0], 1, 0),
+        // Planar 4:4:0, 8-bit (full-width, half-height chroma).
+        PixelFormat::Yuv440p => FormatInfo::new([1, 1, 1, 0], 0, 1),
         // Planar 4:4:4, 8-bit.
         PixelFormat::Yuv444p | PixelFormat::Yuvj444p => FormatInfo::new([1, 1, 1, 0], 0, 0),
         // Planar 4:1:0 and 4:1:1, 8-bit.

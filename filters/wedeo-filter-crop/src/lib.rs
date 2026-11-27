@@ -92,6 +92,7 @@ fn format_info(format: PixelFormat) -> FormatInfo {
     match format {
         PixelFormat::Yuv420p | PixelFormat::Yuvj420p => FormatInfo::new(1, 1, [1, 1, 1, 0], false),
         PixelFormat::Yuv422p | PixelFormat::Yuvj422p => FormatInfo::new(1, 0, [1, 1, 1, 0], false),
+        PixelFormat::Yuv440p => FormatInfo::new(0, 1, [1, 1, 1, 0], false),
         PixelFormat::Yuv444p | PixelFormat::Yuvj444p => FormatInfo::new(0, 0, [1, 1, 1, 0], false),
         PixelFormat::Yuv410p => FormatInfo::new(2, 2, [1, 1, 1, 0], false),
         PixelFormat::Yuv411p => FormatInfo::new(2, 0, [1, 1, 1, 0], false),

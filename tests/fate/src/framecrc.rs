@@ -102,6 +102,8 @@ impl YuvGeometry {
         let (log2_chroma_w, log2_chroma_h, bytes_per_sample) = match format {
             PixelFormat::Yuv420p | PixelFormat::Yuvj420p => (1, 1, 1),
             PixelFormat::Yuv422p | PixelFormat::Yuvj422p => (1, 0, 1),
+            // FFmpeg's AV_PIX_FMT_YUV440P: full-width, half-height chroma.
+            PixelFormat::Yuv440p => (0, 1, 1),
             PixelFormat::Yuv444p | PixelFormat::Yuvj444p => (0, 0, 1),
             PixelFormat::Yuv410p => (2, 2, 1),
             PixelFormat::Yuv411p => (2, 0, 1),
@@ -119,6 +121,8 @@ impl YuvGeometry {
                     (1, 1)
                 } else if name.contains("p422") {
                     (1, 0)
+                } else if name.contains("p440") {
+                    (0, 1)
                 } else if name.contains("p444") {
                     (0, 0)
                 } else if name.contains("p410") {

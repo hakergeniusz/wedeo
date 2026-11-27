@@ -14,6 +14,9 @@ pub enum PixelFormat {
     Yuv444p = 5,
     Yuv410p = 6,
     Yuv411p = 7,
+    /// planar YUV 4:4:0, 24bpp, (1 Cr & Cb sample per 1x2 Y samples).
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV440P` (libavutil/pixfmt.h).
+    Yuv440p = 33,
     Gray8 = 8,
     MonoWhite = 9,
     MonoBlack = 10,
@@ -83,6 +86,7 @@ impl PixelFormat {
             PixelFormat::Yuv444p => "yuv444p",
             PixelFormat::Yuv410p => "yuv410p",
             PixelFormat::Yuv411p => "yuv411p",
+            PixelFormat::Yuv440p => "yuv440p",
             PixelFormat::Gray8 => "gray8",
             PixelFormat::MonoWhite => "monowhite",
             PixelFormat::MonoBlack => "monoblack",

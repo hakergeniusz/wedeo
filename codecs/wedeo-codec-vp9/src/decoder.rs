@@ -119,7 +119,7 @@ impl Vp9Decoder {
         // vp9.c:580-610 only reads colour config for keyframes / intra-only
         // frames; ordinary inter frames keep `s->bpp_index`, `s->ss_h` and
         // `s->ss_v`. Keep the 8-bit 4:2:0 default for formats that have no
-        // output pixel format here (e.g. 4:4:0), so those frames retain
+        // output pixel format here (e.g. RGB), so those frames retain
         // their existing output count.
         let (bit_depth, subsampling_x, subsampling_y) = self.prev_color_config;
         let prev_color = if output_pixel_format(bit_depth, subsampling_x, subsampling_y).is_some() {
@@ -618,8 +618,7 @@ impl Vp9Decoder {
 ///
 /// Mirrors `pix_fmt_for_ss` in FFmpeg's `vp9.c:497-504`: profile 0/2 use
 /// 4:2:0, while profile 1/3 signal `ss_h`/`ss_v` explicitly. RGB (`GBRP*`)
-/// and 4:4:0 have no matching `PixelFormat` variant here yet, so they return
-/// `None` rather than emitting mislabeled frames.
+/// has no matching `PixelFormat` variant here yet, so it returns `None`.
 fn output_pixel_format(
     bit_depth: u8,
     subsampling_x: bool,
@@ -628,6 +627,10 @@ fn output_pixel_format(
     match (bit_depth, subsampling_x, subsampling_y) {
         (8, true, true) => Some(PixelFormat::Yuv420p),
         (8, true, false) => Some(PixelFormat::Yuv422p),
+        // FFmpeg maps 8-bit 4:4:0 (ss_h=0, ss_v=1) to AV_PIX_FMT_YUV440P.
+        // Wedeo's frame buffer already stores full-width, half-height chroma
+        // planes for this layout.
+        (8, false, true) => Some(PixelFormat::Yuv440p),
         (8, false, false) => Some(PixelFormat::Yuv444p),
         (10, true, true) => Some(PixelFormat::Yuv420p10le),
         (10, true, false) => Some(PixelFormat::Yuv422p10le),
@@ -1118,8 +1121,10 @@ mod tests {
             output_pixel_format(12, false, false),
             Some(PixelFormat::Yuv444p12le)
         );
-        // 4:4:0 and RGB have no PixelFormat variant here.
-        assert_eq!(output_pixel_format(8, false, true), None);
+        assert_eq!(
+            output_pixel_format(8, false, true),
+            Some(PixelFormat::Yuv440p)
+        );
         assert_eq!(output_pixel_format(14, true, true), None);
     }
 }
