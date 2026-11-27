@@ -496,22 +496,51 @@ fn sao_ctb(
                         let sy = y0 as isize + yy as isize - 1;
                         let cx = sx.clamp(0, pw as isize - 1) as usize;
                         let cy = sy.clamp(0, ph as isize - 1) as usize;
+                        // The padded block has one row/column of padding on
+                        // every side: `sao_edge_filter` reads rows 0..height+1
+                        // and columns 0..width+1. The extra row/column in the
+                        // allocated buffer (height+2 / width+2) is unused.
                         let is_top = yy == 0;
-                        let is_bottom = yy == height + 2;
+                        let is_bottom = yy == height + 1;
                         let is_left = xx == 0;
-                        let is_right = xx == width + 2;
+                        let is_right = xx == width + 1;
                         let value = if (is_top && edges[1])
                             || (is_bottom && edges[3])
                             || (is_left && edges[0])
                             || (is_right && edges[2])
                         {
                             0
-                        } else if is_top && applied(x_ctb, y_ctb - 1) {
-                            let v = sao_h.get((2 * y_ctb - 1) * pw + cx).copied();
-                            v.unwrap_or_else(|| pic.sample(c_idx, cx, cy))
-                        } else if is_bottom && applied(x_ctb, y_ctb + 1) {
-                            let v = sao_h.get((2 * (y_ctb + 1)) * pw + cx).copied();
-                            v.unwrap_or_else(|| pic.sample(c_idx, cx, cy))
+                        } else if is_top || is_bottom {
+                            // FFmpeg's sao_filter_CTB() (filter.c:379-426):
+                            // the padding rows are filled from the neighbour
+                            // CTB above/below. At the left and right corners
+                            // that neighbour is the diagonal CTB, not the
+                            // one directly above/below.
+                            let nx = if is_left {
+                                x_ctb.wrapping_sub(1)
+                            } else if is_right {
+                                x_ctb + 1
+                            } else {
+                                x_ctb
+                            };
+                            let ny = if is_top {
+                                y_ctb.wrapping_sub(1)
+                            } else {
+                                y_ctb + 1
+                            };
+                            if applied(nx, ny) {
+                                let row = if is_top {
+                                    2 * y_ctb - 1
+                                } else {
+                                    2 * (y_ctb + 1)
+                                };
+                                sao_h
+                                    .get(row * pw + cx)
+                                    .copied()
+                                    .unwrap_or_else(|| pic.sample(c_idx, cx, cy))
+                            } else {
+                                pic.sample(c_idx, cx, cy)
+                            }
                         } else if is_left && applied(x_ctb - 1, y_ctb) {
                             let v = sao_v.get((2 * x_ctb - 1) * ph + cy).copied();
                             v.unwrap_or_else(|| pic.sample(c_idx, cx, cy))
