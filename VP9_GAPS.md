@@ -344,3 +344,21 @@ compare the first 4x4 chroma write at pixel (32,0) against FFmpeg
 the whole chroma region from x=32 is left at zero while luma is already
 bit-exact. Do not patch `loopfilter.rs` or high-depth-format code on this
 evidence.
+
+## vp90-2-05-resize.ivf: scaled MC implemented but not sufficient (2026-11-27)
+
+GDB at `vp9.c:805`/`:884`: the 5th decode header is 282x173 with a 352x288
+reference, `mvscale=(20450,27275)`, `mvstep=(19,26)`. FFmpeg `vp9recon.c:444`
+confirms the scaled MC path. Wedeo's `mc.rs` only implements non-scaled
+prediction.
+
+A full scaled path was implemented (mvscale/mvstep parsing, mc_luma_scaled,
+mc_chroma_scaled, scaled 8tap and bilinear filters with edge emulation). All
+10 frames decoded after fixing two negative-slice-offset panics, but frame 3
+CRC still differed (`0x17261146` vs `0x7557ec0c`) and the differing-pixel
+count did not drop. Gate 1 failed, so the patch was reverted; no commit.
+
+Critical finding: FFmpeg's CLI inserts swscale automatically for this vector,
+upscaling 282x173 to 352x288 before computing framecrc. A decoder-only fix
+cannot make this vector bit-exact; output scaling must be handled too. Do not
+retry scaled MC expecting framecrc parity on this vector.
