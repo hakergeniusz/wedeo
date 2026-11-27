@@ -312,6 +312,116 @@ fn min_tb_addr_zs(geo: &RefGeometry, x: i32, y: i32) -> i32 {
     }
 }
 
+/// `EXTEND_LEFT_CIP` from FFmpeg's `pred_template.c`.
+///
+/// Replaces each top sample with its right neighbour when the PU above it is
+/// not intra. Iteration runs right to left, so a chain of non-intra PUs copies
+/// the first usable sample all the way down.
+fn extend_left_cip(
+    top: &mut [u16],
+    corner: &mut u16,
+    start: i32,
+    length: i32,
+    is_intra: &impl Fn(i32, i32) -> bool,
+) {
+    let mut i = start;
+    while i > start - length {
+        if !is_intra(i - 1, -1) {
+            if i == 0 {
+                // FFmpeg's `ptr[i - 1] = ptr[i]` also writes `top[-1]`.
+                if let Some(v) = top.first().copied() {
+                    *corner = v;
+                }
+            } else {
+                let src = top.get(i as usize).copied();
+                if let (Some(dst), Some(v)) = (top.get_mut((i - 1) as usize), src) {
+                    *dst = v;
+                }
+            }
+        }
+        i -= 1;
+    }
+}
+
+/// `EXTEND_RIGHT_CIP` from FFmpeg's `pred_template.c`.
+///
+/// Writes the carried value to groups of four top samples whose PU above is
+/// not intra; an intra PU refreshes the carried value from `ptr[i + 3]`.
+fn extend_right_cip(
+    top: &mut [u16],
+    start: i32,
+    length: i32,
+    mut a: u16,
+    is_intra: &impl Fn(i32, i32) -> bool,
+) {
+    let mut i = start;
+    while i < start + length {
+        if i >= 0 && !is_intra(i, -1) {
+            for k in 0..4 {
+                if let Some(v) = top.get_mut((i + k) as usize) {
+                    *v = a;
+                }
+            }
+        } else if let Some(v) = top.get((i + 3) as usize) {
+            a = *v;
+        }
+        i += 4;
+    }
+}
+
+/// `EXTEND_DOWN_CIP` from FFmpeg's `pred_template.c`.
+fn extend_down_cip(
+    left: &mut [u16],
+    start: i32,
+    length: i32,
+    mut a: u16,
+    is_intra: &impl Fn(i32, i32) -> bool,
+) {
+    let mut i = start;
+    while i < start + length {
+        if i >= 0 && !is_intra(-1, i) {
+            for k in 0..4 {
+                if let Some(v) = left.get_mut((i + k) as usize) {
+                    *v = a;
+                }
+            }
+        } else if let Some(v) = left.get((i + 3) as usize) {
+            a = *v;
+        }
+        i += 4;
+    }
+}
+
+/// `EXTEND_UP_CIP` from FFmpeg's `pred_template.c`.
+fn extend_up_cip(
+    left: &mut [u16],
+    corner: &mut u16,
+    start: i32,
+    length: i32,
+    mut a: u16,
+    is_intra: &impl Fn(i32, i32) -> bool,
+) {
+    let mut i = start;
+    while i > start - length {
+        if !is_intra(-1, i - 3) {
+            for k in 0..4 {
+                let idx = i - 3 + k;
+                if idx >= 0 {
+                    if let Some(v) = left.get_mut(idx as usize) {
+                        *v = a;
+                    }
+                } else if idx == -1 {
+                    // `AV_WN4P(&ptr[i - 3], a)` also covers `left[-1]`.
+                    *corner = a;
+                }
+            }
+        } else if let Some(v) = left.get((i - 3) as usize) {
+            a = *v;
+        }
+        i -= 4;
+    }
+}
+
 /// Predict one transform block using the reconstructed neighbours of `picture`.
 #[allow(clippy::too_many_arguments)] // mirrors FFmpeg's FUNC(intra_pred)
 pub fn intra_predict_tu(
@@ -467,6 +577,181 @@ pub fn intra_predict_tu(
         bottom_left_buf.truncate(n);
     } else {
         bottom_left_buf.clear();
+    }
+
+    if pps.constrained_intra_pred_flag {
+        // FFmpeg's `FUNC(intra_pred)` replaces samples belonging to non-intra
+        // PUs before the "Infer the unavailable samples" block. Operate on the
+        // combined top/left layout used by `pred_template.c`, then copy the
+        // substituted samples back; the existing DSP path still performs the
+        // inference step.
+        let default = 1u16 << (picture.bit_depth - 1);
+        let mut top = vec![default; 2 * size];
+        let mut left = vec![default; 2 * size];
+        if cand_up {
+            top[..size].copy_from_slice(&top_buf);
+        }
+        if cand_up_right && !top_right_buf.is_empty() {
+            let n = top_right_buf.len().min(size);
+            top[size..size + n].copy_from_slice(&top_right_buf[..n]);
+            if n > 0 && n < size {
+                let v = top[size + n - 1];
+                for k in n..size {
+                    top[size + k] = v;
+                }
+            }
+        }
+        if cand_left {
+            left[..size].copy_from_slice(&left_buf);
+        }
+        if cand_bottom_left && !bottom_left_buf.is_empty() {
+            let n = bottom_left_buf.len().min(size);
+            left[size..size + n].copy_from_slice(&bottom_left_buf[..n]);
+            if n > 0 && n < size {
+                let v = left[size + n - 1];
+                for k in n..size {
+                    left[size + k] = v;
+                }
+            }
+        }
+
+        let mut top_corner = if cand_up_left {
+            picture.sample(c_idx, x as usize - 1, y as usize - 1)
+        } else {
+            default
+        };
+        let mut left_corner;
+        let size_i = size as i32;
+        let is_intra = |sx: i32, sy: i32| -> bool {
+            let lx = x0 + sx * (1 << hshift);
+            let ly = y0 + sy * (1 << vshift);
+            let px = (lx as u32 >> sps.log2_min_pu_size) as usize;
+            let py = (ly as u32 >> sps.log2_min_pu_size) as usize;
+            picture
+                .tab_mvf
+                .get(px, py)
+                .is_some_and(|f| f.pred_flag.is_intra())
+        };
+
+        if cand_bottom_left || cand_left || cand_up_left || cand_up || cand_up_right {
+            let mut size_max_x = if x0 + ((2 * size_i) << hshift) < width {
+                2 * size
+            } else {
+                ((width - x0) >> hshift) as usize
+            };
+            let mut size_max_y = if y0 + ((2 * size_i) << vshift) < height {
+                2 * size
+            } else {
+                ((height - y0) >> vshift) as usize
+            };
+            let mut j = size_i + i32::from(cand_bottom_left) * bottom_left_size as i32 - 1;
+            if !cand_up_right {
+                size_max_x = if x0 + (size_i << hshift) < width {
+                    size
+                } else {
+                    ((width - x0) >> hshift) as usize
+                };
+            }
+            if !cand_bottom_left {
+                size_max_y = if y0 + (size_i << vshift) < height {
+                    size
+                } else {
+                    ((height - y0) >> vshift) as usize
+                };
+            }
+            if cand_bottom_left || cand_left || cand_up_left {
+                while j > -1 && !is_intra(-1, j) {
+                    j -= 1;
+                }
+                if !is_intra(-1, j) {
+                    j = 0;
+                    while (j as usize) < size_max_x && !is_intra(j, -1) {
+                        j += 1;
+                    }
+                    extend_left_cip(&mut top, &mut top_corner, j, j + 1, &is_intra);
+                }
+            } else {
+                j = 0;
+                while (j as usize) < size_max_x && !is_intra(j, -1) {
+                    j += 1;
+                }
+                if j > 0 {
+                    extend_left_cip(&mut top, &mut top_corner, j, j, &is_intra);
+                    top_corner = top[0];
+                }
+            }
+            // FFmpeg's unconditional `left[-1] = top[-1]` after both branches.
+            left_corner = top_corner;
+            if cand_bottom_left || cand_left {
+                extend_down_cip(&mut left, 0, size_max_y as i32, left_corner, &is_intra);
+            }
+            if !cand_left {
+                for v in left[..size].iter_mut() {
+                    *v = left_corner;
+                }
+            }
+            if !cand_bottom_left {
+                let v = left[size - 1];
+                for k in size..2 * size {
+                    left[k] = v;
+                }
+            }
+            if x0 != 0 && y0 != 0 {
+                let a = left[size_max_y - 1];
+                extend_up_cip(
+                    &mut left,
+                    &mut left_corner,
+                    size_max_y as i32 - 1,
+                    size_max_y as i32,
+                    a,
+                    &is_intra,
+                );
+                if !is_intra(-1, -1) {
+                    left_corner = left[0];
+                }
+            } else if x0 == 0 {
+                for v in left[..size_max_y].iter_mut() {
+                    *v = 0;
+                }
+            } else {
+                let a = left[size_max_y - 1];
+                extend_up_cip(
+                    &mut left,
+                    &mut left_corner,
+                    size_max_y as i32 - 1,
+                    size_max_y as i32,
+                    a,
+                    &is_intra,
+                );
+            }
+            top_corner = left_corner;
+            if y0 != 0 {
+                extend_right_cip(&mut top, 0, size_max_x as i32, top_corner, &is_intra);
+            }
+            if cand_bottom_left && bottom_left_size < size {
+                let v = left[size + bottom_left_size - 1];
+                for k in bottom_left_size..size {
+                    left[size + k] = v;
+                }
+            }
+            if cand_up_right && top_right_size < size {
+                let v = top[size + top_right_size - 1];
+                for k in top_right_size..size {
+                    top[size + k] = v;
+                }
+            }
+        }
+
+        top_buf.copy_from_slice(&top[..size]);
+        left_buf.copy_from_slice(&left[..size]);
+        let n = top_right_buf.len();
+        if n > 0 {
+            top_right_buf.copy_from_slice(&top[size..size + n]);
+        }
+        let n = bottom_left_buf.len();
+        if n > 0 {
+            bottom_left_buf.copy_from_slice(&left[size..size + n]);
+        }
     }
 
     let mut dst = vec![0u16; size * size];
