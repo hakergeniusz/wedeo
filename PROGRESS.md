@@ -54,8 +54,9 @@ Single-threaded gap: wedeo is **12x slower** than FFmpeg (scalar Rust vs C+NEON)
 
 | Subsystem | % CPU | Notes |
 |-----------|-------|-------|
-| Motion Compensation | 47.8% (old profile) | `extract_ref_block` 14.8%, lowpass filters 17%. An SSE2 lowpass patch was bit-exact but only 1.006x median (within noise) and was reverted; LLVM already auto-vectorizes. |
-| Memory alloc/free | 16.2% (old profile) | The last per-MB trace `vec![]` was removed at 189ec4a; no measurable wall-clock win. Needs a fresh profile. |
+| Motion Compensation | ~26.6% (2026-11-27 profile) | `extract_ref_block` 1.0%, lowpass ~8.2%, chroma MC 6.72%. An SSE2 lowpass patch was bit-exact but only 1.006x median and was reverted. See `PERF_PROFILE.md`. |
+| Memory alloc/free | 0% (2026-11-27 profile) | No allocator symbols in the top 76 self-time entries. Do not revisit allocations. |
+| Deblocking | 18.2% (2026-11-27 profile) | `filter_mb_edge_luma::<u8>` alone is 13.59%; a bounded hoist candidate is documented in `PERF_PROFILE.md`. |
 | MB decode + recon | 11.7% | apply_mc_bi_partition 6.8% |
 | Deblocking | 10.8% | filter_mb_edge_luma 3.3% |
 | memcpy/memmove | 5.8% | System-optimized |
