@@ -124,8 +124,10 @@ changed and the early return stays in place.
 
 Verification: `cargo test --workspace`, `cargo clippy -p wedeo-codec-vp9
 --all-targets -- -D warnings`, `cargo fmt -p wedeo-codec-vp9`, and full
-FATE VP9 framecrc parity (211 bit-exact, 7 known differences, 8 high-depth
-zero-frame vectors).
+FATE VP9 framecrc parity with no regressions. At the current HEAD the sweep is
+214 bit-exact, 4 known differences and 8 high-depth zero-frame vectors (the
+agent's isolated worktree was based on the older 211/7 baseline before the
+NNZ edge-context fix).
 
 ## Stage 3: reconstruction math
 
