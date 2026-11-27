@@ -1196,3 +1196,164 @@ Next attempt should: (1) isolate the timeout with a single-vector run before
 broad testing, (2) extract FFmpeg's bottom-field MV/context values at the
 first MB, and (3) promote the DPB entry to ShortTerm with top-only mask as
 above. Do not reapply this patch wholesale.
+
+---
+
+## Appendix L: Bottom-field CABAC ground truth (2026-11-27)
+
+Extracted with gdb from the debug FFmpeg build. This supersedes the
+MV-prediction hypothesis in Appendix K: prediction, ref selection and
+probability states all agree; the arithmetic coder diverges earlier.
+
+Measured on 2026-11-27. All values below are extracted directly with gdb from
+`/var/cache/zstd5/ffmpeg-src-w62/ffmpeg_g` (debug build, `--disable-asm
+--disable-optimizations --enable-debug=3`) running with
+`-threads 1 -bitexact -i .../FRext/Freh7_B.264`.
+
+## Vector and slice under test
+
+The first bottom-field slice of `Freh7_B.264` is the complementary bottom field
+of the IDR picture: `frame_num = 0`, `picture_structure = PICT_BOTTOM_FIELD (2)`,
+`slice_type_nos = P` (2), `mb_field_decoding_flag = 1`, `mb_x/mb_y = 0/1` for the
+first MB in field addressing (`mb_xy = 23`, `mb_stride = 23`, 22 MBs + padding).
+The first coded 16x16 MB of that slice has final L0 MV `[0, -5]`.
+
+## FFmpeg ground truth (gdb)
+
+### Reference list at `h264_slice.c:1981` (after `ff_h264_build_ref_list`)
+
+```
+hit=1 frame_num=0 pic_struct=2 list_count=1
+poc_lsb=0 delta_pic_order_cnt_bottom=0
+curpic=0x555557cf3f80 curpic_frame_num=0 curpic_poc=65536
+field_poc=[65536,65536] reference=1 first_field=0
+short_ref_count=1
+  short[0] frame_num=0 poc=65536 field_poc=[65536,65536] reference=1 long=0 pic_id=0
+  ref_count[0]=1 curr_pic_num=1 max_pic_num=131072
+  ref_list[0][0]: reference=1 (TOP field), poc=65536, pic_id=0,
+                  parent=curpic, parent_frame_num=0, parent_reference=1,
+                  data0=0x555557d23820, linesize0=704
+```
+
+There is exactly ONE L0 entry: the top field of the current picture
+(`reference == PICT_TOP_FIELD`, i.e. field mask 1 / `ref_mask=1`). Its field POC
+is 65536 (frame POC 0 in 1/2-pel units) and its `pic_id` is 0. The bottom field
+is NOT in the list. This confirms the "promote only the top field" rule from
+Appendix K; it also confirms `curr_pic_num = 1` for a field slice.
+
+### `fill_decode_caches` at `h264_cabac.c:2069`, bottom MB(0,1)
+
+```
+mb_xy=23 mb_stride=23 mb_field=1 mb_type=12480
+top_xy=-23 topleft_xy=-24 topright_xy=-22 left_xy=[22,22]
+neighbor mb_types: top=0 topleft=0 topright=0 left_top=0 left_bot=0
+intra4x4_pred_mode_cache[0..15] = 0 0 0 0 2 2 1 1 0 0 0 0 1 1 1 1
+non_zero_count_cache[0..15]     = 3 0 0 0 0 0 0 0 0 0 0 0 3 3 3 3
+top_cbp=15 left_cbp=15
+```
+
+Key details:
+- `top_xy = mb_xy - (mb_stride << MB_FIELD) = 23 - 46 = -23`, so the top
+  neighbor is outside the field, as expected for the first bottom-field row.
+- `left_xy = mb_xy - 1 = 22`, which is the LAST MB of the top field row. All
+  neighbor MB types are nevertheless zeroed by the `slice_table` check in
+  `fill_decode_neighbors`: the top and bottom fields are different slices.
+- The non-zero-count cache is NOT all zero: indexes 0 and 12..15 are 3 for an
+  inter coded MB with unavailable neighbors (`nnz_excluded` semantics), which
+  matters for CABAC CBP contexts.
+
+### Final MV cache at `h264_cabac.c:2327` (after `write_back_motion`)
+
+```
+mb_type=12480 cbp_table=0, cached mb_type=0, ref_count=[1,1]
+L0 mv_cache[ 0]=[0,0]     ref_cache[ 0]=0    mvd_cache[ 0]=[0,0]
+L0 mv_cache[ 3]=[0,0]     ref_cache[ 3]=-2   mvd_cache[ 3]=[0,0]
+L0 mv_cache[ 6]=[0,0]     ref_cache[ 6]=-2   mvd_cache[ 6]=[0,0]
+L0 mv_cache[ 9]=[0,0]     ref_cache[ 9]=0    mvd_cache[ 9]=0
+L0 mv_cache[12]=[0,-5]    ref_cache[12]=0    mvd_cache[12]=[0,5]
+L0 mv_cache[15]=[0,0]     ref_cache[15]=0    mvd_cache[15]=[0,5]
+```
+
+`scan8[0] = 12`. The final MV `[0,-5]` comes from a zero MV predictor (all
+three neighbors have `PART_NOT_AVAILABLE = -2`) plus a CABAC mvd with magnitude
+5 and negative sign. The mvd magnitude is stored as `[0,5]` in `mvd_cache`, and
+`get_cabac_bypass_sign(cabac, -mvd)` supplies the minus sign. The mvd context is
+derived from `mvd_cache[scan8[0]-1] + mvd_cache[scan8[0]-8]`, both zero because
+the cross-field neighbors are unavailable.
+
+### MV predictor and mvd context at `h264_cabac.c:2178` (inside P_8x8 decode)
+
+```
+mb_type=12480 (0x30c0 = MB_TYPE_8x8 | MB_TYPE_INTERLACED | P0L0 | P1L0)
+predicted mx=0 my=0 (before mvd), scan8[0]=12
+L0 ref_cache = [0,0,0,-2,-2,-2,-2,-2,0,0,-2,0,0,-2,0,0]
+L0 mv_cache  = all [0,0]
+L0 mvd_cache = all [0,0]
+neighbor mvd sums: amvd0=0 amvd1=0
+CABAC state bytes [40]=0 [47]=10 (before mvd decode)
+```
+
+So the MB is P_8x8 (not 16x16); the first sub-MB MV comes from the
+`pred_motion` call at `h264_cabac.c:2177` with all three neighbors
+`PART_NOT_AVAILABLE`, hence predictor `[0,0]`. The mvd context indices are 40
+and 47 (both neighbor sums 0). This is the exact input state that Wedeo must
+reproduce for the first bottom-field MB.
+
+## Wedeo ground truth (baseline HEAD `f6d844c`, temporary `trace!` probes, reverted)
+
+The baseline decoder does not pair the fields, so the bottom slice is decoded
+as a separate picture with `mb_x/mb_y = 0/0`. This is still the same first
+coded MB of the same bitstream slice, so the CABAC inputs are comparable.
+`wedeo-framecrc` with `RUST_LOG=wedeo_codec_h264::mb=trace,
+wedeo_codec_h264::cabac=trace`:
+
+```
+decoded MB mb_x=0 mb_y=0 qp=28 mb_type=3 cbp=7
+P_8x8 sub i8x8=0 sub_type=1 ref_idx=0
+P_8x4 MV sub=0: mv_a=[0,0] ref_a=-1 avail=false
+                mv_b=[0,0] ref_b=-1 avail=false
+                mv_c=[0,0] ref_c=-1 avail=false
+                mvp=[0,0] mvd=[0,1] mv=[0,1]
+CABAC probe at first mvd: amvd0=0 amvd1=0
+                          state[40]=0 state[47]=10
+                          state[0]=86 state[1]=12 state[2]=31
+                          state[3]=86 state[4]=12 state[11]=15 state[16]=16
+CABAC engine at first mvd: low=17072128 range=394 pos=4
+```
+
+This reproduces the `[0,1]` MV quoted in Appendix K. The later MVs (`[4,1]`,
+`[0,11]`, ...) are downstream consequences of the same first mvd difference.
+
+## Exact first divergence and conclusion
+
+Aligned side by side at the first mvd bin of the bottom-field first MB:
+
+| Quantity | FFmpeg | Wedeo |
+|---|---|---|
+| ref list L0 | 1 entry, top field only, `poc=65536`, `pic_id=0`, `frame_num=0` | 1 entry (baseline: parity unset; Appendix K attempt: top only) |
+| predictor | `[0,0]`, all neighbors unavailable | `[0,0]`, all neighbors unavailable |
+| `amvd0/amvd1` | `0/0` | `0/0` |
+| `state[40]/state[47]` | `0/10` | `0/10` |
+| state bytes `0,1,2,3,4,11,16` | `86,12,31,86,12,15,16` | `86,12,31,86,12,15,16` |
+| sub-MB type 0 | code 1 (`16x8`/field `8x4`) | code 1 (`8x4`) |
+| CABAC engine `low/range/pos` | `16846600 / 271 / 4` | `17072128 / 394 / 4` |
+| decoded mvd | `[0,-5]` | `[0,1]` |
+
+The MV prediction, reference POC/parity selection and the CABAC *state array*
+are NOT the first divergence: they agree exactly. The first measured divergence
+is the CABAC arithmetic engine (`low`/`range`) when entering the mvd syntax
+element, even though both decoders are at byte position 4 and have identical
+probability states. That means the two decoders consumed a different bin
+sequence (a different number of bins in the MB-type/sub-MB-type path) before
+the mvd, so the bitstream cursor inside the arithmetic coder is different.
+This is an entropy-stage bug, not an MC/deblock/DPB bug.
+
+No single-cause fix was measured, so NO patch was applied and no commit was
+made. The worktree remains clean at `f6d844c`. The next measurement should
+capture the per-bin trace from CABAC slice start to the first mvd in both
+decoders (bin index, context index, bin value, `low`, `range`) and find the
+first bin where `low`/`range` or the context index diverges. Likely suspects
+are the sub_mb_type context derivation (FFmpeg `decode_cabac_p_mb_sub_type`
+uses neighbor sub-partition state) and the `mb_skip_flag`/`mb_type` bin order
+for field slices, but this is a hypothesis only and must not be patched
+without a measured bin-level divergence.
