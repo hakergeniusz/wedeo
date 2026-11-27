@@ -394,3 +394,23 @@ code look wrong; after correction they matched exactly).
 Verified: 8-bit sweep unchanged at 215/226 with identical match names, 1226
 workspace tests pass. The 8-bit gate remains; stage 4 (u16 loop filter with
 bit-depth-scaled thresholds, then gate removal) is still open.
+
+## vp91-2-04-yuv422.webm: divergence in chroma loop filter (2026-11-27)
+
+Frame 0 bit-exact; frame 1 first differences U(0,16) Wedeo 105 vs FFmpeg 101,
+V(0,17) 123 vs 124; luma fully exact. Paired extraction on luma 8x8 block
+(32,0) / chroma (16,0): FFmpeg gdb `inter_pred_8bpp` and
+`mc_chroma_unscaled` measured `bs=BS_8x8`, mv=(90,-1),
+filter=FILTER_8TAP_SHARP, mx=90 my=-2 x=21 y=-1, mx_frac=10 my_frac=14,
+src_stride_u=80, dst_u[0]=76, dst_v[0]=125. Wedeo tracing produced identical
+inputs and predictions; forcing Scalar backend changed nothing, excluding SIMD.
+Coefficients also matched exactly: `{62,0,...,-73,0,73,0,73,0,73,-73}`,
+eob=16, uvtx=TX_4X4.
+
+After reconstruction Wedeo's 4x4 U block starts `[80,84,97,92]`; disabling
+`loop_filter_frame` left final pixels `[105,83,79,104]` unchanged. FFmpeg's
+final U row0[16..19] is `[101,79,75,100]` and `-skip_loop_filter all` does not
+change it (that FFmpeg tree has no skip_loop_filter check for VP9). Conclusion:
+upstream MC/MV/coefficients are aligned; the remaining difference is in 4:2:2
+chroma loop filtering (`loopfilter.rs`), which was out of scope for that agent.
+No patch. Evidence: `/tmp/ai-agent/` vp9-422 logs (ephemeral).
