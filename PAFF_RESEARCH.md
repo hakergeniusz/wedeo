@@ -1537,3 +1537,141 @@ hypotheses were rejected by measurement.
 - `/tmp/ai-agent/mbaff_compare_baseline.txt`, `mbaff_compare_nodeblock.txt`,
   `mbaff_compare_scanfix.txt`
 - `/tmp/ai-agent/mbaff_build*.log`
+
+---
+
+## Appendix N: First divergent PAFF CABAC bin (2026-11-27)
+
+Fixed at commit `e2ccefa`: Wedeo used `mb_field` where FFmpeg uses
+`mb_mbaff` for `rc = ref_count << MB_MBAFF(sl)`. Pure PAFF field pictures
+have `mb_field=1` but `mb_mbaff=0`, so Wedeo decoded 10 extra ref_idx bins
+before mvd. After the fix, bins 0-9 and the first mvd ([0,-5]) match FFmpeg
+exactly with no suite regression (42/69 FRext, zero new timeouts). Final
+PAFF pixels still diverge because field pairing, field-view MC and field
+deblock are not implemented; those are out of scope for this fix.
+
+# H.264 PAFF bottom-field first divergent CABAC bin (2026-11-27)
+
+Worktree: `/home/hakergeniusz/.local/share/opencode/worktree/695063/paff-bins`
+Base: HEAD `5e47eb4`. Temporary `tracing::trace!` probes were added and then
+fully reverted; no probe code remains in the final diff.
+
+## Vector and slice
+
+`/var/cache/zstd5/wedeo-ref/jvt-vectors/JVT-FR-EXT/Freh7_B.264`, first
+bottom-field P slice (`frame_num=0`, `picture_structure=PICT_BOTTOM_FIELD`,
+`mb_field_decoding_flag=1`, `mb_x=0/mb_y=1`, first coded MB is P_8x8 with
+sub-MB type 1 / 8x4). This is the complementary bottom field of the IDR picture.
+
+## Method
+
+FFmpeg: gdb on `/var/cache/zstd5/ffmpeg-src-w62/ffmpeg_g`
+(`--disable-asm --disable-optimizations --enable-debug=3`), breakpoints at
+`ff_h264_decode_mb_cabac`, `libavcodec/cabac_functions.h:128` (post-bin in the
+inlined `get_cabac`), `:150`/`:153` (bypass), plus marker breakpoints at
+`h264_cabac.c:1938` (mb_skip_flag), `:2004` (P mb_type), `:2130` (sub_mb_type)
+and `:2178` (first mvd). GDB scripts: `/tmp/ai-agent/ffmpeg_trace.gdb`,
+`ffmpeg_trace2.gdb`; raw output `ffmpeg_trace2.out`.
+
+Wedeo: temporary `trace!` probes inside `CabacReader::get_cabac`,
+`get_cabac_bypass`, `get_cabac_bypass_sign`, `get_cabac_terminate`, plus markers
+at P mb_type, sub_mb_type and mvd entry in `cabac.rs` and a bottom-field slice
+gate in `decoder.rs`. Built with `RUST_LOG=wedeo_codec_h264::cabac=trace`.
+Trace output: `/tmp/ai-agent/wedeo_trace_full.log` (baseline) and
+`wedeo_trace_fixed.log` (after fix). Slice start and P-sub-MB-type states
+matched FFmpeg in both.
+
+## Measured per-bin trace, slice start to first mvd
+
+Bins are numbered from 0 at the mb_skip_flag of the first bottom MB. `ctx` is
+the CABAC context-state index. Values are post-bin `low/range/pos`.
+
+| # | ctx | bin | FFmpeg low/range/pos | Wedeo low/range/pos | match |
+|---|-----|-----|----------------------|---------------------|-------|
+| 0 | 11 | 0 | 28898304/300/2 | 28898304/300/2 | yes |
+| 1 | 14 | 0 | 28898304/291/2 | 28898304/291/2 | yes |
+| 2 | 15 | 0 | 57796608/444/2 | 57796608/444/2 | yes |
+| 3 | 16 | 1 | 62889984/492/2 | 62889984/492/2 | yes |
+| 4 | 21 | 0 | 42680320/350/2 | 42680320/350/2 | yes |
+| 5 | 22 | 0 | 35028992/316/2 | 35028992/316/2 | yes |
+| 6 | 21 | 0 | 35275714/464/4 | 35275714/464/4 | yes |
+| 7 | 22 | 0 | 8423300/454/4 | 8423300/454/4 | yes |
+| 8 | 21 | 1 | 16846600/476/4 | 16846600/476/4 | yes |
+| 9 | 21 | 1 | 16846600/271/4 | 16846600/271/4 | yes |
+
+At bin 9 (the last sub_mb_type bin), both decoders are at exactly
+`low=16846600 range=271 pos=4`, matching Appendix L's FFmpeg value. This is
+the first mvd entry state in FFmpeg.
+
+### First divergence
+
+| # | ctx | bin | FFmpeg | Wedeo baseline |
+|---|-----|-----|--------|----------------|
+| 10 | 40 | 0 | `33693200/286/4` (mvd_x, state[40]=0) | `33693200/362/4` (ctx=54 ref_idx!) |
+
+Wedeo consumed an extra `ref_idx` bin at context 54 before mvd. The extra bins
+were `ctx=54 bin=0`, `ctx=54 bin=0`, `ctx=54 bin=1`, `ctx=58`, `ctx=59 x5`,
+`ctx=55` (bins 10 through 20), after which Wedeo entered mvd at
+`low=17072128 range=394 pos=4` and decoded `[0,1]` instead of FFmpeg's
+`[0,-5]`. This exactly reproduces Appendix L's baseline `low/range`.
+
+## Root cause (measured, not hypothesised)
+
+FFmpeg `h264_cabac.c:2140` decodes ref_idx only when
+`rc = sl->ref_count[list] << MB_MBAFF(sl)` is greater than 1.
+`MB_MBAFF(h)` is `h->mb_mbaff = h->mb_aff_frame && mb_field_decoding_flag`,
+which is 0 for pure PAFF field pictures. Wedeo's `decode_mb_cabac` used
+
+```
+let ref_count_l0 = num_ref_idx_l0_active << u32::from(mb_field);
+```
+
+`mb_field` was passed `hdr.field_pic_flag` (true for PAFF), so the single
+frame reference was doubled to 2 and every P_8x8 partition decoded a spurious
+ref_idx bin. The FFmpeg debug build confirms `mb_xy=389, mb_x=0, mb_y=1,
+mb_field=1`, `ref_count[0]=1`, and no ref_idx bin in the trace.
+
+## Minimal fix
+
+Add an explicit `mb_mbaff` parameter to `decode_mb_cabac` and use it for the
+doubling. The non-MBAFF PAFF path passes `false`; the MBAFF pair path passes
+`true`. No ref-list, MC, deblock or DPB code was touched.
+
+After the fix, the Wedeo per-bin trace is byte-identical to FFmpeg through the
+first mvd entry (`WDMARK mvd_start amvd0=0 amvd1=0 states[40,47]=[0,10]
+low=16846600 range=271 pos=4`); the first mvd bins then also match FFmpeg's
+trace (mvd_x `ctx=40 bin=0`, `low=33693200 range=286` after renormalization).
+
+## Verification status (final)
+
+- Per-bin parity after fix: Wedeo bins 0-9 and the first mvd entry now match
+  FFmpeg byte-for-byte (`low=16846600 range=271 pos=4`; first mvd bins
+  `ctx=40 bin=0`, `low=33693200 range=286`). The spurious ctx=54 ref_idx bins
+  are gone.
+- File-level framecrc: `wedeo-framecrc Freh7_B.264` produces 205 lines both
+  before and after; field CRCs from the first bottom-field slice onward change.
+- Pixel comparison against FFmpeg raw YUV: the bottom-field luma rows do NOT
+  reach parity (about 50680 differing luma bytes per frame before and after).
+  The decoded MVs now match FFmpeg at the first MB, but final pixels stay wrong
+  because full PAFF reconstruction (field pairing, field-view MC, field
+  deblock) is unimplemented and was explicitly out of scope for this task.
+- Debug-build panic at `mb.rs:3368` (`attempt to subtract with overflow`) was
+  seen in one slow debug trace configuration; release builds decode all frames
+  without it. Not part of this entropy fix.
+- Full JVT FRext suite: baseline 42/69 and fixed 42/69, identical 27-name FAIL
+  set (`diff` of sorted FAIL lists is empty), zero `timed out`/`ERROR` lines.
+  Run with `JVT_VECTORS=/var/cache/zstd5/wedeo-ref/jvt-vectors python3
+  scripts/suite_runner.py --suite jvt-fr-ext` on release binaries.
+- `cargo fmt --all -- --check` and `cargo clippy -p wedeo-codec-h264
+  --all-targets` both clean (only pre-existing workspace-dependency warnings).
+
+## Conclusion
+
+The first divergent CABAC bin was measured: bin 10, context 54 (ref_idx) in
+Wedeo, where FFmpeg goes directly to mvd context 40. One measured root cause:
+PAFF incorrectly doubled `ref_count` because `mb_field` was used in place of
+`mb_mbaff`. The minimal fix restores full bin-level parity through the first
+mvd and keeps the suite at 42/69 with no regressions or timeouts. Final bottom
+row pixel parity remains blocked by the separately unimplemented full PAFF
+reconstruction, which this task explicitly excluded. Committed as `ec3409b`,
+worktree clean, not pushed.
