@@ -158,3 +158,21 @@ gdb on an 8x8 planar TU (x0=360,y0=32,mode=0) gave FFmpeg prediction samples
 
 Conclusion: intra prediction is not the cause for these vectors. Do not repeat
 this investigation; focus on post-prediction deblock/SAO stages. No patch.
+
+## RESOLVED: SAO edge padding at CTB boundaries (commit d8531ba, 2026-11-27)
+
+`filter.rs` used `x0 + xx.saturating_sub(1)` for SAO edge fill; with `usize`
+and `xx=0` that picked the current column instead of `x-1`. Image-edge
+padding also clamped to a copy of the first row/column, while FFmpeg's
+`sao_filter_CTB()` leaves zeros in `edge_emu_buffer`.
+
+Paired trace on IPRED_B_Nokia_3 CTB(5,0): deblock produced the same values as
+FFmpeg (Y(320,1) 28->29, Cb(160,0) 151->152). Wedeo's SAO left neighbour was
+152 (duplicated first column) while FFmpeg's was 156. With Cb offsets
+`{0,1,1,0,0}`, `cmp(152,156)=-1` omitted the `+1`, giving 152 instead of 153.
+
+After the fix: Cb(160,0)=153, Cr(160,0)=123, both first chroma diffs gone.
+IPRED differing bytes 5901 -> 5577 (Y 170->54). Full 227-vector sweep stays
+9/227 with no new errors; the DSLICE_B_HHI_5 timeout disappeared (errors
+3 -> 2). CIP_A_Panasonic_3 is unchanged (2809 diffs) and remains with the CIP
+sample-replacement workstream.
