@@ -292,12 +292,19 @@ fn inline_deblock_row(
 ///
 /// A bottom field row's same-field predecessor is two frame rows above, and
 /// row progress must not regress below the already-complete top field.
+///
+/// The bottom slice starts at frame row `first_row`; rows above it belong to
+/// the top field only and were already filtered by the top slice's deferred
+/// inline pass. Filtering them here a second time changes the top field's
+/// first row by a few units (measured on Freh7_B.264), because FFmpeg filters
+/// each field row exactly once.
 fn inline_deblock_paff_bottom_row(
     fdc: &mut FrameDecodeContext,
     completed_row: u32,
     mb_width: u32,
     deblock_enabled: bool,
     is_paff_bottom: bool,
+    first_row: u32,
 ) {
     if !is_paff_bottom {
         inline_deblock_row(
@@ -309,12 +316,16 @@ fn inline_deblock_paff_bottom_row(
         return;
     }
     if !fdc.postpone_deblock && deblock_enabled && completed_row >= 2 {
+        let target = completed_row - 2;
+        if target < first_row {
+            return;
+        }
         deblock::deblock_row(
             &mut fdc.pic,
             &fdc.mb_info,
             &fdc.slice_table,
             &fdc.slice_deblock_params,
-            completed_row - 2,
+            target,
             mb_width,
         );
     }
@@ -2269,6 +2280,7 @@ impl H264Decoder {
                                 mb_width,
                                 deblock_enabled,
                                 is_paff_bottom,
+                                first_mb / mb_width,
                             );
                         }
 
@@ -2361,6 +2373,7 @@ impl H264Decoder {
                         mb_width,
                         deblock_enabled,
                         is_paff_bottom,
+                        first_mb / mb_width,
                     );
                 }
 
