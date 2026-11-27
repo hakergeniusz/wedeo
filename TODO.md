@@ -35,6 +35,7 @@
   - [ ] VP9 10/12-bit support
   - [ ] VP9 superframe parsing
 - [x] **HEVC decoder and encoder** - `adapters/wedeo-h265-oxideav` wraps pure-Rust `oxideav-h265` (MIT): full decode and I/P/B encode registered as `hevc_oxideav`. MP4 (hvcC + length-prefixed samples) and MPEG-TS (Annex B) output verified against FFmpeg. The native HEVC port remains partial.
+  - [ ] HEVC pixel parity - measured 2026-11-27: **2/227** vectors bit-exact against FFmpeg (the two matches are trivial 384-byte constant frame-packing vectors). `wedeo-framecrc` links only the native decoder (priority 100), not the adapter. A DPB slot-freeing fix (`fb4f2cd`) restored matching frame counts on 165/224 failing vectors (was e.g. 13 vs 60) but pixel hashes still differ. First target: 64x64 4:4:4 `cbf_cr_cb_TUDepth_4_circle.h265` (219 bytes).
 
 ### Video muxers
 - [x] **MP4/MOV muxer** — `formats/wedeo-format-mp4/src/muxer.rs` (H.264/HEVC/AAC, hvcC + length-prefixed samples, verified against FFmpeg).
