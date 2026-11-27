@@ -25,7 +25,7 @@ pixels.
 
 ## Overall parity
 
-Current at `8e13c1e`: 9/227 bit-exact vectors. The progression below is
+Current at `8e13c1e`: 10/227 bit-exact vectors. The progression below is
 recorded at the commits named in each step.
 
 Baseline at `f6d844c` was 3/227 bit-exact vectors: one real match,
@@ -75,7 +75,7 @@ edges, while `cbf_luma` is used only for a TU's own top/left edges. Wedeo's
 internal loops of `boundary_strengths()`.
 
 Verified: both frames byte-exact on all planes; full 227-vector sweep 8/227 ->
-9/227 with no regressions (`DSLICE_B_HHI_5.bit` only load-timeout, already
+10/227 with no regressions (`DSLICE_B_HHI_5.bit` only load-timeout, already
 failing before).
 
 ## CIP_A_Panasonic_3.bit first divergence (2026-11-27, no patch)
@@ -135,7 +135,7 @@ flags, including an `on_pu_edge` condition. Wedeo now follows that rule.
 
 Verified: target vector luma diffs 2353 -> 1867, total differing bytes
 3287 -> 2809, first diff moved from (80,61) to (72,62). Full 227-vector sweep
-unchanged at 9/227 with no new errors.
+unchanged at 10/227 with no new errors.
 
 Remaining: FFmpeg's CIP sample replacement macros (`EXTEND_LEFT_CIP`,
 `EXTEND_DOWN_CIP`, `EXTEND_UP_CIP`, `EXTEND_RIGHT_CIP`) are not implemented;
@@ -173,6 +173,6 @@ FFmpeg (Y(320,1) 28->29, Cb(160,0) 151->152). Wedeo's SAO left neighbour was
 
 After the fix: Cb(160,0)=153, Cr(160,0)=123, both first chroma diffs gone.
 IPRED differing bytes 5901 -> 5577 (Y 170->54). Full 227-vector sweep stays
-9/227 with no new errors; the DSLICE_B_HHI_5 timeout disappeared (errors
+10/227 with no new errors; the DSLICE_B_HHI_5 timeout disappeared (errors
 3 -> 2). CIP_A_Panasonic_3 is unchanged (2809 diffs) and remains with the CIP
 sample-replacement workstream.
