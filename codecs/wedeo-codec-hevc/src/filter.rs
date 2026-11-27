@@ -420,11 +420,6 @@ fn sao_ctb(
     }
 
     for c_idx in 0..if sps.chroma_format_idc != 0 { 3 } else { 1 } {
-        if c_idx == 2 {
-            params.type_idx[2] = params.type_idx[1];
-            params.eo_class[2] = params.eo_class[1];
-            params.offset_val[2] = params.offset_val[1];
-        }
         let sao_type = params.type_idx[c_idx];
         if sao_type == SaoType::NotApplied || sao_type == SaoType::Applied {
             continue;

@@ -1317,6 +1317,7 @@ impl CtuDecoder<'_, '_> {
             cb_y_base,
             log2_cb_size,
             log2_trafo_size,
+            trafo_depth,
             blk_idx,
             cbf_luma,
             &cbf_cb,
@@ -1352,6 +1353,7 @@ impl CtuDecoder<'_, '_> {
         cb_y_base: i32,
         log2_cb_size: u32,
         log2_trafo_size: u32,
+        trafo_depth: u32,
         blk_idx: u32,
         cbf_luma: i32,
         cbf_cb: &[i32; 2],
@@ -1473,9 +1475,35 @@ impl CtuDecoder<'_, '_> {
                     &mut coeffs,
                 )?;
             }
-            if self.sps.chroma_format_idc != 0
-                && (log2_trafo_size > 2 || self.sps.chroma_format_idc == 3)
-            {
+            // HEVC cross-component prediction (8.5.11.1). The syntax bins
+            // must be consumed even when the derived residual is not used,
+            // otherwise CABAC loses sync. FFmpeg gates on the *raw*
+            // chroma_mode_c of the selected PU; `intra.mode_c` is the derived
+            // prediction mode and is not equivalent.
+            let chroma_tu = self.sps.chroma_format_idc != 0
+                && (log2_trafo_size > 2 || self.sps.chroma_format_idc == 3);
+            let sel = if self.intra_split && trafo_depth == 1 {
+                (blk_idx & 3) as usize
+            } else {
+                0
+            };
+            let cross_pf = chroma_tu
+                && self.pps.cross_component_prediction_enabled_flag
+                && cbf_luma != 0
+                && (!self.pred_mode_intra || self.intra.chroma_modes[sel] == 4);
+            let mut res_scale_val = 0i32;
+            if cross_pf {
+                let plus1 = self.cabac.decode_log2_res_scale_abs(0);
+                res_scale_val = if plus1 != 0 {
+                    let sign = self.cabac.decode_res_scale_sign_flag(0);
+                    (1i32 << (plus1 - 1)) * (1 - 2 * i32::from(sign))
+                } else {
+                    0
+                };
+            }
+            let _ = res_scale_val;
+
+            if chroma_tu {
                 for i in 0..usize::from(self.sps.chroma_format_idc == 2) + 1 {
                     let cy = y0 + (i as i32) * size_c;
                     if self.pred_mode_intra {
@@ -1500,6 +1528,12 @@ impl CtuDecoder<'_, '_> {
                             1,
                             &mut coeffs,
                         )?;
+                    }
+                }
+                if cross_pf {
+                    let plus1 = self.cabac.decode_log2_res_scale_abs(1);
+                    if plus1 != 0 {
+                        let _ = self.cabac.decode_res_scale_sign_flag(1);
                     }
                 }
                 for i in 0..usize::from(self.sps.chroma_format_idc == 2) + 1 {
