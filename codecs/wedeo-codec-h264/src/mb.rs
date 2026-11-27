@@ -2038,8 +2038,12 @@ fn apply_mc_partition(
     block_h: usize,
     mv: [i16; 2],
 ) {
-    // For MV-based reference lookup, use frame-mode coordinates (not field-adjusted).
-    let dst_y = (mb_y * 16 + px_offset_y) as i32;
+    // A field reference has pic_as_field() applied in FFmpeg: its stride is
+    // doubled and the bottom field starts one original linesize in. Motion
+    // vectors are then relative to field rows, not frame rows.
+    let field_view = ref_pic.is_field() && ctx.mb_field;
+    let ref_mb_y = if field_view { mb_y / 2 } else { mb_y };
+    let dst_y = (ref_mb_y * 16 + px_offset_y) as i32;
     let mvy = mv[1] as i32;
 
     // Compute the highest reference pixel row needed.
@@ -2047,11 +2051,28 @@ fn apply_mc_partition(
     let ref_y_bottom = dst_y + (mvy >> 2) + block_h as i32 + 3;
     let needed_mb_row = (ref_y_bottom.max(0) as u32 / 16).min(ref_pic.mb_height() - 1);
 
-    // Block until reference picture has decoded this row
-    ref_pic.wait_for_row(needed_mb_row as i32);
+    // A bottom field may reference the already-decoded top field of the same
+    // picture. Its row progress counter tracks the current field, so waiting
+    // here would deadlock (FFmpeg h264_mb.c:60-70 skips the same check).
+    let self_field_ref = Arc::ptr_eq(&ref_pic.pic, ctx.pic.shared()) && ref_pic.is_field();
+    if !self_field_ref {
+        ref_pic.wait_for_row(needed_mb_row as i32);
+    }
 
-    // SAFETY: wait_for_row guarantees the needed rows are published.
+    // SAFETY: the top field of a self-reference is complete before the bottom
+    // field starts; all other rows are guaranteed by wait_for_row.
     let rp = unsafe { ref_pic.data() };
+    let field_luma_offset = if field_view && ref_pic.parity == 2 {
+        rp.y_stride
+    } else {
+        0
+    };
+    let ref_luma_stride = if field_view {
+        rp.y_stride * 2
+    } else {
+        rp.y_stride
+    };
+    let ref_luma_height = if field_view { rp.height / 2 } else { rp.height };
 
     // Compute field-aware destination offset and stride.
     // In field mode, the dst stride is doubled and the offset is adjusted for bottom field.
@@ -2074,8 +2095,8 @@ fn apply_mc_partition(
     mc::mc_luma(
         &mut ctx.pic.y[luma_offset..],
         luma_dst_stride,
-        &rp.y,
-        rp.y_stride,
+        &rp.y[field_luma_offset..],
+        ref_luma_stride,
         luma_ref_x,
         luma_ref_y,
         luma_dx,
@@ -2083,7 +2104,7 @@ fn apply_mc_partition(
         block_w,
         block_h,
         rp.width,
-        rp.height,
+        ref_luma_height,
         &mut ctx.mc_scratch,
     );
 
@@ -2106,12 +2127,12 @@ fn apply_mc_partition(
     let chroma_offset =
         chroma_mb_off + chroma_y_off as usize * chroma_dst_stride + (px_offset_x / 2) as usize;
 
-    // For MV-based reference lookup, use frame-mode coordinates.
+    // For MV-based reference lookup, use field coordinates for field refs.
     let chroma_dst_x = (mb_x * 8 + px_offset_x / 2) as i32;
     let chroma_dst_y = if chroma422 {
-        (mb_y * 16 + px_offset_y) as i32
+        (ref_mb_y * 16 + px_offset_y) as i32
     } else {
-        (mb_y * 8 + px_offset_y / 2) as i32
+        (ref_mb_y * 8 + px_offset_y / 2) as i32
     };
 
     let cmvx = mvx;
@@ -2131,11 +2152,28 @@ fn apply_mc_partition(
         (cmvy & 7) as u8
     };
 
+    let field_chroma_offset = if field_view && ref_pic.parity == 2 {
+        rp.uv_stride
+    } else {
+        0
+    };
+    let ref_chroma_stride = if field_view {
+        rp.uv_stride * 2
+    } else {
+        rp.uv_stride
+    };
+    let ref_chroma_height = if field_view && !chroma422 {
+        rp.height / 4
+    } else if chroma422 && !field_view {
+        rp.height
+    } else {
+        rp.height / 2
+    };
     mc::mc_chroma(
         &mut ctx.pic.u[chroma_offset..],
         chroma_dst_stride,
-        &rp.u,
-        rp.uv_stride,
+        &rp.u[field_chroma_offset..],
+        ref_chroma_stride,
         chroma_ref_x,
         chroma_ref_y,
         chroma_dx,
@@ -2143,14 +2181,14 @@ fn apply_mc_partition(
         chroma_w,
         chroma_h,
         rp.width / 2,
-        if chroma422 { rp.height } else { rp.height / 2 },
+        ref_chroma_height,
     );
 
     mc::mc_chroma(
         &mut ctx.pic.v[chroma_offset..],
         chroma_dst_stride,
-        &rp.v,
-        rp.uv_stride,
+        &rp.v[field_chroma_offset..],
+        ref_chroma_stride,
         chroma_ref_x,
         chroma_ref_y,
         chroma_dx,
@@ -2158,7 +2196,7 @@ fn apply_mc_partition(
         chroma_w,
         chroma_h,
         rp.width / 2,
-        if chroma422 { rp.height } else { rp.height / 2 },
+        ref_chroma_height,
     );
 }
 

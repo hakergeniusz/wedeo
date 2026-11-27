@@ -35,6 +35,20 @@ use crate::slice::{SliceHeader, SliceType, parse_slice_header};
 use crate::sps::{Sps, parse_sps};
 use crate::thread_pool::{DecodeThreadPool, FrameWork, InFlightDecode, SliceWorkUnit};
 
+/// Map a slice's `first_mb_in_slice` to a frame MB address.
+///
+/// PAFF field slices address MBs in field rows; the decode context stores
+/// pixels in frame rows. FFmpeg h264_slice.c:2040-2050 maps `mb_y` to
+/// `(first_mb / mb_width) << 1`, plus one for the bottom field.
+fn paff_frame_mb_addr(hdr: &SliceHeader, first_mb: u32, mb_width: u32) -> u32 {
+    if !hdr.field_pic_flag {
+        return first_mb;
+    }
+    let field_y = first_mb / mb_width;
+    let field_x = first_mb % mb_width;
+    field_y * 2 * mb_width + field_x + u32::from(hdr.bottom_field_flag) * mb_width
+}
+
 // ---------------------------------------------------------------------------
 // Threading configuration
 // ---------------------------------------------------------------------------
@@ -201,6 +215,10 @@ pub struct H264Decoder {
     /// DPB slot index for the current frame's placeholder entry (Phase 3).
     /// Set when store_placeholder is called at frame start, consumed in complete_in_flight.
     current_dpb_idx: Option<usize>,
+    /// True when the in-progress frame is a pure PAFF top field awaiting its
+    /// complementary bottom field. The bottom slice joins this frame instead
+    /// of starting a new one (FFmpeg h264_field_start).
+    current_paff_top: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +280,38 @@ fn inline_deblock_row(
         }
     } else {
         fdc.pic.publish_row(completed_row as i32);
+    }
+}
+
+/// Inline deblock for a PAFF bottom field row.
+///
+/// A bottom field row's same-field predecessor is two frame rows above, and
+/// row progress must not regress below the already-complete top field.
+fn inline_deblock_paff_bottom_row(
+    fdc: &mut FrameDecodeContext,
+    completed_row: u32,
+    mb_width: u32,
+    deblock_enabled: bool,
+    is_paff_bottom: bool,
+) {
+    if !is_paff_bottom {
+        inline_deblock_row(
+            fdc,
+            completed_row.saturating_sub(1),
+            mb_width,
+            deblock_enabled,
+        );
+        return;
+    }
+    if !fdc.postpone_deblock && deblock_enabled && completed_row >= 2 {
+        deblock::deblock_row(
+            &mut fdc.pic,
+            &fdc.mb_info,
+            &fdc.slice_table,
+            &fdc.slice_deblock_params,
+            completed_row - 2,
+            mb_width,
+        );
     }
 }
 
@@ -363,6 +413,7 @@ impl H264Decoder {
             crop_top: 0,
             delayed_pics: Vec::new(),
             current_dpb_idx: None,
+            current_paff_top: false,
         };
 
         // Parse avcC extradata if present (MP4/NALFF format).
@@ -797,9 +848,21 @@ impl H264Decoder {
                     .ok_or(Error::InvalidData)?;
 
                 let is_idr = nalu.nal_type == NalUnitType::Idr;
+                // FFmpeg picture_structure: 1 = top field, 2 = bottom field,
+                // 3 = frame. Pure PAFF bottom slices join the top field's
+                // FrameDecodeContext (h264_slice.c:1483-1532).
+                let field_structure = if hdr.field_pic_flag {
+                    if hdr.bottom_field_flag { 2 } else { 1 }
+                } else {
+                    3
+                };
+                let paff_continuation = field_structure == 2
+                    && self.current_paff_top
+                    && hdr.first_mb_in_slice == 0
+                    && self.current_fdc.is_some();
 
                 // Check if this starts a new frame
-                if hdr.first_mb_in_slice == 0 {
+                if hdr.first_mb_in_slice == 0 && !paff_continuation {
                     // Flush any in-progress frame and store in DPB
                     self.finish_current_frame();
 
@@ -832,6 +895,7 @@ impl H264Decoder {
                     self.current_is_idr = is_idr;
                     self.current_frame_num_h264 = hdr.frame_num;
                     self.current_nal_ref_idc = nalu.nal_ref_idc;
+                    self.current_paff_top = field_structure == 1;
 
                     // Dynamic reorder depth increase (matching FFmpeg
                     // h264_slice.c:1328-1331). B-frames need at least depth 1.
@@ -889,14 +953,43 @@ impl H264Decoder {
                     }
                 }
 
+                if paff_continuation {
+                    // The top field is already decoded. Make its DPB slot a
+                    // short-term reference with a top-only mask: ref_mask=3
+                    // would let the bottom field reference its own unwritten
+                    // rows (Appendix K). FFmpeg's bottom-field ref list at
+                    // h264_slice.c:1981 has exactly this one top-field entry.
+                    if let Some(idx) = self.current_dpb_idx
+                        && let Some(entry) = self.dpb.get_mut(idx)
+                    {
+                        entry.status = RefStatus::ShortTerm;
+                        entry.ref_mask = 1;
+                    }
+                    // All top-field rows are complete. Mark the shared
+                    // picture complete so bottom-field self-references never
+                    // wait on rows belonging to the bottom field itself.
+                    if let Some(fdc) = self.current_fdc.as_mut() {
+                        // No later publish from this frame lowers the value:
+                        // PAFF bottom rows use a non-publishing deblock path.
+                        fdc.pic.mark_complete();
+                        fdc.is_mbaff = false; // pure PAFF never uses MBAFF pair deblock
+                    }
+                    self.current_paff_top = false;
+                }
+
                 // Build reference lists per-slice. Different slices within
                 // a frame can have different types (e.g., CABAST3 has
                 // alternating I/P slices). Each P/B slice needs its own
                 // reference list; I-slices clear the lists.
                 if hdr.slice_type.is_p() {
                     let max_frame_num = 1u32 << sps.log2_max_frame_num;
-                    self.ref_list_l0 =
-                        refs::build_ref_list_p(&self.dpb, &hdr, hdr.frame_num, max_frame_num, 3);
+                    self.ref_list_l0 = refs::build_ref_list_p(
+                        &self.dpb,
+                        &hdr,
+                        hdr.frame_num,
+                        max_frame_num,
+                        field_structure,
+                    );
                     self.ref_list_l1.clear();
                     debug!(
                         poc = self.current_poc,
@@ -912,7 +1005,7 @@ impl H264Decoder {
                         &hdr,
                         self.current_poc,
                         max_frame_num_b,
-                        3,
+                        field_structure,
                     );
                     debug!(
                         poc = self.current_poc,
@@ -961,9 +1054,14 @@ impl H264Decoder {
 
                     // Build list of reference entries for MC.
                     let to_ref_pic = |entry: &RefListEntry| {
-                        self.dpb
-                            .get(entry.dpb_idx)
-                            .map(|e| RefPic::frame(Arc::clone(&e.pic), e.poc, e.frame_num))
+                        self.dpb.get(entry.dpb_idx).map(|e| {
+                            if entry.parity == 3 {
+                                RefPic::frame(Arc::clone(&e.pic), e.poc, e.frame_num)
+                            } else {
+                                let poc = e.field_poc[(entry.parity - 1) as usize];
+                                RefPic::field(Arc::clone(&e.pic), entry.parity, poc, e.frame_num)
+                            }
+                        })
                     };
                     let ref_pic_list: Vec<RefPic> =
                         self.ref_list_l0.iter().filter_map(to_ref_pic).collect();
@@ -1103,6 +1201,7 @@ impl H264Decoder {
     fn finish_current_frame(&mut self) {
         if let (Some(fdc), Some(last_hdr)) = (self.current_fdc.take(), self.current_last_hdr.take())
         {
+            self.current_paff_top = false;
             let mut slices = std::mem::take(&mut self.pending_slices);
             if slices.is_empty() {
                 // No slices buffered — put FDC back
@@ -1112,12 +1211,18 @@ impl H264Decoder {
             }
 
             // Compute slice boundaries for parallel decode.
-            // Sort by first_mb_in_slice (should already be ordered, but enforce).
-            slices.sort_by_key(|s| s.hdr.first_mb_in_slice);
+            // Sort by frame MB address: a bottom field slice at field row 0
+            // maps to frame row 1, so it follows the top field slice.
+            slices
+                .sort_by_key(|s| paff_frame_mb_addr(&s.hdr, s.hdr.first_mb_in_slice, fdc.mb_width));
             let total_mbs = fdc.mb_width * fdc.mb_height;
             for i in 0..slices.len() {
                 slices[i].next_slice_first_mb = if i + 1 < slices.len() {
-                    slices[i + 1].hdr.first_mb_in_slice
+                    paff_frame_mb_addr(
+                        &slices[i + 1].hdr,
+                        slices[i + 1].hdr.first_mb_in_slice,
+                        fdc.mb_width,
+                    )
                 } else {
                     total_mbs
                 };
@@ -2012,12 +2117,31 @@ impl H264Decoder {
         // Initialize CABAC neighbor context
         let mut cabac_nb = CabacNeighborCtx::new(mb_width, mb_height);
 
-        // Decode macroblocks
-        let first_mb = hdr.first_mb_in_slice;
+        // Decode macroblocks. PAFF field MB addresses are in field rows;
+        // reconstruction buffers use frame rows with doubled stride.
+        let first_mb = paff_frame_mb_addr(hdr, hdr.first_mb_in_slice, mb_width);
         let mut mbs_decoded = 0u32;
         let is_inter_slice = hdr.slice_type.is_p() || hdr.slice_type.is_b();
-        let is_mbaff = !sps.frame_mbs_only_flag && sps.mb_aff;
+        let is_mbaff = !sps.frame_mbs_only_flag && sps.mb_aff && !hdr.field_pic_flag;
+        let is_paff = hdr.field_pic_flag;
+        let is_paff_bottom = is_paff && hdr.bottom_field_flag;
         let deblock_enabled = std::env::var("WEDEO_NO_DEBLOCK").is_err();
+        if is_paff {
+            fdc.is_mbaff = false;
+            fdc.mb_field = true;
+            if hdr.bottom_field_flag && deblock_enabled && fdc.mb_height >= 2 {
+                // The top field's last row was deferred by the 1-row inline
+                // deblock delay. Filter it before the bottom field writes rows.
+                deblock::deblock_row(
+                    &mut fdc.pic,
+                    &fdc.mb_info,
+                    &fdc.slice_table,
+                    &fdc.slice_deblock_params,
+                    fdc.mb_height - 2,
+                    mb_width,
+                );
+            }
+        }
 
         if is_mbaff {
             mbs_decoded = Self::decode_slice_cabac_mbaff(
@@ -2040,15 +2164,19 @@ impl H264Decoder {
                 let mb_y = mb_addr / mb_width;
                 let mb_idx = mb_addr as usize;
 
-                // Update neighbor context at the start of each row
+                // Update neighbor context at the start of each row.
+                // PAFF fields use a doubled top stride: the neighbor above
+                // belongs to the same field two frame rows up.
+                let top_stride = if is_paff { 2 * mb_width } else { mb_width };
+                let top_mb = mb_addr.checked_sub(top_stride);
+                let top_available =
+                    top_mb.is_some_and(|a| fdc.slice_table[a as usize] == fdc.current_slice);
                 if mb_x == 0 {
                     fdc.neighbor_ctx.new_row();
-                    fdc.neighbor_ctx.top_available = mb_y > 0
-                        && fdc.slice_table[(mb_addr - mb_width) as usize] == fdc.current_slice;
+                    fdc.neighbor_ctx.top_available = top_available;
                 } else if mb_addr == first_mb {
                     fdc.neighbor_ctx.left_available = false;
-                    fdc.neighbor_ctx.top_available = mb_y > 0
-                        && fdc.slice_table[(mb_addr - mb_width) as usize] == fdc.current_slice;
+                    fdc.neighbor_ctx.top_available = top_available;
                 }
 
                 // For inter slices: decode skip flag
@@ -2063,8 +2191,8 @@ impl H264Decoder {
                         mb_x,
                         mb_y,
                         mb_width,
-                        false,
-                        false,
+                        is_paff,
+                        is_paff,
                         &fdc.mb_field_flag,
                         &fdc.slice_table,
                         fdc.current_slice,
@@ -2085,7 +2213,12 @@ impl H264Decoder {
                         } else {
                             mb::decode_skip_mb(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1);
                         }
-                        post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, None);
+                        // The high-depth reconstruction pass addresses
+                        // references in frame mode and waits on frame rows;
+                        // it cannot safely run on PAFF bottom fields yet.
+                        if !is_paff_bottom {
+                            post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, None);
+                        }
                         fdc.last_qscale_diff = 0;
 
                         // Update CABAC neighbor context for skip MB
@@ -2104,11 +2237,12 @@ impl H264Decoder {
                         mbs_decoded += 1;
                         // Inline deblock + publish with 1-row delay
                         if mb_addr.is_multiple_of(mb_width) {
-                            inline_deblock_row(
+                            inline_deblock_paff_bottom_row(
                                 fdc,
-                                mb_addr / mb_width - 1,
+                                mb_addr / mb_width,
                                 mb_width,
                                 deblock_enabled,
+                                is_paff_bottom,
                             );
                         }
 
@@ -2121,8 +2255,7 @@ impl H264Decoder {
                 }
 
                 // Update per-MB neighbor availability (slice-boundary aware)
-                fdc.neighbor_ctx.top_available =
-                    mb_y > 0 && fdc.slice_table[(mb_addr - mb_width) as usize] == fdc.current_slice;
+                fdc.neighbor_ctx.top_available = top_available;
 
                 // Decode coded MB via CABAC
                 let mut cache = CabacDecodeCache::new();
@@ -2130,8 +2263,8 @@ impl H264Decoder {
                     mb_x,
                     mb_y,
                     mb_width,
-                    false,
-                    false,
+                    is_paff,
+                    is_paff,
                     &fdc.mb_field_flag,
                     &fdc.slice_table,
                     fdc.current_slice,
@@ -2162,7 +2295,17 @@ impl H264Decoder {
 
                 // Apply entropy-agnostic processing (dequant, IDCT, pred, MC, neighbor update)
                 mb::apply_macroblock(fdc, &mut mb, hdr, pps, mb_x, mb_y, ref_pics, ref_pics_l1)?;
-                post_decode_mb_hires(fdc, hdr, mb_x, mb_y, ref_pics, ref_pics_l1, Some(&mut mb));
+                if !is_paff_bottom {
+                    post_decode_mb_hires(
+                        fdc,
+                        hdr,
+                        mb_x,
+                        mb_y,
+                        ref_pics,
+                        ref_pics_l1,
+                        Some(&mut mb),
+                    );
+                }
 
                 // Write back MVD/ref from scan8 cache to flat storage, then update scalar fields
                 cache.write_back(&mut cabac_nb, mb_idx);
@@ -2186,7 +2329,13 @@ impl H264Decoder {
                 mbs_decoded += 1;
                 // Inline deblock + publish with 1-row delay
                 if mb_addr.is_multiple_of(mb_width) {
-                    inline_deblock_row(fdc, mb_addr / mb_width - 1, mb_width, deblock_enabled);
+                    inline_deblock_paff_bottom_row(
+                        fdc,
+                        mb_addr / mb_width,
+                        mb_width,
+                        deblock_enabled,
+                        is_paff_bottom,
+                    );
                 }
 
                 // Check terminate
