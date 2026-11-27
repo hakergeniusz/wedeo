@@ -56,3 +56,22 @@ bit-identical framecrc, and baseline SHA-256
 (257 frames). No A/B was run, so no patch was committed.
 
 Raw report: `/tmp/ai-agent/PERF_FINAL.md` (ephemeral).
+
+## Deblock hoist candidate rejected (2026-11-27)
+
+The documented `get_tc0`/shift hoist was implemented and verified bit-exact on
+11 vectors (baseline SHA-256 `c5bccd8f...4ab`, 257 frames). It was REVERTED
+because no >5% wall-clock improvement was reproducible:
+
+| Setup | Pairs | Median change |
+|---|---:|---:|
+| nice 19, A/B alternating | 4 | -5.15% |
+| reversed order | 4 | +3.94% |
+| taskset core 10 | 6 | -6.01% |
+
+`perf stat` showed instruction count falling about 4.1% (35.98B -> 34.49B)
+but cycles did not fall correspondingly and branch mispredictions rose about
+13%. The saved instructions were eaten by branch prediction penalties. A
+variant without `Option` and with the original branch structure behaved the
+same. Do not retry this hoist, and do not count the 4% instruction reduction
+as a win.
