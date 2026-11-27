@@ -77,3 +77,24 @@ internal loops of `boundary_strengths()`.
 Verified: both frames byte-exact on all planes; full 227-vector sweep 8/227 ->
 9/227 with no regressions (`DSLICE_B_HHI_5.bit` only load-timeout, already
 failing before).
+
+## CIP_A_Panasonic_3.bit first divergence (2026-11-27, no patch)
+
+Vector: `hevc-conformance/CIP_A_Panasonic_3.bit` (11957 bytes, 2 frames,
+416x240 yuv420p, Main). Frame 0 bit-exact (`0x6e1f16d0`), frame 1 differs:
+Wedeo `0x3e35865a`, FFmpeg `0x5be5bde9`. Frame 1 diffs: Y 2353/99840,
+Cb 300/24960, Cr 634/24960. First luma difference at (80,61): Wedeo 124,
+FFmpeg 123; large full-8x8-block differences start at CTU (1,1)/(1,2), e.g.
+(64,64) 122 vs 116 and (66,64) 120 vs 95.
+
+FFmpeg gdb values at `deblocking_filter_CTB()` entry for CTB (64,64), POC 1:
+Y(80,61)=123, Y(64,64)=111, Y(66,64)=101, Y(70,70)=98, Y(80,64)=121,
+Y(96,80)=124, Y(64,128)=64, Y(80,128)=80. Most internal edges are bs=2
+(intra blocks), with zeros at x=120 and x=72 for y=80/88. SAO was not
+triggered at that CTB but was not directly confirmed to be disabled.
+
+No Wedeo-side intermediate values were captured: the isolated build was
+blocked by 13 concurrent cargo processes / rav1d nasm scripts and exceeded the
+time budget. Deblocking, SAO and reconstruction remain unexonerated. Next step:
+pair the Wedeo pre-deblock samples at the coordinates above with the FFmpeg
+values. Evidence: `/tmp/ai-agent/HEVC_C_GT.md` (ephemeral).
