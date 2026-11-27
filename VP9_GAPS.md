@@ -362,3 +362,19 @@ Critical finding: FFmpeg's CLI inserts swscale automatically for this vector,
 upscaling 282x173 to 352x288 before computing framecrc. A decoder-only fix
 cannot make this vector bit-exact; output scaling must be handled too. Do not
 retry scaled MC expecting framecrc parity on this vector.
+
+---
+
+## RESOLVED: 8-bit 4:4:0 pixel format (commit 0bc9420, 2026-11-27)
+
+FFmpeg gdb at `vp9.c:520` measured `bits=0 ss_h=0 ss_v=1 pix_fmt=31`, i.e.
+8-bit 4:4:0 maps to `AV_PIX_FMT_YUV440P`. Wedeo had no such PixelFormat, so
+`output_pixel_format(8,false,true)` returned None, the keyframe was dropped,
+and sticky config then parsed inter frames as 4:2:0 (9 frames of 21600 bytes
+instead of FFmpeg's 10 frames of 28800 bytes).
+
+Added `PixelFormat::Yuv440p` and the mapping, plus framecrc chroma geometry
+(0,1,1) and hflip/crop exhaustive matches. Verified frame count 9 -> 10, frame 0
+CRC exact (`0x4a56762b`), all luma bytes exact, full sweep unchanged at
+215/226 with no new failures. Remaining inter-frame chroma differences are a
+separate root cause (suspected sub-8x8 chroma MV under mixed subsampling).
