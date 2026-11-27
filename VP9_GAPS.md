@@ -45,10 +45,11 @@ silently wrong.
 
 ### Sweep status
 
-Current at `8e13c1e`: 226 local VP9 vectors, 214 bit-exact, 4 CRC differences,
-8 zero-frame vectors (the high-depth set). The earlier 211 bit-exact / 7 CRC
-baseline was recorded before the `d7ac5ba` clipped-NNZ edge-context fix. No
-regressions.
+Current at HEAD `58d2c0c`: 226 local VP9 vectors, 215 bit-exact, 3 CRC
+differences, 8 zero-frame vectors (the high-depth set); see `STATUS.md`. At
+`8e13c1e` the sweep was 214 bit-exact, 4 CRC differences, 8 zero-frame
+vectors. The earlier 211 bit-exact / 7 CRC baseline was recorded before the
+`d7ac5ba` clipped-NNZ edge-context fix. No regressions.
 
 ## Odd-size 210x202 divergence is upstream of the loop filter
 
@@ -126,10 +127,10 @@ changed and the early return stays in place.
 
 Verification: `cargo test --workspace`, `cargo clippy -p wedeo-codec-vp9
 --all-targets -- -D warnings`, `cargo fmt -p wedeo-codec-vp9`, and full
-FATE VP9 framecrc parity with no regressions. At the current HEAD the sweep is
+FATE VP9 framecrc parity with no regressions. At that time the sweep was
 214 bit-exact, 4 known differences and 8 high-depth zero-frame vectors (the
 agent's isolated worktree was based on the older 211/7 baseline before the
-NNZ edge-context fix).
+NNZ edge-context fix). Current parity is in `STATUS.md`.
 
 ## Stage 3: reconstruction math
 
@@ -242,7 +243,11 @@ behaviour.
 
 ---
 
-## Remaining 4 non-high-depth VP9 differences (2026-11-27)
+## Remaining non-high-depth VP9 differences (historical, 2026-11-27)
+
+This section records the four differences enumerated at base `d86b9d2`. At
+HEAD `58d2c0c`, `vp91-2-04-yuv444.webm` is exact after `1486b7d` and `9153d35`,
+leaving three CRC differences; see `STATUS.md`.
 
 # VP9 remaining 8-bit differences: ground truth (2026-11-27)
 
@@ -254,9 +259,9 @@ FFmpeg: `/var/cache/zstd5/ffmpeg-src-w62/ffmpeg_g`, run with
 Wedeo: release `wedeo-framecrc` built in
 `CARGO_TARGET_DIR=/var/cache/zstd5/wedeo-target-vp9-rem`.
 
-## Enumerated set (current HEAD, baseline binary)
+## Enumerated set (baseline binary at `d86b9d2`)
 
-`214 exact, 4 diff, 8 high-depth zero-frame`:
+`214 exact, 4 diff, 8 high-depth zero-frame` at that base:
 
 - `vp90-2-05-resize.ivf`: first CRC difference at frame 3.
 - `vp91-2-04-yuv422.webm`: first CRC difference at frame 1.

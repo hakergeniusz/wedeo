@@ -9,8 +9,8 @@ See [STATUS.md](STATUS.md) for the compact measured-state table.
 - H.264 FATE CABAC: **27/27** progressive conformance files BITEXACT
 - H.264 JVT-AVC_V1: **78/135**; JVT-FR-EXT: **44/69**
 - H.264 interlaced: PAFF field pairing and field-view MC landed as a bounded step with documented trade-offs; full MBAFF/PAFF pixel parity remains open. See `PAFF_RESEARCH.md` Appendix Q.
-- VP9: **214/226** vectors BITEXACT (4 CRC differences, 8 high-depth zero-frame vectors)
-- HEVC, native port: **9/227** conformance vectors BITEXACT
+- VP9: **215/226** vectors BITEXACT (3 CRC differences, 8 high-depth zero-frame vectors)
+- HEVC, native port: **10/227** conformance vectors BITEXACT
 - WAV/PCM pipeline: byte-identical to FFmpeg 8.0.1 across all FATE suite samples
 - Audio via symphonia: 28 decoders, 10 demuxers, SNR-verified lossy codecs
 - **Video player (v0.1.1):** GPU-accelerated via wgpu+winit, 24fps 0-drop 1080p playback, ffplay-style A/V sync
@@ -64,9 +64,9 @@ Single-threaded gap: wedeo is **12x slower** than FFmpeg (scalar Rust vs C+NEON)
 
 ## Next Steps (open gaps)
 
-- VP9 inter frame conformance - 4 CRC differences remain; 8 high-depth vectors emit zero frames (see `VP9_GAPS.md`)
+- VP9 inter frame conformance - 3 CRC differences remain; 8 high-depth vectors emit zero frames (see `VP9_GAPS.md`)
 - VP9 probability adaptation - `adapt_probs` not yet wired up between frames
 - Seek reimplementation - ffplay serial mechanism for stale frame discard
 - SIMD for MC lowpass filters (NEON) - primary target, 3x slower at qpel(2,2) vs (0,0)
 - Full interlaced (MBAFF/PAFF) pixel parity - field pairing and field-view MC are in place; remaining work is in `PAFF_RESEARCH.md` Appendix Q
-- HEVC native pixel parity - 9/227; next targets in `HEVC_GAPS.md`
+- HEVC native pixel parity - 10/227; next targets in `HEVC_GAPS.md`

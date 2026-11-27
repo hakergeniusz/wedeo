@@ -25,7 +25,7 @@ pixels.
 
 ## Overall parity
 
-Current at `8e13c1e`: 10/227 bit-exact vectors. The progression below is
+Current at HEAD `58d2c0c`: 10/227 bit-exact vectors. The progression below is
 recorded at the commits named in each step.
 
 Baseline at `f6d844c` was 3/227 bit-exact vectors: one real match,
@@ -137,9 +137,10 @@ Verified: target vector luma diffs 2353 -> 1867, total differing bytes
 3287 -> 2809, first diff moved from (80,61) to (72,62). Full 227-vector sweep
 unchanged at 10/227 with no new errors.
 
-Remaining: FFmpeg's CIP sample replacement macros (`EXTEND_LEFT_CIP`,
-`EXTEND_DOWN_CIP`, `EXTEND_UP_CIP`, `EXTEND_RIGHT_CIP`) are not implemented;
-reference samples still differ slightly (t15 114 vs 112, t31 128 vs 130).
+Resolved later by `e7a65a6`: FFmpeg's CIP sample replacement macros
+(`EXTEND_LEFT_CIP`, `EXTEND_DOWN_CIP`, `EXTEND_UP_CIP`, `EXTEND_RIGHT_CIP`) are
+now applied after neighbour collection. `CIP_A_Panasonic_3.bit` became
+byte-exact (2809 -> 0 differing bytes) and HEVC parity rose to 10/227.
 
 ## Intra prediction exonerated on IPRED/CIP vectors (2026-11-27)
 
@@ -174,5 +175,5 @@ FFmpeg (Y(320,1) 28->29, Cb(160,0) 151->152). Wedeo's SAO left neighbour was
 After the fix: Cb(160,0)=153, Cr(160,0)=123, both first chroma diffs gone.
 IPRED differing bytes 5901 -> 5577 (Y 170->54). Full 227-vector sweep stays
 10/227 with no new errors; the DSLICE_B_HHI_5 timeout disappeared (errors
-3 -> 2). CIP_A_Panasonic_3 is unchanged (2809 diffs) and remains with the CIP
-sample-replacement workstream.
+3 -> 2). CIP_A_Panasonic_3 was unchanged (2809 diffs) at that point; the later
+CIP sample-replacement fix `e7a65a6` made it byte-exact (0 diffs).

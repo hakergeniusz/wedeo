@@ -1,6 +1,6 @@
 # Wedeo measured status
 
-Snapshot at commit `8e13c1e` (2026-11-27). Counts are bit-exact framecrc matches
+Snapshot at commit `58d2c0c` (2026-11-27). Counts are bit-exact framecrc matches
 against FFmpeg unless an SNR is stated. Research appendices keep their original
 dates and commits; the numbers below are the current ones.
 

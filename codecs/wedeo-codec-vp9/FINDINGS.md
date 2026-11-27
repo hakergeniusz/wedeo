@@ -1,7 +1,7 @@
 # VP9 conformance root-cause findings (agent/w55)
 
 Historical ground-truth extraction notes from an earlier investigation.
-Current VP9 parity is 214/226; see `STATUS.md` and `VP9_GAPS.md`. All numbers
+Current VP9 parity is 215/226; see `STATUS.md` and `VP9_GAPS.md`. All numbers
 below were measured against the 226-vector `vp9-test-vectors` corpus with
 `wedeo-framecrc` vs `ffmpeg -bitexact` (CRC field only, since wedeo emits a
 1/1000 time base and FFmpeg 1001/30000).

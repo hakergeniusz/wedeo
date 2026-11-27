@@ -59,9 +59,10 @@ above, so this file's original "first divergence" is historical.
 - Sample (67,0) also matches: FFmpeg prediction 101 + residual 55 = 156,
   Wedeo identical; deblock and SAO leave it at 156 (EO=3 top row uses
   `offset_val[0]=0`).
-- The first luma difference at current HEAD moved to Y(384,6).
+- The first luma difference at that HEAD (`ce02fc5`) moved to Y(384,6).
 
 A clean release sweep in that worktree and in the main checkout both measured
-8/227 at `ce02fc5`, with no regression. Current HEAD measures 9/227 after the
-inter-TU deblock fix `f32250c` (see `HEVC_GAPS.md`). Do not chase Cb/Cr(67,0)
-again.
+8/227 at `ce02fc5`, with no regression. The inter-TU deblock fix `f32250c`
+raised it to 9/227; the CIP sample-replacement fix `e7a65a6` raised current HEAD
+(`58d2c0c`) to 10/227 (see `HEVC_GAPS.md` and `STATUS.md`). Do not chase
+Cb/Cr(67,0) again.
