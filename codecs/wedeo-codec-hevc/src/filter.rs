@@ -53,8 +53,18 @@ pub fn filter_picture(
     }
 
     if sps.sao_enabled {
-        let mut sao_h = vec![0u16; sps.ctb_height as usize * 2 * sps.width as usize];
-        let mut sao_v = vec![0u16; sps.ctb_width as usize * 2 * sps.height as usize];
+        // FFmpeg's `hevcdec.c:150-166` allocates one `sao_pixel_buffer_h/v`
+        // pair per component. Each plane has its own width/height, so a
+        // single shared buffer indexed with the component's plane size lets
+        // one component's saved edge samples overwrite another's.
+        let comp_count = if sps.chroma_format_idc != 0 { 3 } else { 1 };
+        let mut sao_h = Vec::with_capacity(comp_count);
+        let mut sao_v = Vec::with_capacity(comp_count);
+        for c in 0..comp_count {
+            let (pw, ph) = pic.plane_size[c];
+            sao_h.push(vec![0u16; pw * 2 * sps.ctb_height as usize]);
+            sao_v.push(vec![0u16; ph * 2 * sps.ctb_width as usize]);
+        }
         for ry in 0..sps.ctb_height as i32 {
             for rx in 0..sps.ctb_width as i32 {
                 sao_ctb(
@@ -334,8 +344,8 @@ fn sao_ctb(
     pic: &mut Picture,
     sps: &Sps,
     pps: &Pps,
-    sao_h: &mut [u16],
-    sao_v: &mut [u16],
+    sao_h: &mut [Vec<u16>],
+    sao_v: &mut [Vec<u16>],
     x: i32,
     y: i32,
 ) -> Result<()> {
@@ -465,7 +475,18 @@ fn sao_ctb(
                 // FFmpeg's copy_CTB_to_hv() (filter.c:346) saves the pre-SAO
                 // samples for neighbouring CTBs' EO edge padding.
                 store_hv(
-                    pic, c_idx, sao_h, sao_v, x_ctb, y_ctb, x0, y0, width, height, pw, ph,
+                    pic,
+                    c_idx,
+                    &mut sao_h[c_idx],
+                    &mut sao_v[c_idx],
+                    x_ctb,
+                    y_ctb,
+                    x0,
+                    y0,
+                    width,
+                    height,
+                    pw,
+                    ph,
                 );
                 for yy in 0..height {
                     for xx in 0..width {
@@ -512,10 +533,10 @@ fn sao_ctb(
                             0
                         } else if is_top || is_bottom {
                             // FFmpeg's sao_filter_CTB() (filter.c:379-426):
-                            // the padding rows are filled from the neighbour
-                            // CTB above/below. At the left and right corners
-                            // that neighbour is the diagonal CTB, not the
-                            // one directly above/below.
+                            // padding rows are filled from the neighbour CTB
+                            // above/below. At left/right corners that is the
+                            // diagonal CTB (A's fix), and each component has
+                            // its own edge buffers (B's fix).
                             let nx = if is_left {
                                 x_ctb.wrapping_sub(1)
                             } else if is_right {
@@ -534,7 +555,7 @@ fn sao_ctb(
                                 } else {
                                     2 * (y_ctb + 1)
                                 };
-                                sao_h
+                                sao_h[c_idx]
                                     .get(row * pw + cx)
                                     .copied()
                                     .unwrap_or_else(|| pic.sample(c_idx, cx, cy))
@@ -542,10 +563,10 @@ fn sao_ctb(
                                 pic.sample(c_idx, cx, cy)
                             }
                         } else if is_left && applied(x_ctb - 1, y_ctb) {
-                            let v = sao_v.get((2 * x_ctb - 1) * ph + cy).copied();
+                            let v = sao_v[c_idx].get((2 * x_ctb - 1) * ph + cy).copied();
                             v.unwrap_or_else(|| pic.sample(c_idx, cx, cy))
                         } else if is_right && applied(x_ctb + 1, y_ctb) {
-                            let v = sao_v.get((2 * (x_ctb + 1)) * ph + cy).copied();
+                            let v = sao_v[c_idx].get((2 * (x_ctb + 1)) * ph + cy).copied();
                             v.unwrap_or_else(|| pic.sample(c_idx, cx, cy))
                         } else {
                             pic.sample(c_idx, cx, cy)
@@ -592,7 +613,18 @@ fn sao_ctb(
                 // FFmpeg's copy_CTB_to_hv() (filter.c:459) saves the pre-SAO
                 // samples for neighbouring CTBs' EO edge padding.
                 store_hv(
-                    pic, c_idx, sao_h, sao_v, x_ctb, y_ctb, x0, y0, width, height, pw, ph,
+                    pic,
+                    c_idx,
+                    &mut sao_h[c_idx],
+                    &mut sao_v[c_idx],
+                    x_ctb,
+                    y_ctb,
+                    x0,
+                    y0,
+                    width,
+                    height,
+                    pw,
+                    ph,
                 );
                 for yy in 0..height {
                     for xx in 0..width {
