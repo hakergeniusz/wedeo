@@ -87,8 +87,19 @@ reimplementation. Quality varies by mode:
 - SILK mode: ~11-14 dB SNR vs FFmpeg (poor, real accuracy gaps)
 - Hybrid mode: ~13-14 dB SNR vs FFmpeg (same class of issue)
 
-The SILK/hybrid quality gap is a limitation of the opus-decoder crate's
-current implementation, not a wedeo adapter issue.
+Measured on `fate-suite/opus/silk-lbrr-mono.mka` with WAV framecrc and PCM SNR
+(2026-11-27): before the fix Wedeo produced 43200 samples vs FFmpeg's 43278,
+with -4.05 dB SNR. FFmpeg logs `skip 312/960 samples` from Matroska CodecDelay.
+Symphonia 0.5.5 ignores CodecDelay, and Wedeo's Ogg demuxer emits
+`SkipSamples` side data that nothing consumes, so the decoder now reads the
+pre-skip from bytes 10..12 of the OpusHead extradata itself. After the fix
+SNR is 9.79 dB (CELT control `testvector01.mka` unchanged at 87.29 dB).
+The residual is upstream: `opus-decoder` 0.1.1's 8 kHz to 48 kHz resampler has
+a different phase from libopus (best waveform correlation after the pre-skip
+fix is at a -4 sample shift), and libopus applies SILK CNG/PLC glue which the
+crate approximates. libopus has no SILK post-filter, so no post-filter is
+missing here. Matroska DiscardPadding (570 samples on this vector) is also
+ignored by Symphonia.
 
 ### Vorbis floating-point precision
 
