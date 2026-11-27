@@ -1510,7 +1510,7 @@ impl CtuDecoder<'_, '_> {
                         self.predict_chroma_tu(
                             x0,
                             cy,
-                            size << self.sps.hshift[1],
+                            size_c << self.sps.hshift[1],
                             size_c << self.sps.vshift[1],
                             log2_c,
                             1,
@@ -1542,7 +1542,7 @@ impl CtuDecoder<'_, '_> {
                         self.predict_chroma_tu(
                             x0,
                             cy,
-                            size << self.sps.hshift[1],
+                            size_c << self.sps.hshift[1],
                             size_c << self.sps.vshift[1],
                             log2_c,
                             2,
@@ -1603,7 +1603,7 @@ impl CtuDecoder<'_, '_> {
                     self.predict_chroma_tu(
                         x0,
                         cy,
-                        size << self.sps.hshift[1],
+                        size_c << self.sps.hshift[1],
                         size_c << self.sps.vshift[1],
                         log2_c,
                         1,
@@ -1611,7 +1611,7 @@ impl CtuDecoder<'_, '_> {
                     self.predict_chroma_tu(
                         x0,
                         cy,
-                        size << self.sps.hshift[1],
+                        size_c << self.sps.hshift[1],
                         size_c << self.sps.vshift[1],
                         log2_c,
                         2,
