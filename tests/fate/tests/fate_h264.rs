@@ -668,8 +668,8 @@ fn decode_first_frame_layout(path: &Path) -> Option<(PixelFormat, Vec<usize>, Ve
 
 #[test]
 fn pixel_format_yuv422p10le_matches_ffmpeg_value() {
-    // FFmpeg libavutil/pixfmt.h: AV_PIX_FMT_YUV422P10LE = 64.
-    assert_eq!(PixelFormat::Yuv422p10le as i32, 64);
+    // FFmpeg libavutil/pixfmt.h: AV_PIX_FMT_YUV422P10LE = 71.
+    assert_eq!(PixelFormat::Yuv422p10le as i32, 71);
     assert_eq!(PixelFormat::Yuv422p10le.name(), "yuv422p10le");
 }
 
