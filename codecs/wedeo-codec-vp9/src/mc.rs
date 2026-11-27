@@ -3,21 +3,313 @@
 // 8-tap subpel interpolation, edge emulation, and inter prediction dispatch.
 // Translated from FFmpeg's vp9recon.c (mc_luma_unscaled, mc_chroma_unscaled),
 // vp9_mc_template.c (inter_pred), and vp9dsp_template.c (8-tap filter kernels).
-// The 8-tap kernels and compound average are runtime-dispatched through
-// `crate::simd` (SSE2/AVX2/NEON, scalar fallback), preserving bit-exact output.
+// The kernels are generic over the pixel container: the 8-bit path keeps the
+// runtime-dispatched SIMD kernels via `crate::simd` (SSE2/AVX2/NEON, scalar
+// fallback) so its output stays bit-exact; the 10/12-bit path uses scalar i32
+// sums clipped by `av_clip_pixel(max = (1 << bit_depth) - 1)`, matching the
+// `pixel = uint16_t` instantiation of the same FFmpeg template.
 //
-// Only 8-bit unscaled prediction is implemented. Scaled prediction (when ref
-// dimensions differ from current frame) returns an error.
+// Only unscaled prediction is implemented. Scaled prediction (when ref
+// dimensions differ from the current frame) is not implemented. The decoder's
+// high-depth early return stays until stage 4 (loop filter) is complete.
 //
-// LGPL-2.1-or-later — same licence as FFmpeg.
+// LGPL-2.1-or-later - same licence as FFmpeg.
 
 use std::sync::Arc;
 
 use crate::block::BlockInfo;
 use crate::data::{BWH_TAB, VP9_SUBPEL_FILTERS};
+use crate::intra_pred::Sample;
 use crate::recon::FrameBuffer;
 use crate::refs::RefFrame;
 use crate::types::BlockSize;
+
+// ---------------------------------------------------------------------------
+// Pixel container dispatch
+// ---------------------------------------------------------------------------
+
+/// Selects the MC filter implementation for a pixel container.
+///
+/// FFmpeg instantiates `vp9dsp_template.c` once per bit depth with `pixel` =
+/// `uint8_t` (8-bit) or `uint16_t` (10/12-bit). Both compute the 8-tap sum in
+/// `int` and clip via `av_clip_pixel(max = (1 << bit_depth) - 1)`. The 8-bit
+/// container also has hand-written SIMD kernels; those are preserved here for
+/// bit-exactness, while 16-bit samples use the shared scalar kernels below.
+pub trait McSample: Sample {
+    /// Horizontal 8-tap put filter.
+    // Mirrors FFmpeg's DSP ABI: dst/src pointers, two strides, w/h, taps, depth.
+    #[allow(clippy::too_many_arguments)]
+    fn filter_h(
+        dst: &mut [Self],
+        dst_stride: usize,
+        src: &[Self],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+        filter: &[i16; 8],
+        bit_depth: u8,
+    );
+
+    /// Vertical 8-tap put filter.
+    // Mirrors FFmpeg's DSP ABI; see filter_h.
+    #[allow(clippy::too_many_arguments)]
+    fn filter_v(
+        dst: &mut [Self],
+        dst_stride: usize,
+        src: &[Self],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+        filter: &[i16; 8],
+        bit_depth: u8,
+    );
+
+    /// 2D 8-tap put filter (horizontal pass then vertical pass).
+    // Mirrors FFmpeg's DSP ABI plus a second filter array.
+    #[allow(clippy::too_many_arguments)]
+    fn filter_hv(
+        dst: &mut [Self],
+        dst_stride: usize,
+        src: &[Self],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+        h_filter: &[i16; 8],
+        v_filter: &[i16; 8],
+        bit_depth: u8,
+    );
+
+    /// Compound average: `dst[i] = (dst[i] + src[i] + 1) >> 1`.
+    fn avg(
+        dst: &mut [Self],
+        dst_stride: usize,
+        src: &[Self],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+    );
+}
+
+impl McSample for u8 {
+    // bit_depth is always 8 for this container; keep the SIMD-dispatched
+    // kernels so 8-bit output remains identical to the pre-u16 path.
+    fn filter_h(
+        dst: &mut [u8],
+        dst_stride: usize,
+        src: &[u8],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+        filter: &[i16; 8],
+        _bit_depth: u8,
+    ) {
+        crate::simd::filter_h_8tap(dst, dst_stride, src, src_stride, w, h, filter);
+    }
+
+    fn filter_v(
+        dst: &mut [u8],
+        dst_stride: usize,
+        src: &[u8],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+        filter: &[i16; 8],
+        _bit_depth: u8,
+    ) {
+        crate::simd::filter_v_8tap(dst, dst_stride, src, src_stride, w, h, filter);
+    }
+
+    fn filter_hv(
+        dst: &mut [u8],
+        dst_stride: usize,
+        src: &[u8],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+        h_filter: &[i16; 8],
+        v_filter: &[i16; 8],
+        _bit_depth: u8,
+    ) {
+        // FFmpeg's do_8tap_2d_c uses `pixel tmp[64 * 71]`: the horizontal pass
+        // writes h+7 rows (max 71), then the vertical pass reads 8 rows with
+        // stride 64. SIMD loads touch 8 columns per lane, so use 64*72 zeroed
+        // bytes of scratch to stay in bounds.
+        let mut tmp = [0u8; 64 * 72];
+        crate::simd::filter_hv_8tap(
+            dst, dst_stride, src, src_stride, w, h, h_filter, v_filter, &mut tmp,
+        );
+    }
+
+    fn avg(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize) {
+        crate::simd::avg_block(dst, dst_stride, src, src_stride, w, h);
+    }
+}
+
+impl McSample for u16 {
+    fn filter_h(
+        dst: &mut [u16],
+        dst_stride: usize,
+        src: &[u16],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+        filter: &[i16; 8],
+        bit_depth: u8,
+    ) {
+        filter_h_scalar(dst, dst_stride, src, src_stride, w, h, filter, bit_depth);
+    }
+
+    fn filter_v(
+        dst: &mut [u16],
+        dst_stride: usize,
+        src: &[u16],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+        filter: &[i16; 8],
+        bit_depth: u8,
+    ) {
+        filter_v_scalar(dst, dst_stride, src, src_stride, w, h, filter, bit_depth);
+    }
+
+    fn filter_hv(
+        dst: &mut [u16],
+        dst_stride: usize,
+        src: &[u16],
+        src_stride: usize,
+        w: usize,
+        h: usize,
+        h_filter: &[i16; 8],
+        v_filter: &[i16; 8],
+        bit_depth: u8,
+    ) {
+        let mut tmp = [0u16; 64 * 72];
+        filter_hv_scalar(
+            dst, dst_stride, src, src_stride, w, h, h_filter, v_filter, &mut tmp, bit_depth,
+        );
+    }
+
+    fn avg(dst: &mut [u16], dst_stride: usize, src: &[u16], src_stride: usize, w: usize, h: usize) {
+        avg_scalar(dst, dst_stride, src, src_stride, w, h);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scalar 8-tap kernels (u16 high depth)
+// ---------------------------------------------------------------------------
+
+/// FFmpeg's `FILTER_8TAP`: `(sum(tap[i] * src[x + i*stride]) + 64) >> 7`,
+/// clipped to `[0, (1 << bit_depth) - 1]` by `av_clip_pixel`.
+///
+/// `src` is already offset by the -3 margin so tap 3 is the destination pixel.
+#[inline]
+fn filter_8tap<P: Sample>(
+    src: &[P],
+    x: usize,
+    stride: usize,
+    filter: &[i16; 8],
+    max_val: i32,
+) -> P {
+    let mut sum = 64i32;
+    for i in 0..8 {
+        sum = sum.wrapping_add((filter[i] as i32).wrapping_mul(src[x + i * stride].to_i32()));
+    }
+    P::from_i32((sum >> 7).clamp(0, max_val))
+}
+
+#[allow(clippy::too_many_arguments)] // FFmpeg DSP ABI: dst/src, strides, w/h, taps, depth.
+fn filter_h_scalar<P: Sample>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[P],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    filter: &[i16; 8],
+    bit_depth: u8,
+) {
+    let max_val = (1_i32 << bit_depth) - 1;
+    for y in 0..h {
+        let src_row = &src[y * src_stride..];
+        let dst_row = &mut dst[y * dst_stride..];
+        for x in 0..w {
+            dst_row[x] = filter_8tap(src_row, x, 1, filter, max_val);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // FFmpeg DSP ABI: dst/src, strides, w/h, taps, depth.
+fn filter_v_scalar<P: Sample>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[P],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    filter: &[i16; 8],
+    bit_depth: u8,
+) {
+    let max_val = (1_i32 << bit_depth) - 1;
+    for y in 0..h {
+        let src_row = &src[y * src_stride..];
+        let dst_row = &mut dst[y * dst_stride..];
+        for x in 0..w {
+            dst_row[x] = filter_8tap(src_row, x, src_stride, filter, max_val);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // FFmpeg DSP ABI plus two tap arrays and a depth.
+fn filter_hv_scalar<P: Sample>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[P],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    h_filter: &[i16; 8],
+    v_filter: &[i16; 8],
+    tmp: &mut [P],
+    bit_depth: u8,
+) {
+    let max_val = (1_i32 << bit_depth) - 1;
+    // Horizontal pass: h+7 rows of up to 64 clipped samples, row stride 64.
+    for y in 0..h + 7 {
+        let src_row = &src[y * src_stride..];
+        let tmp_row = &mut tmp[y * 64..];
+        for x in 0..w {
+            tmp_row[x] = filter_8tap(src_row, x, 1, h_filter, max_val);
+        }
+    }
+    // Vertical pass: tmp row 3 is the block's first row (the horizontal pass
+    // started at source row -3), so tapping tmp[y .. y+7] centres on block
+    // row y. This matches FFmpeg's do_8tap_2d_c and the u8 SIMD path.
+    for y in 0..h {
+        let tmp_row = &tmp[y * 64..];
+        let dst_row = &mut dst[y * dst_stride..];
+        for x in 0..w {
+            dst_row[x] = filter_8tap(tmp_row, x, 64, v_filter, max_val);
+        }
+    }
+}
+
+/// Scalar compound average: `(dst + src + 1) >> 1`.
+fn avg_scalar<P: Sample>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[P],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+) {
+    for y in 0..h {
+        for x in 0..w {
+            let d = dst[y * dst_stride + x].to_i32();
+            let s = src[y * src_stride + x].to_i32();
+            dst[y * dst_stride + x] = P::from_i32(d.wrapping_add(s).wrapping_add(1) >> 1);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 8-tap subpel filter application
@@ -27,67 +319,64 @@ use crate::types::BlockSize;
 ///
 /// `src` must have at least `w + 7` accessible columns (3 before, 4 after).
 /// The filter operates on `src[x - 3 .. x + 4]` for each output pixel.
-/// Dispatched at runtime to the best available SIMD backend (SSE2/AVX2/NEON),
-/// with a bit-exact scalar fallback.
-fn filter_h_8tap(
-    dst: &mut [u8],
+#[allow(clippy::too_many_arguments)] // FFmpeg DSP ABI: dst/src, strides, w/h, taps, depth.
+fn filter_h_8tap<P: McSample>(
+    dst: &mut [P],
     dst_stride: usize,
-    src: &[u8],
+    src: &[P],
     src_stride: usize,
     w: usize,
     h: usize,
     filter: &[i16; 8],
+    bit_depth: u8,
 ) {
-    crate::simd::filter_h_8tap(dst, dst_stride, src, src_stride, w, h, filter);
+    P::filter_h(dst, dst_stride, src, src_stride, w, h, filter, bit_depth);
 }
 
 /// Apply an 8-tap filter vertically (put, not avg).
 ///
 /// `src` must have at least `h + 7` accessible rows (3 before, 4 after).
-/// Runtime-dispatched like the horizontal filter.
-fn filter_v_8tap(
-    dst: &mut [u8],
+#[allow(clippy::too_many_arguments)] // FFmpeg DSP ABI: dst/src, strides, w/h, taps, depth.
+fn filter_v_8tap<P: McSample>(
+    dst: &mut [P],
     dst_stride: usize,
-    src: &[u8],
+    src: &[P],
     src_stride: usize,
     w: usize,
     h: usize,
     filter: &[i16; 8],
+    bit_depth: u8,
 ) {
-    crate::simd::filter_v_8tap(dst, dst_stride, src, src_stride, w, h, filter);
+    P::filter_v(dst, dst_stride, src, src_stride, w, h, filter, bit_depth);
 }
 
-/// Apply an 8-tap filter in both dimensions (2-pass: horizontal into i16
-/// intermediate with stride 64, then vertical to u8).
+/// Apply an 8-tap filter in both dimensions (2-pass: horizontal into the
+/// pixel container with stride 64, then vertical to the destination).
 ///
 /// `src` must have `(h + 7)` rows and `(w + 7)` cols of accessible data
 /// (3 pixels of margin on each side).
-#[allow(clippy::too_many_arguments)]
-fn filter_hv_8tap(
-    dst: &mut [u8],
+#[allow(clippy::too_many_arguments)] // FFmpeg DSP ABI plus two tap arrays and a depth.
+fn filter_hv_8tap<P: McSample>(
+    dst: &mut [P],
     dst_stride: usize,
-    src: &[u8],
+    src: &[P],
     src_stride: usize,
     w: usize,
     h: usize,
     h_filter: &[i16; 8],
     v_filter: &[i16; 8],
+    bit_depth: u8,
 ) {
-    // FFmpeg's do_8tap_2d_c uses `pixel tmp[64 * 71]`: the horizontal pass
-    // writes h+7 rows (max 71) of up to 64 clipped u8 pixels, then the
-    // vertical pass reads 8 rows above the current one. SIMD loads touch 8
-    // columns per lane, so use 64*72 bytes of zeroed scratch to stay in bounds.
-    let mut tmp = [0u8; 64 * 72];
-    crate::simd::filter_hv_8tap(
-        dst, dst_stride, src, src_stride, w, h, h_filter, v_filter, &mut tmp,
+    P::filter_hv(
+        dst, dst_stride, src, src_stride, w, h, h_filter, v_filter, bit_depth,
     );
 }
 
 /// Simple pixel copy (integer-pel, no filtering).
-fn copy_block(
-    dst: &mut [u8],
+fn copy_block<P: Sample>(
+    dst: &mut [P],
     dst_stride: usize,
-    src: &[u8],
+    src: &[P],
     src_stride: usize,
     w: usize,
     h: usize,
@@ -99,10 +388,16 @@ fn copy_block(
 }
 
 /// Average dst with src: `dst[i] = (dst[i] + src[i] + 1) >> 1`.
-/// Runtime-dispatched: SSE2/AVX2 `_mm_avg_epu8` and NEON `vrhadd` compute the
-/// identical round-up-on-tie result as the scalar fallback.
-fn avg_block(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: usize, h: usize) {
-    crate::simd::avg_block(dst, dst_stride, src, src_stride, w, h);
+/// The 8-bit path is SIMD-dispatched; 16-bit uses the scalar i32 kernel.
+fn avg_block<P: McSample>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[P],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+) {
+    P::avg(dst, dst_stride, src, src_stride, w, h);
 }
 
 // ---------------------------------------------------------------------------
@@ -113,11 +408,11 @@ fn avg_block(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w
 ///
 /// Translated from `ff_emulated_edge_mc_template` in videodsp_template.c.
 /// `src_x`, `src_y` may be negative (the copy window extends before the frame).
-#[allow(clippy::too_many_arguments)]
-fn emu_edge(
-    dst: &mut [u8],
+#[allow(clippy::too_many_arguments)] // FFmpeg videodsp ABI: dst/src, strides, block/src geometry.
+fn emu_edge<P: Sample>(
+    dst: &mut [P],
     dst_stride: usize,
-    src: &[u8],
+    src: &[P],
     src_stride: usize,
     block_w: usize,
     block_h: usize,
@@ -139,19 +434,20 @@ fn emu_edge(
 // Per-block MC
 // ---------------------------------------------------------------------------
 
-/// MC for one luma block (unscaled, 8-bit).
+/// MC for one luma block (unscaled).
 ///
 /// Translated from `mc_luma_unscaled` in vp9recon.c.
 ///
-/// * `row_px`, `col_px` — pixel position of the block's top-left corner.
-/// * `mv` — `[x, y]` in 1/8-pel units.
-/// * `bw`, `bh` — block dimensions in pixels.
-/// * `filter_idx` — 0=Smooth, 1=Regular, 2=Sharp.
-#[allow(clippy::too_many_arguments)]
-pub fn mc_luma(
-    dst: &mut [u8],
+/// * `row_px`, `col_px` - pixel position of the block's top-left corner.
+/// * `mv` - `[x, y]` in 1/8-pel units.
+/// * `bw`, `bh` - block dimensions in pixels.
+/// * `filter_idx` - 0=Smooth, 1=Regular, 2=Sharp.
+/// * `bit_depth` - frame bit depth; only used by the 16-bit sample path.
+#[allow(clippy::too_many_arguments)] // FFmpeg mc_luma_unscaled ABI plus sample depth.
+pub fn mc_luma<P: McSample>(
+    dst: &mut [P],
     dst_stride: usize,
-    ref_plane: &[u8],
+    ref_plane: &[P],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -161,7 +457,8 @@ pub fn mc_luma(
     bw: usize,
     bh: usize,
     filter_idx: u8,
-    emu_buf: &mut [u8],
+    bit_depth: u8,
+    emu_buf: &mut [P],
 ) {
     let mx = mv[0] as isize;
     let my = mv[1] as isize;
@@ -194,7 +491,7 @@ pub fn mc_luma(
         // src[0..7] with center at tap[3] = integer position). No offset needed.
         // (FFmpeg adds +3 here because its FILTER_8TAP reads src[x-3..x+4].)
         mc_apply(
-            dst, dst_stride, emu_buf, 160, bw, bh, mx_frac, my_frac, filter_idx, true,
+            dst, dst_stride, emu_buf, 160, bw, bh, mx_frac, my_frac, filter_idx, bit_depth, true,
         );
     } else {
         // Position src 3 rows above and 3 pixels left of the block start
@@ -204,22 +501,22 @@ pub fn mc_luma(
         let src_off = offset_y * ref_stride + offset_x;
         let src = &ref_plane[src_off..];
         mc_apply(
-            dst, dst_stride, src, ref_stride, bw, bh, mx_frac, my_frac, filter_idx, true,
+            dst, dst_stride, src, ref_stride, bw, bh, mx_frac, my_frac, filter_idx, bit_depth, true,
         );
     }
 }
 
-/// MC for one chroma block pair (U+V, unscaled, 8-bit).
+/// MC for one chroma block pair (U+V, unscaled).
 ///
 /// Translated from `mc_chroma_unscaled` in vp9recon.c.
 /// Chroma MV uses 4-bit subpel: `mx = mv.x * (1 << !ss_h) & 15`.
-#[allow(clippy::too_many_arguments)]
-pub fn mc_chroma(
-    dst_u: &mut [u8],
-    dst_v: &mut [u8],
+#[allow(clippy::too_many_arguments)] // FFmpeg mc_chroma_unscaled ABI plus sample depth.
+pub fn mc_chroma<P: McSample>(
+    dst_u: &mut [P],
+    dst_v: &mut [P],
     dst_stride: usize,
-    ref_u: &[u8],
-    ref_v: &[u8],
+    ref_u: &[P],
+    ref_v: &[P],
     ref_stride: usize,
     ref_w: usize,
     ref_h: usize,
@@ -229,9 +526,10 @@ pub fn mc_chroma(
     bw: usize,
     bh: usize,
     filter_idx: u8,
+    bit_depth: u8,
     ss_h: bool,
     ss_v: bool,
-    emu_buf: &mut [u8],
+    emu_buf: &mut [P],
 ) {
     // Chroma MV: multiply by 2 if not subsampled in that dimension.
     let mx = mv[0] as isize * (1 << (!ss_h as isize));
@@ -260,7 +558,7 @@ pub fn mc_chroma(
             emu_buf, 160, ref_u, ref_stride, emu_w, emu_h, emu_x, emu_y, ref_w, ref_h,
         );
         mc_apply(
-            dst_u, dst_stride, emu_buf, 160, bw, bh, mx_frac, my_frac, filter_idx, false,
+            dst_u, dst_stride, emu_buf, 160, bw, bh, mx_frac, my_frac, filter_idx, bit_depth, false,
         );
 
         // V plane
@@ -268,7 +566,7 @@ pub fn mc_chroma(
             emu_buf, 160, ref_v, ref_stride, emu_w, emu_h, emu_x, emu_y, ref_w, ref_h,
         );
         mc_apply(
-            dst_v, dst_stride, emu_buf, 160, bw, bh, mx_frac, my_frac, filter_idx, false,
+            dst_v, dst_stride, emu_buf, 160, bw, bh, mx_frac, my_frac, filter_idx, bit_depth, false,
         );
     } else {
         let offset_y = y as usize - if my_frac != 0 { 3 } else { 0 };
@@ -284,6 +582,7 @@ pub fn mc_chroma(
             mx_frac,
             my_frac,
             filter_idx,
+            bit_depth,
             false,
         );
         mc_apply(
@@ -296,6 +595,7 @@ pub fn mc_chroma(
             mx_frac,
             my_frac,
             filter_idx,
+            bit_depth,
             false,
         );
     }
@@ -306,19 +606,20 @@ pub fn mc_chroma(
 /// For luma: `mx`/`my` are in [0, 7] (3-bit). Filter lookup uses `mx << 1`.
 /// For chroma: `mx`/`my` are in [0, 15] (4-bit). Filter lookup uses `mx` directly.
 ///
-/// The `luma` flag distinguishes luma (3-bit → shift left) from chroma (4-bit
-/// → use directly).  This avoids the ambiguity of guessing from the value.
-#[allow(clippy::too_many_arguments)]
-fn mc_apply(
-    dst: &mut [u8],
+/// The `luma` flag distinguishes luma (3-bit, shift left) from chroma (4-bit,
+/// use directly). This avoids the ambiguity of guessing from the value.
+#[allow(clippy::too_many_arguments)] // FFmpeg mc dispatch ABI plus sample depth.
+fn mc_apply<P: McSample>(
+    dst: &mut [P],
     dst_stride: usize,
-    src: &[u8],
+    src: &[P],
     src_stride: usize,
     w: usize,
     h: usize,
     mx: usize,
     my: usize,
     filter_idx: u8,
+    bit_depth: u8,
     luma: bool,
 ) {
     let mx_pos = if luma { mx << 1 } else { mx };
@@ -331,11 +632,13 @@ fn mc_apply(
     if mx_pos == 0 && my_pos == 0 {
         copy_block(dst, dst_stride, src, src_stride, w, h);
     } else if my_pos == 0 {
-        filter_h_8tap(dst, dst_stride, src, src_stride, w, h, h_filter);
+        filter_h_8tap(dst, dst_stride, src, src_stride, w, h, h_filter, bit_depth);
     } else if mx_pos == 0 {
-        filter_v_8tap(dst, dst_stride, src, src_stride, w, h, v_filter);
+        filter_v_8tap(dst, dst_stride, src, src_stride, w, h, v_filter, bit_depth);
     } else {
-        filter_hv_8tap(dst, dst_stride, src, src_stride, w, h, h_filter, v_filter);
+        filter_hv_8tap(
+            dst, dst_stride, src, src_stride, w, h, h_filter, v_filter, bit_depth,
+        );
     }
 }
 
@@ -386,6 +689,7 @@ pub fn inter_pred(
     ss_h: bool,
     ss_v: bool,
 ) {
+    let bit_depth = fb.bit_depth;
     let bs = block.bs as usize;
     let bw4 = BWH_TAB[0][bs][0] as usize;
     let bh4 = BWH_TAB[0][bs][1] as usize;
@@ -426,6 +730,7 @@ pub fn inter_pred(
             bw,
             bh,
             filter,
+            bit_depth,
             &mut emu_buf,
         );
     }
@@ -478,6 +783,7 @@ pub fn inter_pred(
             uv_bw,
             uv_bh,
             filter,
+            bit_depth,
             ss_h,
             ss_v,
             &mut emu_buf,
@@ -541,6 +847,7 @@ pub fn inter_pred(
                 bw,
                 bh,
                 filter,
+                bit_depth,
                 &mut emu_buf,
             );
         }
@@ -593,6 +900,7 @@ pub fn inter_pred(
                 uv_bw,
                 uv_bh,
                 filter,
+                bit_depth,
                 ss_h,
                 ss_v,
                 &mut emu_buf,
@@ -637,6 +945,7 @@ fn sub8x8_luma_mc_buf(
     emu_buf: &mut [u8],
     ri: usize,
 ) {
+    let bit_depth = ref_frame.fb.bit_depth;
     let bs = block.bs;
     let ref_w = ref_frame.width as usize;
     let ref_h = ref_frame.height as usize;
@@ -659,6 +968,7 @@ fn sub8x8_luma_mc_buf(
                     8,
                     4,
                     filter,
+                    bit_depth,
                     emu_buf,
                 );
             }
@@ -680,6 +990,7 @@ fn sub8x8_luma_mc_buf(
                     4,
                     8,
                     filter,
+                    bit_depth,
                     emu_buf,
                 );
             }
@@ -702,6 +1013,7 @@ fn sub8x8_luma_mc_buf(
                     4,
                     4,
                     filter,
+                    bit_depth,
                     emu_buf,
                 );
             }
@@ -732,6 +1044,7 @@ fn sub8x8_chroma_mc_444(
     emu_buf: &mut [u8],
     ri: usize,
 ) {
+    let bit_depth = ref_frame.fb.bit_depth;
     let ref_u = &ref_frame.fb.u;
     let ref_v = &ref_frame.fb.v;
     let ref_stride = ref_frame.fb.uv_stride;
@@ -757,6 +1070,7 @@ fn sub8x8_chroma_mc_444(
                     8,
                     4,
                     filter,
+                    bit_depth,
                     false,
                     false,
                     emu_buf,
@@ -782,6 +1096,7 @@ fn sub8x8_chroma_mc_444(
                     4,
                     8,
                     filter,
+                    bit_depth,
                     false,
                     false,
                     emu_buf,
@@ -808,6 +1123,7 @@ fn sub8x8_chroma_mc_444(
                     4,
                     4,
                     filter,
+                    bit_depth,
                     false,
                     false,
                     emu_buf,
@@ -840,6 +1156,7 @@ fn sub8x8_chroma_mc_buf(
     emu_buf: &mut [u8],
     ri: usize,
 ) {
+    let bit_depth = ref_frame.fb.bit_depth;
     if !ss_h && !ss_v {
         sub8x8_chroma_mc_444(
             dst_u, dst_v, dst_stride, block, ref_frame, uv_col, uv_row, ref_uv_w, ref_uv_h, filter,
@@ -874,6 +1191,7 @@ fn sub8x8_chroma_mc_buf(
         uv_bw,
         uv_bh,
         filter,
+        bit_depth,
         ss_h,
         ss_v,
         emu_buf,
@@ -890,6 +1208,7 @@ fn sub8x8_luma_mc(
     filter: u8,
     emu_buf: &mut [u8],
 ) {
+    let bit_depth = fb.bit_depth;
     let bs = block.bs;
     let ref_w = ref_frame.width as usize;
     let ref_h = ref_frame.height as usize;
@@ -913,6 +1232,7 @@ fn sub8x8_luma_mc(
                     8,
                     4,
                     filter,
+                    bit_depth,
                     emu_buf,
                 );
             }
@@ -935,6 +1255,7 @@ fn sub8x8_luma_mc(
                     4,
                     8,
                     filter,
+                    bit_depth,
                     emu_buf,
                 );
             }
@@ -958,6 +1279,7 @@ fn sub8x8_luma_mc(
                     4,
                     4,
                     filter,
+                    bit_depth,
                     emu_buf,
                 );
             }
@@ -983,6 +1305,7 @@ fn sub8x8_chroma_mc(
     ss_v: bool,
     emu_buf: &mut [u8],
 ) {
+    let bit_depth = fb.bit_depth;
     if !ss_h && !ss_v {
         let off = uv_row * fb.uv_stride + uv_col;
         sub8x8_chroma_mc_444(
@@ -1044,8 +1367,231 @@ fn sub8x8_chroma_mc(
         uv_bw,
         uv_bh,
         filter,
+        bit_depth,
         ss_h,
         ss_v,
         emu_buf,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests: 10/12-bit kernels against FFmpeg-derived golden values
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 12x12 ramp spanning the full sample range, stored in a 16-wide plane.
+    /// This is the same pattern used by the FFmpeg `vp9dsp_template.c`
+    /// reference program that produced the golden arrays below.
+    fn ramp(bit_depth: u8) -> Vec<u16> {
+        let mut v = vec![0u16; 12 * 16];
+        for y in 0..12 {
+            for x in 0..12 {
+                v[y * 16 + x] = ((y * 173 + x * 337 + 511) % (1usize << bit_depth)) as u16;
+            }
+        }
+        v
+    }
+
+    fn assert_block(dst: &[u16], stride: usize, expected: &[[u16; 4]; 4]) {
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(
+                    dst[y * stride + x],
+                    expected[y][x],
+                    "mismatch at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn filter_h_8tap_u16_10bit_matches_ffmpeg() {
+        // FFmpeg: regular filter, subpel position 8, 10-bit pixel width.
+        let src = ramp(10);
+        let mut dst = vec![0u16; 8 * 16];
+        filter_h_8tap(
+            &mut dst,
+            16,
+            &src[3 * 16..],
+            16,
+            4,
+            4,
+            &VP9_SUBPEL_FILTERS[1][8],
+            10,
+        );
+        assert_block(
+            &dst,
+            16,
+            &[
+                [682, 347, 988, 661],
+                [183, 824, 497, 170],
+                [508, 949, 678, 343],
+                [833, 506, 179, 820],
+            ],
+        );
+    }
+
+    #[test]
+    fn filter_v_8tap_u16_12bit_matches_ffmpeg() {
+        // FFmpeg: sharp filter, subpel position 6, 12-bit pixel width.
+        let src = ramp(12);
+        let mut dst = vec![0u16; 8 * 16];
+        filter_v_8tap(
+            &mut dst,
+            16,
+            &src[3..],
+            16,
+            4,
+            4,
+            &VP9_SUBPEL_FILTERS[2][6],
+            12,
+        );
+        assert_block(
+            &dst,
+            16,
+            &[
+                [2111, 2448, 2785, 3122],
+                [2284, 2621, 2958, 3295],
+                [2457, 2794, 3131, 3468],
+                [2630, 2967, 3304, 3737],
+            ],
+        );
+    }
+
+    #[test]
+    fn filter_hv_8tap_u16_10bit_matches_ffmpeg() {
+        // FFmpeg: smooth horizontal (pos 5) + regular vertical (pos 11).
+        let src = ramp(10);
+        let mut dst = vec![0u16; 8 * 16];
+        filter_hv_8tap(
+            &mut dst,
+            16,
+            &src,
+            16,
+            4,
+            4,
+            &VP9_SUBPEL_FILTERS[0][5],
+            &VP9_SUBPEL_FILTERS[1][11],
+            10,
+        );
+        assert_block(
+            &dst,
+            16,
+            &[
+                [540, 557, 562, 498],
+                [406, 712, 668, 532],
+                [507, 581, 513, 557],
+                [720, 668, 540, 688],
+            ],
+        );
+    }
+
+    #[test]
+    fn avg_block_u16_matches_ffmpeg() {
+        // Both depths share FFmpeg's round-up-on-tie average.
+        for (bit_depth, expected) in [
+            (10u8, [512u16, 513, 514, 515]),
+            (12u8, [2048u16, 2049, 2050, 2051]),
+        ] {
+            let max = (1u16 << bit_depth) - 1;
+            let mut dst = vec![0u16; 2 * 16];
+            let mut src = vec![0u16; 2 * 16];
+            for y in 0..2 {
+                for x in 0..4 {
+                    dst[y * 16 + x] = max - x as u16;
+                    src[y * 16 + x] = (x * 3 + y) as u16;
+                }
+            }
+            avg_block(&mut dst, 16, &src, 16, 4, 2);
+            for y in 0..2 {
+                for x in 0..4 {
+                    assert_eq!(dst[y * 16 + x], expected[x], "bd={bit_depth}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn filter_8tap_u16_clips_to_bit_depth() {
+        // FFmpeg av_clip_pixel keeps an all-max input at (1 << depth) - 1.
+        for bit_depth in [10u8, 12u8] {
+            let max = (1u16 << bit_depth) - 1;
+            let src = vec![max; 12 * 16];
+            let mut dst = vec![0u16; 16];
+            filter_h_8tap(
+                &mut dst,
+                16,
+                &src[3 * 16..],
+                16,
+                4,
+                1,
+                &VP9_SUBPEL_FILTERS[0][8],
+                bit_depth,
+            );
+            assert_eq!(&dst[..4], &[max; 4]);
+        }
+    }
+
+    #[test]
+    fn mc_luma_u16_emu_edge_matches_ffmpeg() {
+        // Block (0,0), MV=(5,3): subpel 2D filter at regular positions
+        // 10/6, with edge emulation at the top and left frame borders.
+        for (bit_depth, expected) in [
+            (
+                10u8,
+                [
+                    [926u16, 515, 267, 984],
+                    [814, 480, 565, 787],
+                    [244, 260, 1008, 420],
+                    [223, 751, 824, 481],
+                ],
+            ),
+            (
+                12u8,
+                [
+                    [745u16, 1114, 1440, 1780],
+                    [938, 1307, 1633, 1973],
+                    [1106, 1475, 1801, 2141],
+                    [1280, 1649, 1975, 2315],
+                ],
+            ),
+        ] {
+            let src = ramp(bit_depth);
+            let mut dst = vec![0u16; 8 * 16];
+            let mut emu = vec![0u16; 160 * 80];
+            mc_luma(
+                &mut dst,
+                16,
+                &src,
+                16,
+                12,
+                12,
+                0,
+                0,
+                &[5, 3],
+                4,
+                4,
+                1,
+                bit_depth,
+                &mut emu,
+            );
+            assert_block(&dst, 16, &expected);
+        }
+    }
+
+    #[test]
+    fn u8_kernels_keep_the_simd_path() {
+        // The generic u8 wrappers must hand off to the existing SIMD
+        // kernels unchanged, preserving 8-bit bit-exactness.
+        let src: Vec<u8> = (0..(12 * 16)).map(|i| (i * 17 % 256) as u8).collect();
+        let mut a = vec![0u8; 8 * 16];
+        let mut b = vec![0u8; 8 * 16];
+        let f = &VP9_SUBPEL_FILTERS[1][8];
+        filter_h_8tap(&mut a, 16, &src[3 * 16..], 16, 4, 4, f, 8);
+        crate::simd::filter_h_8tap(&mut b, 16, &src[3 * 16..], 16, 4, 4, f);
+        assert_eq!(a, b);
+    }
 }
