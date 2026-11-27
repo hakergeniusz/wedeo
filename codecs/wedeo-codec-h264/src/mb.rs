@@ -1986,6 +1986,13 @@ fn decode_inter_mb(
                 let group_8x8 = (blk_y / 2) * 2 + (blk_x / 2);
                 if cbp_luma & (1 << group_8x8) != 0 {
                     let raster_idx = block_to_raster(block);
+                    // Keep full-precision coefficients for the u16 path:
+                    // high-depth dequantized values can exceed i16.
+                    dequant::dequant_4x4_wide(
+                        &mut mb.luma_coeffs32[raster_idx],
+                        &mb.luma_coeffs[raster_idx],
+                        dq_table,
+                    );
                     dequant::dequant_4x4(&mut mb.luma_coeffs[raster_idx], dq_table);
                     trace!(
                         mb_x,
@@ -3070,6 +3077,13 @@ fn add_b_residual(
                 let group_8x8 = (blk_y / 2) * 2 + (blk_x / 2);
                 if cbp_luma & (1 << group_8x8) != 0 {
                     let raster_idx = block_to_raster(block);
+                    // Keep full-precision coefficients for the u16 path:
+                    // high-depth dequantized values can exceed i16.
+                    dequant::dequant_4x4_wide(
+                        &mut mb.luma_coeffs32[raster_idx],
+                        &mb.luma_coeffs[raster_idx],
+                        dq_table,
+                    );
                     dequant::dequant_4x4(&mut mb.luma_coeffs[raster_idx], dq_table);
                     trace!(
                         mb_x,

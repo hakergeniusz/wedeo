@@ -608,6 +608,10 @@ pub struct Macroblock {
     /// Luma coefficients for each 4x4 block (16 blocks, 16 coeffs each).
     /// Coefficients are in scan order (zigzag or field scan applied separately).
     pub luma_coeffs: [[i16; 16]; 16],
+    /// Dequantized luma coefficients at full precision for high bit depths.
+    /// FFmpeg stores `dctcoef` as int32_t when BIT_DEPTH > 8; i16 storage wraps
+    /// values such as 34496 at QP 33.
+    pub luma_coeffs32: [[i32; 16]; 16],
     /// DC coefficients for Intra16x16 (16 entries, before inverse Hadamard).
     pub luma_dc: [i16; 16],
     /// Chroma DC coefficients per chroma plane (2 planes, 4 DCs each for 4:2:0).
@@ -659,6 +663,7 @@ impl Default for Macroblock {
             chroma_pred_mode: 0,
             cbp: 0,
             luma_coeffs: [[0; 16]; 16],
+            luma_coeffs32: [[0; 16]; 16],
             luma_dc: [0; 16],
             chroma_dc: [[0; 8]; 2],
             chroma_ac: [[[0; 16]; 8]; 2],

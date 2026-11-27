@@ -69,7 +69,12 @@ impl IdctPixel for u16 {
         // FFmpeg compiles this template with `dctcoef = int32_t` when
         // BIT_DEPTH > 8. The first butterfly pass can exceed i16 at high QP;
         // truncating there zeroes whole columns of the 4x4 block.
-        idct4x4_add_impl_wide(dst, stride, coeffs);
+        let mut wide = [0i32; 16];
+        for (d, s) in wide.iter_mut().zip(coeffs.iter()) {
+            *d = *s as i32;
+        }
+        idct4x4_add_impl_wide(dst, stride, &mut wide);
+        *coeffs = [0i16; 16];
     }
     #[inline]
     fn idct4_dc_add(dst: &mut [Self], stride: usize, dc: &mut i16) {
@@ -166,17 +171,14 @@ fn idct4x4_add_impl<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 1
     *coeffs = [0i16; 16];
 }
 
-/// High-depth 4x4 IDCT with 32-bit butterfly intermediates.
+/// High-depth 4x4 IDCT with 32-bit coefficients and butterfly intermediates.
 ///
 /// FFmpeg's `h264idct_template.c` uses `dctcoef = int32_t` for BIT_DEPTH > 8,
-/// so the first pass keeps values such as `z1 = 44800` intact. Wedeo's row-major
-/// coefficients use the swapped pass order of [`idct4x4_add_impl`]; only the
-/// storage width differs here.
-fn idct4x4_add_impl_wide<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i16; 16]) {
-    let mut c = [0i32; 16];
-    for (d, s) in c.iter_mut().zip(coeffs.iter()) {
-        *d = *s as i32;
-    }
+/// so dequantized coefficients such as 34496 and first-pass values such as
+/// 44800 stay intact. Wedeo's row-major coefficients use the swapped pass
+/// order of [`idct4x4_add_impl`]; only the storage width differs here.
+fn idct4x4_add_impl_wide<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i32; 16]) {
+    let c = &mut *coeffs;
     c[0] += 32;
 
     for i in 0..4 {
@@ -211,7 +213,15 @@ fn idct4x4_add_impl_wide<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i
         }
     }
 
-    *coeffs = [0i16; 16];
+    *coeffs = [0i32; 16];
+}
+
+/// High-depth 4x4 IDCT for coefficients that are already dequantized into i32.
+///
+/// Used by the u16 reconstruction path because i16 coefficient storage would
+/// wrap values such as 34496 before the butterfly runs.
+pub fn idct4x4_add_wide<P: Pixel>(dst: &mut [P], stride: usize, coeffs: &mut [i32; 16]) {
+    idct4x4_add_impl_wide(dst, stride, coeffs);
 }
 
 /// High-depth DC-only 4x4 add with a 32-bit intermediate, matching FFmpeg's

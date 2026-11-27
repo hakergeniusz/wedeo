@@ -381,15 +381,17 @@ fn decode_intra4x4_hires(
         let group_8x8 = (blk_y / 2) * 2 + (blk_x / 2);
         if cbp_luma & (1 << group_8x8) != 0 {
             let raster_idx = block_to_raster(block);
-            dequant::dequant_4x4(
-                &mut mb.luma_coeffs[raster_idx],
+            // FFmpeg keeps dequantized coefficients in `int32_t` at high bit
+            // depth (h264dec.h `sl->mb` reserves twice the space). Wedeo's
+            // i16 coefficient storage wraps values such as DC 34496 at QP 33,
+            // so dequantize into an i32 scratch block for the u16 plane.
+            let mut coeffs = [0i32; 16];
+            dequant::dequant_4x4_wide(
+                &mut coeffs,
+                &mb.luma_coeffs[raster_idx],
                 &ctx.dequant4.coeffs[0][qp as usize],
             );
-            idct::idct4x4_add(
-                &mut ctx.pic.y16[offset..],
-                stride,
-                &mut mb.luma_coeffs[raster_idx],
-            );
+            idct::idct4x4_add_wide(&mut ctx.pic.y16[offset..], stride, &mut coeffs);
         }
     }
     decode_chroma_hires(ctx, mb, mb_x, mb_y, chroma_qp, has_top, has_left);
@@ -892,8 +894,11 @@ pub fn reconstruct_inter_mb_hires(
                 let raster = block_to_raster(block);
                 let (off, stride) =
                     luma_block_offset(&ctx.pic, mb_x, mb_y, blk_x, blk_y, ctx.mb_field);
-                let mut c = mb.luma_coeffs[raster];
-                idct::idct4x4_add(&mut ctx.pic.y16[off..], stride, &mut c);
+                // The generic u8 pass dequantized into i16; the u16 plane
+                // must use the full-precision copy to match FFmpeg's int32
+                // dctcoef storage at BIT_DEPTH > 8.
+                let mut c = mb.luma_coeffs32[raster];
+                idct::idct4x4_add_wide(&mut ctx.pic.y16[off..], stride, &mut c);
             }
         }
     }

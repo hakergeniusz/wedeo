@@ -71,3 +71,23 @@ truncated a first-pass value of 44800, zeroing the whole column.
 path is unchanged. Verified FREH10-1 is 360/360 frames bit-exact, FREH10-2
 differences fell from 160 to 13 frames (a separate issue), and FRext rose from
 42/69 to 43/69 with zero errors and no new timeouts.
+
+---
+
+## RESOLVED: high-depth coefficient storage overflow (FREH10-2)
+
+Measured on `WB_10bit_QP21_1920x1088.264`, frame 0 MB(24,60) block at spatial
+(4,4): FFmpeg's gdb reports dequantized DC 34496 at QP 33, while Wedeo's
+`Macroblock::luma_coeffs` (i16) held -31040, i.e. 34496 - 65536. The other 15
+coefficients matched FFmpeg's int32 values. FFmpeg's `sl->mb` stores `dctcoef`
+as int32 when BIT_DEPTH > 8 (h264dec.h), so the i16 storage is the cause.
+
+The remaining 12 frames (280..285, 328..333) were resolved by applying the same
+full-precision path to inter 4x4 luma residual: the generic u8 pass dequantized
+into i16 before the u16 pass consumed those values. `dequant_4x4_wide` now
+produces the int32 coefficients and both intra4x4 and inter u16 paths feed them
+to `idct4x4_add_wide`.
+
+Verified FREH10-2 is 358/358 frames bit-exact, FREH10-1 stays 360/360, JVT-FR-EXT
+stays 43/69 with no new timeouts, and `cargo clippy -p wedeo-codec-h264
+--all-targets -- -D warnings` plus `cargo fmt --check` pass.

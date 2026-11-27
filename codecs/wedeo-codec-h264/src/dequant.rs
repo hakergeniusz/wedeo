@@ -215,6 +215,21 @@ pub fn dequant_4x4(coeffs: &mut [i16; 16], dequant: &[u32; 16]) {
     }
 }
 
+/// Dequantize a 4x4 block into i32 coefficients for high bit depths.
+///
+/// FFmpeg stores dequantized coefficients as `int32_t` when BIT_DEPTH > 8,
+/// because `level * qmul` can exceed i16 (e.g. DC 34496 at QP 33 in FREH10-2).
+/// The 8-bit path keeps i16 storage, but the u16 reconstruction path must not
+/// wrap those values before the IDCT.
+pub fn dequant_4x4_wide(out: &mut [i32; 16], coeffs: &[i16; 16], dequant: &[u32; 16]) {
+    for i in 0..16 {
+        out[i] = (coeffs[i] as i32)
+            .wrapping_mul(dequant[i] as i32)
+            .wrapping_add(32)
+            >> 6;
+    }
+}
+
 /// Dequantize an 8x8 block of coefficients in-place using a pre-computed table.
 ///
 /// Applies `(level * qmul + 32) >> 6` per coefficient, matching FFmpeg's
