@@ -52,7 +52,9 @@ jobs:
           echo "Selected suites: $SUITES" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install dependencies
-        run: sudo apt-get install -y nasm libasound2-dev ffmpeg rsync
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm libasound2-dev ffmpeg rsync
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
