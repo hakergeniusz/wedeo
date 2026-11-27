@@ -72,3 +72,70 @@ prediction / inverse transform for the block at (192,160).
 
 Evidence: `/tmp/ai-agent/VP9_LPF_GT.md` (ephemeral). Do not patch the loop
 filter based on the old p7 hypothesis.
+
+---
+
+## Staged implementation plan and completed stage 1
+
+# VP9 10/12-bit support: staged design
+
+## Measured root cause
+
+`codecs/wedeo-codec-vp9/src/decoder.rs` returns early for every frame with
+`header.bit_depth != 8`. Removing that gate alone produces frames with
+8-bit-sized planes and wrong sample values: the entire reconstruction path
+(`FrameBuffer`, IDCT, intra prediction, motion compensation, loop filter) stores
+and clamps `u8`, while FFmpeg writes 9-16-bit planar samples in 16-bit
+containers. See `VP9_GAPS.md`.
+
+## Stage 1 (implemented and verified)
+
+1. Core pixel formats: add FFmpeg-numbered `Yuv420p12le/be`, `Yuv422p12le/be`,
+   `Yuv444p12le/be` and fix the stale 10-bit discriminants (FFmpeg
+   `libavutil/pixfmt.h`: 420p10le=62, 422p10le=64, 444p10le=68,
+   420p12le=123, 422p12le=127, 444p12le=131).
+2. VP9 output format selection: `output_pixel_format(bit_depth, ss_h, ss_v)`
+   mirrors FFmpeg `vp9.c:497-504` (`pix_fmt_for_ss`) for 8/10/12-bit 4:2:0,
+   4:2:2 and 4:4:4. `RefFrame` now carries bit depth and chroma subsampling so
+   `show_existing_frame` outputs use the stored frame's format as well.
+3. `FrameBuffer::new` now allocates chroma planes using the parsed
+   `ss_h`/`ss_v`, so 4:2:2 and 4:4:4 frames get full-height chroma. Their
+   first (key) frames now match FFmpeg frame CRCs; inter frames still differ
+   for reasons outside this stage.
+4. The 8-bit gate stays in place. High-depth frames are still skipped instead
+   of emitting mislabeled data. 8-bit 4:2:0 output is unchanged and bit-exact.
+   Unsupported output formats (4:4:0, RGB) are skipped with a warning rather
+   than aborting the decoder.
+
+Stage 1 is self-contained: format descriptors and output labeling can be
+verified with unit tests and an 8-bit framecrc comparison, without changing
+sample data.
+
+## Stage 2: sample storage
+
+Introduce a `u8`/`u16` plane storage enum in `FrameBuffer` with accessor
+helpers. `new(width, height, bit_depth)` allocates `u16` planes for 10/12-bit
+frames, with strides in samples (as FFmpeg does) and output byte size
+`stride_samples * 2`. Reference frames must carry the same variant. Keep the
+`u8` path byte-for-byte identical for 8-bit vectors.
+
+## Stage 3: reconstruction math
+
+Generalize `idct.rs` (`itxfm_add`, `itxfm_add_lossless`), `intra_pred.rs`, and
+`mc.rs` over `u8`/`u16`. FFmpeg keeps intermediate sums in `int16_t`/`int32_t`
+and clamps to `(1 << bit_depth) - 1` (`vp9recon.c`, `vp9dsp_template.c`).
+Quantizer tables in `quant.rs` already accept 10/12-bit indices, so no change
+is needed there.
+
+## Stage 4: loop filter and gate removal
+
+The loop filter is owned by another agent. It needs `clip_u16` and
+high-depth edge thresholds (`vp9loopfilter.c`). Only after stages 2-4 are
+bit-exact on FATE high-depth vectors may the early return be removed.
+
+## Verification for stage 1
+
+- `cargo check --workspace`, `cargo test -p wedeo-codec-vp9` and
+  `cargo clippy -p wedeo-codec-vp9 -p wedeo-core`.
+- `wedeo-framecrc` versus `ffmpeg -bitexact -i <8-bit VP9 vector> -f framecrc -`
+  on a representative 8-bit vector.

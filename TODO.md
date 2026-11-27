@@ -32,7 +32,7 @@
   - [x] VP9 odd-size OOB panics — the 74 historical `intra_pred.rs` panics no longer reproduce; odd-size vectors decode with correct geometry.
   - [ ] VP9 probability adaptation — `adapt_probs` not yet wired up after each frame decode
   - [ ] VP9 scaled prediction — silently skipped when ref/current dimensions differ
-  - [ ] VP9 10/12-bit support — blocked by a deliberate early return in `decoder.rs`; the whole sample path is `u8`-only. Measured root cause and FFmpeg ground truth in `VP9_GAPS.md`.
+  - [ ] VP9 10/12-bit support - stage 1 complete at commit `61398bf`: FFmpeg-numbered pixel formats, output format selection and 4:2:2/4:4:4 chroma allocation. The 8-bit gate stays until the u16 sample path is bit-exact; staged design in `VP9_GAPS.md`.
   - [ ] VP9 superframe parsing
 - [x] **HEVC decoder and encoder** - `adapters/wedeo-h265-oxideav` wraps pure-Rust `oxideav-h265` (MIT): full decode and I/P/B encode registered as `hevc_oxideav`. MP4 (hvcC + length-prefixed samples) and MPEG-TS (Annex B) output verified against FFmpeg. The native HEVC port remains partial.
   - [ ] VP9 8-bit odd-size - `vp90-2-03-size-210x202.webm`: frame 0 exact, frame 1 first inter divergence at x=157, y=203 (154 vs 155). Measured with gdb: the row filter inputs q0/q1 already differ by 1 before filtering, so the loop filter is faithful and the root cause is upstream. Measured further to the initial NNZ coefficient context of a 32x32 block; see `VP9_NNZ_GAPS.md`.
