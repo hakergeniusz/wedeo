@@ -1675,3 +1675,61 @@ mvd and keeps the suite at 42/69 with no regressions or timeouts. Final bottom
 row pixel parity remains blocked by the separately unimplemented full PAFF
 reconstruction, which this task explicitly excluded. Committed as `ec3409b`,
 worktree clean, not pushed.
+
+---
+
+## Appendix O: PAFF deblock ground truth (2026-11-27)
+
+Measured on Freh7_B.264 first bottom-field MB with gdb on the debug FFmpeg
+build. Conclusion: `deblock.rs` needs no change; the required field addressing
+must come from decoder.rs / mb.rs.
+
+| Quantity | Measured FFmpeg value |
+|---|---|
+| mb_xy / mb_x / mb_y | 23 / 0 / 1 |
+| picture_structure / mb_aff_frame / MB_FIELD / MB_MBAFF | 2 / 0 / 1 / 0 |
+| deblocking_filter | 1 (neighbours blocked only by slice_table == 0xFFFF) |
+| top_xy | 23 - (23 << 1) = -23, slice_table 0xFFFF, top_type 0 |
+| left_xy | 22 (end-of-row padding), slice_table 0xFFFF, left_type 0 |
+| dest_y / dest_cb offsets | 352 (= 5632 - 15*352) / 176 |
+| deblock stride | 704 / 352 (doubled by MB_FIELD) |
+| filter path | `ff_h264_filter_mb_fast`, not the MBAFF `ff_h264_filter_mb` |
+| edge at pix=3168 | bS=[2,2,2,2], tc=[1,1,1,1], alpha=20, beta=7, stride=704 |
+| mb_y=3 | dest_y offset 11616 (pixel row 33), top_xy=23, slice_table[23]=1 (top neighbour is bottom-field MB(0,1)) |
+
+Required edges:
+
+- Bottom first row (mb_y=1): skip top horizontal edge (top_xy=-23) and left
+  vertical edge at mb_x=0. For mb_x>0 the left neighbour is mb_xy-1 in the
+  same bottom-field row.
+- Bottom rows mb_y=3,5,...: top neighbour is `mb_xy - 2*mb_stride`, not
+  `mb_xy - mb_stride` (which is the top field).
+- All edges use doubled stride and a bottom-field start offset. Wedeo's
+  `deblock_luma_offset` / `deblock_chroma_offset` formulas already match
+  FFmpeg when `mb_field=true` and a FRAME MB row is passed.
+- mvy_limit=2 and intra top-edge bS=3 are field-flag driven and already
+  covered by Wedeo's `cur.mb_field` branch.
+- Pure PAFF must not enter the MBAFF first-vert / horiz-edge0 special cases;
+  marking all PAFF MBs as field makes those inert.
+
+## Appendix P: deblock measured state in current Wedeo (2026-11-27)
+
+Existing `DEBLOCK_MB_START` / `DEBLOCK_EDGE` traces show the top field starts
+at mb_x=0/mb_y=0, then the bottom slice ALSO starts at mb_x=0/mb_y=0, with
+`cur_mb_field=false` and `y_stride=352` in both. bS is 2 as in FFmpeg but is
+applied to the wrong rows with the wrong stride.
+
+Raw YUV: FFmpeg emits 150 frames, Wedeo 300 (no field pairing). Comparing
+frame 0, the first 16 rows have 2344/2816 differing even rows and 2718/2816
+differing odd rows. With `WEDEO_NO_DEBLOCK=1`, the first 32 rows still have
+5154/5632 differing even rows, so reconstruction fails before deblocking.
+A deblock-only patch cannot be validated on this vector.
+
+Actionable requirements for the decoder.rs / mb.rs owner:
+1. Pure PAFF: `mb_field = hdr.field_pic_flag`.
+2. Pass FRAME MB rows to deblock (`mb_y = 2*field_y + parity`), not field rows.
+3. Do not call `deblock_row_mbaff` for pure PAFF.
+4. Bottom-field top neighbour is `mb_xy - 2*mb_stride`; stride is doubled.
+
+Evidence: /tmp/ai-agent/PAFF_DEBLOCK_TASK_NOTES.md and gdb scripts
+/tmp/ai-agent/paff_deblock_ff{,2,3,4}.gdb (ephemeral).
