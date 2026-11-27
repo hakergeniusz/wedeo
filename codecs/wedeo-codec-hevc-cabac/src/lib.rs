@@ -415,22 +415,30 @@ impl<'a> Cabac<'a> {
     /// `cabac_reinit`: skip bytes and reset the engine, used after I_PCM and
     /// when continuing a substream (FFmpeg `skip_bytes(c, 0)`).
     pub fn reinit(&mut self) -> Result<()> {
+        self.reinit_skipping(0)
+    }
+
+    /// FFmpeg's `skip_bytes(c, n)`: recover the byte pointer from the
+    /// arithmetic decoder state, skip `n` bytes (I_PCM samples) and restart.
+    pub fn reinit_skipping(&mut self, skip: usize) -> Result<()> {
         let mut ptr = self.pos;
         if self.low & 0x1 != 0 {
-            ptr -= 1;
+            ptr = ptr.saturating_sub(1);
         }
         if self.low & 0x1FF != 0 {
-            ptr -= 1;
+            ptr = ptr.saturating_sub(1);
         }
-        if self.data.len() < ptr + 2 {
+        let start = ptr.checked_add(skip).ok_or(Error::InvalidData)?;
+        if self.data.len() < start + 2 {
             return Err(Error::InvalidData);
         }
-        self.low = ((self.data[ptr] as i32) << 18) | ((self.data[ptr + 1] as i32) << 10) | (1 << 9);
+        self.low =
+            ((self.data[start] as i32) << 18) | ((self.data[start + 1] as i32) << 10) | (1 << 9);
         self.range = 0x1FE;
         if (self.range << (CABAC_BITS + 1)) < self.low {
             return Err(Error::InvalidData);
         }
-        self.pos = ptr + 2;
+        self.pos = start + 2;
         Ok(())
     }
 

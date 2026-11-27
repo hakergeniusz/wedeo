@@ -1837,8 +1837,17 @@ impl CtuDecoder<'_, '_> {
     /// I_PCM sample byte alignment (FFmpeg's `skip_bytes`).
     fn decode_pcm(&mut self, x0: i32, y0: i32, log2_cb_size: u32) -> Result<()> {
         let size = 1usize << log2_cb_size;
-        let pos = self.cabac.pos();
-        let mut br = BitReader::new(&self.slice_data[pos.min(self.slice_data.len())..]);
+        // FFmpeg's `skip_bytes(&lc->sub.cc, n)` recovers the byte pointer from
+        // the CABAC state before reading the PCM samples.
+        let mut ptr = self.cabac.pos();
+        let low = self.cabac.low();
+        if low & 0x1 != 0 {
+            ptr = ptr.saturating_sub(1);
+        }
+        if low & 0x1FF != 0 {
+            ptr = ptr.saturating_sub(1);
+        }
+        let mut br = BitReader::new(&self.slice_data[ptr.min(self.slice_data.len())..]);
         let depth = self.sps.pcm.bit_depth as usize;
         let shift = self.sps.bit_depth as usize - depth;
         for y in 0..size {
@@ -1848,7 +1857,33 @@ impl CtuDecoder<'_, '_> {
                     .set_sample(0, x0 as usize + x, y0 as usize + y, v as u16);
             }
         }
-        self.cabac.reinit()?;
+        // FFmpeg's hls_pcm_sample (hevcdec.c:1682) reads the luma samples
+        // first, then Cb and Cr, all from the same byte-aligned bitreader.
+        if self.sps.chroma_format_idc != 0 {
+            let chroma_depth = self.sps.pcm.bit_depth_chroma as usize;
+            let chroma_shift = self.sps.bit_depth_chroma as usize - chroma_depth;
+            for c in 1..=2 {
+                let hshift = self.sps.hshift[c];
+                let vshift = self.sps.vshift[c];
+                let w = size >> hshift;
+                let h = size >> vshift;
+                for y in 0..h {
+                    for x in 0..w {
+                        let v = br.read_bits(chroma_depth)? << chroma_shift;
+                        self.pic.set_sample(
+                            c,
+                            (x0 as usize >> hshift) + x,
+                            (y0 as usize >> vshift) + y,
+                            v as u16,
+                        );
+                    }
+                }
+            }
+        }
+        // Restart CABAC after the PCM samples, as FFmpeg's
+        // `skip_bytes(&lc->sub.cc, (length + 7) >> 3)` does.
+        let pcm_bytes = br.bit_position().div_ceil(8);
+        self.cabac.reinit_skipping(pcm_bytes)?;
         Ok(())
     }
 
