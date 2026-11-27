@@ -177,3 +177,23 @@ IPRED differing bytes 5901 -> 5577 (Y 170->54). Full 227-vector sweep stays
 10/227 with no new errors; the DSLICE_B_HHI_5 timeout disappeared (errors
 3 -> 2). CIP_A_Panasonic_3 was unchanged (2809 diffs) at that point; the later
 CIP sample-replacement fix `e7a65a6` made it byte-exact (0 diffs).
+
+## MERGE_E_TI_3 current first divergence (2026-11-27, no patch)
+
+At current HEAD, `Y(384,6)` is no longer a divergence: both decoders output 141
+after deblock and SAO. The new first difference is frame 0 `Y(192,63)`:
+Wedo 95 vs FFmpeg 97; Cb(336,0) 109 vs 108, Cr(240,15) 138 vs 140; 757
+differing bytes in frame 0.
+
+Paired values at CTB(3,0): FFmpeg gdb shows pre-deblock Y(192,63)=97,
+post-deblock=97, SAO type 2/2/2, luma EO class 3, offsets `0,2,0,-1,-2`,
+`lfase=1`, `restore=0`, post-SAO=97. Wedeo tracing shows pre-filter 94,
+post-deblock 97 (matching FFmpeg), then SAO changes it to 95. The bottom-left
+padding sample read 0 from the left CTB's `sao_v` while the picture/diagonal
+sample was 116.
+
+An experimental SAO corner-padding reorder with a diagonal-CTB applied check
+changed the padding value to 174 but left all 757 differences unchanged, so
+that hypothesis is incomplete and was reverted. Next step: reproduce FFmpeg's
+one-CTB-delayed interleaved deblock/SAO ordering, then pair corner padding
+again. Evidence: `/tmp/ai-agent/merge_next_*` (ephemeral).
