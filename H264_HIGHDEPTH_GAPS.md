@@ -1,5 +1,8 @@
 # H.264 high-depth gaps
 
+The first section below is the historical ground truth recorded before the fix;
+the RESOLVED section at the end records the current state (FRext 43/69).
+
 ## FREH10: localized high-depth intra 4x4 reconstruction
 
 Measured 2026-11-27 at HEAD `5e47eb4`. No source change was committed.
@@ -50,7 +53,8 @@ dumping the prediction before IDCT and the 16 dequantized coefficients before
 `ff_h264_idct_add_10_c`; add a temporary `trace!()` in
 `codecs/wedeo-codec-h264/src/hires.rs::decode_intra4x4_hires` for the same
 block to print u16 prediction, coefficients and post-IDCT rows. Patch only the
-kernel that actually diverges, then verify all 20 frames and FRext >= 42/69.
+kernel that actually diverges, then verify all 20 frames and keep FRext at
+43/69 or better.
 
 ---
 

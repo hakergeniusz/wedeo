@@ -1,6 +1,8 @@
 # HEVC MERGE_E_TI_3.bit first-divergence ground truth
 
-Measured 2026-11-27 at HEAD `5e47eb4`, no source change committed.
+Historical ground truth measured 2026-11-27 at HEAD `5e47eb4`, no source change
+committed. The Cb/Cr(67,0) divergence described first was fixed by `9f0d242`;
+see the update at the end of this file.
 
 ## Vector
 
@@ -60,4 +62,6 @@ above, so this file's original "first divergence" is historical.
 - The first luma difference at current HEAD moved to Y(384,6).
 
 A clean release sweep in that worktree and in the main checkout both measured
-8/227 at `ce02fc5`, with no regression. Do not chase Cb/Cr(67,0) again.
+8/227 at `ce02fc5`, with no regression. Current HEAD measures 9/227 after the
+inter-TU deblock fix `f32250c` (see `HEVC_GAPS.md`). Do not chase Cb/Cr(67,0)
+again.

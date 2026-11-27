@@ -43,10 +43,12 @@ plus new pixel format mappings. That is a staged project, not a one-line gate
 removal. Do not remove the early return without it: the output would be
 silently wrong.
 
-### Baseline after the experiment was reverted
+### Sweep status
 
-226 local VP9 vectors: 211 bit-exact, 7 CRC differences, 8 zero-frame vectors
-(the high-depth set). No regressions.
+Current at `d86b9d2`: 226 local VP9 vectors, 214 bit-exact, 4 CRC differences,
+8 zero-frame vectors (the high-depth set). The earlier 211 bit-exact / 7 CRC
+baseline was recorded before the `d7ac5ba` clipped-NNZ edge-context fix. No
+regressions.
 
 ## Odd-size 210x202 divergence is upstream of the loop filter
 
@@ -233,7 +235,7 @@ a full step-wide word from the backing NNZ array. With a clipped local copy,
 OR-ing all remaining entries reproduces FFmpeg's value.
 
 Measured result: target vector all 10 frames identical; VP9 sweep 211 -> 214
-exact vectors out of 225, with zero regressions. Earlier docs about NNZ
+exact vectors out of 226, with zero regressions. Earlier docs about NNZ
 context, loop-filter inputs and segmentation timing in these vectors are
 historical evidence of the same root cause and no longer describe current
 behaviour.

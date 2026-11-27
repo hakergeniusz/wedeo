@@ -1,9 +1,13 @@
 # Wave I salvage / recovery notes (2026-11-24)
 
-## State
+## State (historical snapshot, 2026-11-24)
+
+These numbers describe that snapshot only. Current measured parity is in
+`STATUS.md` (H.264 four-suite 198/283, VP9 214/226, HEVC 9/227).
+
 - `main` = `ddbbd7d` + H.264 encoder work (not yet pushed). VP8 bit-exact (3364/3364), w72 VP9 SIMD, w78 CLI multi-input merged, Theora duration fix, Ogg cover-art/w79, H264 MBAFF termination alignment, w85 structured framecrc comparison, VP9 sub-8x8 MV/context alignment (`13ccb4f`).
 - H.264 encoder: new `adapters/wedeo-h264-rusty` wraps pure-Rust `rusty_h264-encoder` 0.17.4 (BSD-2-Clause dependency, adapter glue LGPL). Adds `Encoder::extradata()` so the CLI can hand avcC to the MP4 muxer. `wedeo-cli -i av1.mp4 -c:v h264 out.mp4` verified: 30-frame output decodes cleanly under ffmpeg.
-- Gate: `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean (only pre-existing manifest warnings), full `wedeo-fate` suite green. JVT-AVC_V1 78/78 MATCH, JVT-FR-EXT 24/24 MATCH, H264 CAVLC FATE 52/52 BITEXACT. VP9 corpus 166/225 files bitexact (1435/2027 frames) after `13ccb4f` sub-8x8 MV/context extent alignment. Remaining VP9 gaps: 10/12-bit and 4:2:2/4:4:4 profiles, plus ±1/±2 luma rounding in `03-size` vectors.
+- Gate at that snapshot: `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean (only pre-existing manifest warnings), full `wedeo-fate` suite green. The then-current JVT-AVC_V1 78/78 MATCH, JVT-FR-EXT 24/24 MATCH, H264 CAVLC FATE 52/52 BITEXACT and VP9 corpus 166/225 files bitexact (1435/2027 frames) after `13ccb4f` sub-8x8 MV/context extent alignment are superseded by the counts in `STATUS.md`. Remaining VP9 gaps: 10/12-bit and 4:2:2/4:4:4 profiles, plus ±1/±2 luma rounding in `03-size` vectors.
 - Disk: ~33 GB free on `/`. Guard in `scripts/agent_env.sh` aborts below 3 GB.
 - Subagent provider: **free usage limit reached** - no new subagents until user fixes provider. Main agent still works.
 

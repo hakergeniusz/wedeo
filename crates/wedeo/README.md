@@ -37,8 +37,8 @@ fn main() -> wedeo::Result<()> {
 ## Status
 
 - **H.264 progressive**: 77/77 decodable FATE vectors, bit-exact (two FMO CAVLC vectors produce no frames in either decoder)
-- **H.264 FRext**: 42/69 JVT vectors passing
-- **HEVC**: 8/227 conformance vectors bit-exact (native port)
+- **H.264 FRext**: 43/69 JVT vectors passing
+- **HEVC**: 9/227 conformance vectors bit-exact (native port)
 - **VP9**: 214/226 vectors bit-exact
 - **Audio**: PCM native + Symphonia adapter (AAC, FLAC, MP3, Vorbis, Opus)
 - **Formats**: MP4/MOV, WAV, H.264 Annex B raw bitstream

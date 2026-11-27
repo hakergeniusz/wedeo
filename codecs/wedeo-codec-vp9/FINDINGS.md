@@ -1,12 +1,13 @@
 # VP9 conformance root-cause findings (agent/w55)
 
-Ground-truth extraction notes for the remaining FATE VP9 failures. All numbers
-were measured against the 226-vector `vp9-test-vectors` corpus with
+Historical ground-truth extraction notes from an earlier investigation.
+Current VP9 parity is 214/226; see `STATUS.md` and `VP9_GAPS.md`. All numbers
+below were measured against the 226-vector `vp9-test-vectors` corpus with
 `wedeo-framecrc` vs `ffmpeg -bitexact` (CRC field only, since wedeo emits a
 1/1000 time base and FFmpeg 1001/30000).
 
-Baseline (unchanged by this investigation): **165/226 files bitexact,
-1408/1871 frames matching.**
+Baseline at the time of that investigation (unchanged by it): **165/226 files
+bitexact, 1408/1871 frames matching.**
 
 ## Verified root causes
 

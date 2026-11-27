@@ -13,9 +13,10 @@ bytes. Wedeo now follows that order and `Cabac::reinit_skipping(n)` models
 
 Measured on `hevc-conformance/ipcm_B_NEC_2.bit` (1 frame, 416x240, yuv420p):
 before the fix, 38133 luma bytes differed and the PCM area was shifted garbage;
-after the fix, the luma plane matches FFmpeg byte for byte, including the
-16x16 PCM block at x=128, y=128. The chroma planes still differ, first at
-Cb x=160, y=0, so the vector is not yet bit-exact overall.
+after that fix, the luma plane matched FFmpeg byte for byte, including the
+16x16 PCM block at x=128, y=128. At that commit the chroma planes still
+differed, first at Cb x=160, y=0; commit `9f0d242` later made the vector fully
+bit-exact (see "Next measured targets" below).
 
 Side effect: vectors that previously emitted wrong frames from broken PCM
 input, such as `DBLK_D_VIXS_1.bit`, now return `InvalidData` early. This is
@@ -23,6 +24,9 @@ intentional: it is better to reject a stream than to emit silently wrong
 pixels.
 
 ## Overall parity
+
+Current at `d86b9d2`: 9/227 bit-exact vectors. The progression below is
+recorded at the commits named in each step.
 
 Baseline at `f6d844c` was 3/227 bit-exact vectors: one real match,
 `cbf_cr_cb_TUDepth_4_circle.h265`, and two trivial 384-byte constant
@@ -49,10 +53,9 @@ original three retained).
   notes claiming a residual +2 Cr offset were stale; `1973a7d` (cross-component
   prediction gate plus no Cb-to-Cr SAO copy) already fixed it. Do not spend
   another pass on that vector.
-- `hevc-conformance/MERGE_E_TI_3.bit`: frame 0 luma is byte-exact but Cb/Cr
-  differ from x=67, y=0. Chroma QP/dequant and intra prediction were ruled out
-  by gdb extraction; SAO parameters are the next measured comparison. See
-  `HEVC_MERGE_TRIAGE.md`.
+- `hevc-conformance/MERGE_E_TI_3.bit`: the Cb/Cr(67,0) divergence was fixed by
+  commit `9f0d242`; the first luma difference moved to Y(384,6). Historical
+  ground truth and the update are in `HEVC_MERGE_TRIAGE.md`.
 - Do not reapply the odd-pointer CABAC init experiment; it made parity worse.
 
 ---

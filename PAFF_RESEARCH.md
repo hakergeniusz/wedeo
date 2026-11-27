@@ -2,6 +2,14 @@
 
 Source: `/var/cache/zstd5/ffmpeg-src-w62/libavcodec/` (FFmpeg 8.0.git, commit `05c674c913`)
 
+## Status summary (2026-11-27)
+
+Wedeo now pairs top/bottom fields and uses field-view MC as a bounded step
+(commit `e61b4af`, Appendix Q), with documented trade-offs. Full interlaced
+pixel parity is still open. Appendices before Q record the earlier state and
+the then-current FRext baseline of 42/69; current FRext parity is 43/69 and the
+four-suite total is 198/283. See `STATUS.md` for the compact snapshot.
+
 ## CRITICAL CORRECTION TO THE INITIAL ASSUMPTION
 
 FFmpeg does **NOT** decode each field as a separate half-height picture and then combine them. Instead:
@@ -955,13 +963,17 @@ frame-only decoding (all 39 progressive FRext matches unchanged):
    `&[RefPic]` instead of `&[Arc<SharedPicture>]`.
 4. Unit tests for field interleaving, top-only refs, and frame-ref requirements.
 
-**Still missing (do not re-attempt partial patch without ground truth):**
+**Missing at that time (2026-11-26; do not re-attempt the old partial patch
+without ground truth):**
 - PAFF top/bottom pairing in `process_nal` (bottom field must reuse the top
   field's FDC and DPB slot, with one combined output frame).
 - Field MB row addressing in the CABAC/CAVLC loops (`mb_y = 2*field_y + parity`).
 - Field-view MC (`pic_as_field`: bottom data offset by one line, doubled stride,
   field-coordinate `ref_y`) in `apply_mc_partition` and `reconstruct_inter_mb_hires`.
 - Field-aware deblocking.
+
+Appendix Q later implemented these as a bounded step with trade-offs; see the
+status summary above and the Appendix Q notes for what remains.
 
 A partial implementation of the missing pieces was tried and reverted: it
 produced ~140k differing pixels per frame and hung on
@@ -1128,10 +1140,11 @@ cleaned) settles the field-mode coefficient divergence:
   change is justified.**
 
 Fix: pass `hdr.field_pic_flag` to `decode_mb_cabac` in the non-MBAFF CABAC
-slice loop. Verified: JVT FRext remains 42/69 with no regressions.
+slice loop. Verified at that commit: JVT FRext remains 42/69 with no regressions.
 
-Full PAFF still needs field pairing, field MB addressing, field-view MC and
-field-aware deblocking; this only makes the entropy decode correct.
+At that time full PAFF still needed field pairing, field MB addressing,
+field-view MC and field-aware deblocking; this only made the entropy decode
+correct. Appendix Q later landed a bounded step for those pieces.
 
 ---
 
@@ -1546,9 +1559,10 @@ Fixed at commit `e2ccefa`: Wedeo used `mb_field` where FFmpeg uses
 `mb_mbaff` for `rc = ref_count << MB_MBAFF(sl)`. Pure PAFF field pictures
 have `mb_field=1` but `mb_mbaff=0`, so Wedeo decoded 10 extra ref_idx bins
 before mvd. After the fix, bins 0-9 and the first mvd ([0,-5]) match FFmpeg
-exactly with no suite regression (42/69 FRext, zero new timeouts). Final
-PAFF pixels still diverge because field pairing, field-view MC and field
-deblock are not implemented; those are out of scope for this fix.
+exactly with no suite regression (42/69 FRext at that commit, zero new
+timeouts). Final PAFF pixels still diverged because full field pairing,
+field-view MC and field deblock were out of scope for this entropy fix;
+Appendix Q later added a bounded implementation.
 
 # H.264 PAFF bottom-field first divergent CABAC bin (2026-11-27)
 
@@ -1654,7 +1668,8 @@ trace (mvd_x `ctx=40 bin=0`, `low=33693200 range=286` after renormalization).
   reach parity (about 50680 differing luma bytes per frame before and after).
   The decoded MVs now match FFmpeg at the first MB, but final pixels stay wrong
   because full PAFF reconstruction (field pairing, field-view MC, field
-  deblock) is unimplemented and was explicitly out of scope for this task.
+  deblock) was unimplemented at that commit and explicitly out of scope for
+  this task; Appendix Q later added a bounded step.
 - Debug-build panic at `mb.rs:3368` (`attempt to subtract with overflow`) was
   seen in one slow debug trace configuration; release builds decode all frames
   without it. Not part of this entropy fix.
@@ -1671,9 +1686,10 @@ The first divergent CABAC bin was measured: bin 10, context 54 (ref_idx) in
 Wedeo, where FFmpeg goes directly to mvd context 40. One measured root cause:
 PAFF incorrectly doubled `ref_count` because `mb_field` was used in place of
 `mb_mbaff`. The minimal fix restores full bin-level parity through the first
-mvd and keeps the suite at 42/69 with no regressions or timeouts. Final bottom
-row pixel parity remains blocked by the separately unimplemented full PAFF
-reconstruction, which this task explicitly excluded. Committed as `ec3409b`,
+mvd and kept the suite at 42/69 at that commit with no regressions or timeouts.
+Final bottom row pixel parity remained blocked by full PAFF reconstruction,
+which this task explicitly excluded; Appendix Q later added a bounded step.
+Committed as `ec3409b`,
 worktree clean, not pushed.
 
 ---
@@ -1719,7 +1735,8 @@ at mb_x=0/mb_y=0, then the bottom slice ALSO starts at mb_x=0/mb_y=0, with
 `cur_mb_field=false` and `y_stride=352` in both. bS is 2 as in FFmpeg but is
 applied to the wrong rows with the wrong stride.
 
-Raw YUV: FFmpeg emits 150 frames, Wedeo 300 (no field pairing). Comparing
+Raw YUV at that time: FFmpeg emits 150 frames, Wedeo 300 (before Appendix Q
+field pairing). Comparing
 frame 0, the first 16 rows have 2344/2816 differing even rows and 2718/2816
 differing odd rows. With `WEDEO_NO_DEBLOCK=1`, the first 32 rows still have
 5154/5632 differing even rows, so reconstruction fails before deblocking.
@@ -1753,7 +1770,8 @@ and temporarily skipping high-depth reconstruction on bottom fields.
 
 Measured on Freh7_B.264: 105 output rows (baseline 205, FFmpeg 106). First 16
 luma rows: even-row differences 2344 -> 473, odd-row differences 2718 -> 2034.
-Full FRext: 42/69 MATCH, identical FAIL set to baseline, 0 ERROR and 0 timeouts.
+Full FRext: 42/69 MATCH at that commit, identical FAIL set to baseline, 0 ERROR
+and 0 timeouts (43/69 at HEAD after the high-depth IDCT fix).
 
 Trade-offs explicitly retained for the next pass:
 - Top-field first row is no longer byte-exact (about 50 +/-1 deblock differences)

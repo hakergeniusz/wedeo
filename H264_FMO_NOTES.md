@@ -37,11 +37,12 @@ with `Error::PatchwelcomeNotImplemented`. Implementing FMO would make Wedeo
 emit frames exactly where the reference decoder emits none, reducing parity.
 The suite ERROR entries for FM2_SVA_B and FM2_SVA_C are therefore correct.
 
-## The real remaining issue: failure-path hang
+## Historical failure-path hang (fixed at `d86b9d2`)
 
-JVT FM1_BT_B still times out in Wedeo (120 s) while FFmpeg exits quickly.
-This is a hang on the rejection path, not missing FMO decoding. Two candidate
-unbounded waits were identified by code inspection but NOT yet reproduced:
+JVT FM1_BT_B previously timed out in Wedeo (120 s) while FFmpeg exited quickly.
+It was a hang on the rejection path, not missing FMO decoding. Two candidate
+unbounded waits were identified by code inspection but NOT reproduced as the
+cause:
 
 - `shared_picture.rs:278`: `wait_for_row()` waits on a Condvar with no timeout.
 - `thread_pool.rs:151`: workers have no `catch_unwind`; if a worker panics,
@@ -50,7 +51,7 @@ unbounded waits were identified by code inspection but NOT yet reproduced:
 Do not patch either on hypothesis alone. The next pass must reproduce the hang
 with a trace, confirm which wait never returns, then add a bounded wait or
 panic-safe result delivery and verify zero frames plus a fast exit, with no new
-timeouts in the four-suite baseline (197/283).
+timeouts in the four-suite baseline (198/283 at HEAD).
 
 ## Resolution
 
@@ -79,8 +80,8 @@ Two verified changes:
    pictures that were never decoded.
 
 Measured after the fix: FM1_BT_B exits in ~0.08 s with zero framecrc frames
-(FFmpeg: zero frames), and the four-suite baseline stays at 197/283 with no new
-timeouts.
+(FFmpeg: zero frames), and the four-suite baseline was 197/283 at that commit
+with no new timeouts (198/283 at HEAD after the high-depth IDCT fix).
 
 Full source excerpts, the seven map types and the raster-remap rules are in
 `/tmp/ai-agent/H264_FMO_GT.md` (ephemeral; regenerate if needed).

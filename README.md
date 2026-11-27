@@ -9,9 +9,11 @@ This codebase is derived from two upstream projects:
 
 Essentially all code in this fork was written by **OpenCode (Hy4 flash Free)**, directed by a human.
 
+See [STATUS.md](STATUS.md) for a one-page snapshot of the current measured state and links to the detailed gap docs.
+
 ## Highlights
 
-- **Bit-exact verification:** 197/283 vectors match FFmpeg across four H.264 suites (50/52 FATE CAVLC, 27/27 FATE CABAC, 78/135 JVT-AVC_V1, 42/69 JVT-FR-EXT). Two CAVLC FMO vectors produce no frames in either decoder; see `H264.md` for details.
+- **Bit-exact verification:** 198/283 vectors match FFmpeg across four H.264 suites (50/52 FATE CAVLC, 27/27 FATE CABAC, 78/135 JVT-AVC_V1, 43/69 JVT-FR-EXT). Two CAVLC FMO vectors produce no frames in either decoder; see `H264.md` for details.
 - **Native video decoders:** H.264 (77/77 decodable progressive FATE vectors bitexact), VP9 (214/226 vectors bit-exact), VP8, MPEG-1/2, FLAC, and HEVC (9/227 vectors bit-exact against FFmpeg; native port still in progress).
 - **Containers:** demuxers for WAV, IVF, MP4/MOV, Matroska/WebM, MPEG-TS, Ogg, FLV, AVI, and raw H.264/HEVC. Muxers for WAV, IVF, MP4/MOV, Matroska/WebM, MPEG-TS, and FLV.
 - **Bitstream filters:** H.264 and HEVC MP4-to-Annex B, and AAC ADTS-to-ASC, with registry-driven initialization.
@@ -85,7 +87,7 @@ Codecs, formats, filters, and bitstream filters register themselves with `invent
 
 This is a development fork, not a drop-in FFmpeg replacement.
 
-- Pixel parity is incomplete for HEVC, H.264 High 10 / most 4:2:2 vectors, and parts of VP8 and VP9.
+- Pixel parity is incomplete for HEVC, H.264 High 10 4:2:0 and interlaced vectors, and parts of VP8 and VP9.
 - Encoding is limited to adapters such as `rav1e`; there are no native H.264 or HEVC encoders.
 - Network protocols, hardware decoding, subtitles, and seeking in the player are not implemented.
 - Performance is well behind C FFmpeg, especially without SIMD on non-aarch64 targets.

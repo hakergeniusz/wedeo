@@ -1,18 +1,24 @@
 # Wedeo Progress
 
-## Current Status (2026-04-05)
+## Current Status (2026-11-27)
 
-- H.264 CAVLC: **52/52** progressive conformance files BITEXACT (100%)
-- H.264 CABAC: **27/27** progressive conformance files BITEXACT (100%)
-- H.264 FRext: **23/55 BITEXACT** — all progressive High Profile 4:2:0 8-bit files pass. Remaining are interlaced (MBAFF/PAFF), 10-bit, or 4:2:2.
-- H.264 MBAFF: CABAC engine 100% correct, reconstruction partial (deblocking + inter prediction remain)
-- VP9 keyframes: **64/64** standard-size keyframes BITEXACT (100%)
-- VP9 inter frames: **11/64** quantizer test vectors BITEXACT (both frames); 53 have small pixel diffs (remaining MC/reconstruction bugs, bool decoder is correct)
+See [STATUS.md](STATUS.md) for the compact measured-state table.
+
+- H.264, four suites: **198/283** vectors BITEXACT
+- H.264 FATE CAVLC: **50/52** (two FMO vectors produce no frames in either decoder)
+- H.264 FATE CABAC: **27/27** progressive conformance files BITEXACT
+- H.264 JVT-AVC_V1: **78/135**; JVT-FR-EXT: **43/69**
+- H.264 interlaced: PAFF field pairing and field-view MC landed as a bounded step with documented trade-offs; full MBAFF/PAFF pixel parity remains open. See `PAFF_RESEARCH.md` Appendix Q.
+- VP9: **214/226** vectors BITEXACT (4 CRC differences, 8 high-depth zero-frame vectors)
+- HEVC, native port: **9/227** conformance vectors BITEXACT
 - WAV/PCM pipeline: byte-identical to FFmpeg 8.0.1 across all FATE suite samples
 - Audio via symphonia: 28 decoders, 10 demuxers, SNR-verified lossy codecs
 - **Video player (v0.1.1):** GPU-accelerated via wgpu+winit, 24fps 0-drop 1080p playback, ffplay-style A/V sync
 
-## VP9 Decoder (2026-04-05)
+## VP9 Decoder (historical snapshot, 2026-04-05)
+
+The implementation notes below are from the dated session; current parity is in
+`STATUS.md` and `VP9_GAPS.md`.
 
 - Native Rust, 12 modules, ~6K lines
 - IVF + WebM demuxers
@@ -30,7 +36,9 @@
 3. **MV clamping bounds** (prior session) — `BWH_TAB[1]` → `BWH_TAB[0]` for bw4/bh4.
 4. **MC emu_edge offset** (prior session) — removed erroneous +3 column/row offset from emu buffer src pointer.
 
-## Threading Benchmark (Phase 7 — BBB 1080p 10s, 10 runs)
+## Threading Benchmark (historical, Phase 7 - BBB 1080p 10s, 10 runs)
+
+These numbers are from the 2026-04-05 measurement, not a current benchmark.
 
 | Config | Wall | User | System |
 |--------|------|------|--------|
@@ -53,12 +61,11 @@ Single-threaded gap: wedeo is **12x slower** than FFmpeg (scalar Rust vs C+NEON)
 | memcpy/memmove | 5.8% | System-optimized |
 | CABAC | 1.8% | Inherently serial |
 
-## Next Steps
+## Next Steps (open gaps)
 
-- VP9 inter frame conformance — remaining pixel diffs likely from MC reconstruction bugs
-- VP9 probability adaptation — `adapt_probs` not yet wired up between frames
-- VP9 odd-size frame conformance — 39 keyframes with non-8-aligned dimensions mismatch
-- Seek reimplementation — ffplay serial mechanism for stale frame discard
-- SIMD for MC lowpass filters (NEON) — primary target, 3x slower at qpel(2,2) vs (0,0)
-- Interlaced (PAFF) support
-- Additional video codecs (HEVC)
+- VP9 inter frame conformance - 4 CRC differences remain; 8 high-depth vectors emit zero frames (see `VP9_GAPS.md`)
+- VP9 probability adaptation - `adapt_probs` not yet wired up between frames
+- Seek reimplementation - ffplay serial mechanism for stale frame discard
+- SIMD for MC lowpass filters (NEON) - primary target, 3x slower at qpel(2,2) vs (0,0)
+- Full interlaced (MBAFF/PAFF) pixel parity - field pairing and field-view MC are in place; remaining work is in `PAFF_RESEARCH.md` Appendix Q
+- HEVC native pixel parity - 9/227; next targets in `HEVC_GAPS.md`

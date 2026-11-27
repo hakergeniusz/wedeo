@@ -84,8 +84,10 @@ internal decoder. Both produce identical output.
 **Wedeo**: Uses the `opus-decoder` crate (0.1.1), a pure-Rust
 reimplementation. Quality varies by mode:
 - CELT mode: ~48 dB SNR vs FFmpeg (good, float precision differences)
-- SILK mode: ~11-14 dB SNR vs FFmpeg (poor, real accuracy gaps)
-- Hybrid mode: ~13-14 dB SNR vs FFmpeg (same class of issue)
+- SILK mode: 9.79 dB SNR on `fate-suite/opus/silk-lbrr-mono.mka` after the
+  pre-skip fix (was -4.05 dB before it); other SILK vectors still have
+  accuracy gaps
+- Hybrid mode: still shows accuracy gaps of the same class
 
 Measured on `fate-suite/opus/silk-lbrr-mono.mka` with WAV framecrc and PCM SNR
 (2026-11-27): before the fix Wedeo produced 43200 samples vs FFmpeg's 43278,
@@ -195,8 +197,9 @@ corrupted stream could panic instead of producing garbage.
 
 ### Bitexact status
 
-50/51 progressive CAVLC conformance files are BITEXACT (98%). Only
-FM1_FT_E (FMO, out of scope) remains.
+50/52 FATE CAVLC vectors are BITEXACT. Two FMO vectors (FM2_SVA_B and
+FM2_SVA_C) produce no frames in either decoder; FMO is out of scope.
+See `H264.md` and `H264_FMO_NOTES.md`.
 
 ### CAVLC level decoding
 
