@@ -238,8 +238,15 @@ fn main() {
             // SAR: use 0/1 if not set (matching FFmpeg)
             writeln!(out, "#sar {i}: 0/1").unwrap();
 
-            // Create a decoder for this stream
-            match DecoderBuilder::new(cp.clone()).open() {
+            // Create a decoder for this stream. WEDEO_DECODER forces a named
+            // implementation (useful when several decoders share a codec id).
+            let forced = std::env::var("WEDEO_DECODER").ok();
+            match forced
+                .as_deref()
+                .and_then(wedeo_codec::registry::find_decoder_by_name)
+                .map(|f| f.create(cp.clone()))
+                .unwrap_or_else(|| DecoderBuilder::new(cp.clone()).open())
+            {
                 Ok(dec) => {
                     decoders.push(Some(dec));
                     decode_stream_indices.push(true);

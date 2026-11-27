@@ -72,7 +72,20 @@ impl Dpb {
     }
 
     /// FFmpeg's `alloc_frame()`: find a free DPB slot and allocate a frame.
+    /// Free DPB slots whose frames have no remaining flags. FFmpeg keeps the
+    /// `HEVCFrame` struct but zeroes its flags; Wedeo represents a free slot
+    /// as `None`, so an unref'd frame must be removed here or `alloc_frame`
+    /// will eventually exhaust the DPB.
+    fn prune_empty_slots(&mut self) {
+        for frame in &mut self.frames {
+            if frame.as_ref().is_some_and(|f| f.flags.is_empty()) {
+                *frame = None;
+            }
+        }
+    }
+
     pub fn alloc_frame(&mut self) -> Result<usize> {
+        self.prune_empty_slots();
         let slot = self
             .frames
             .iter()
@@ -347,6 +360,7 @@ impl Dpb {
                 frame.unref(FrameFlags::default());
             }
         }
+        self.prune_empty_slots();
 
         Ok(())
     }
@@ -356,6 +370,7 @@ impl Dpb {
         for frame in self.frames.iter_mut().flatten() {
             frame.unref(FrameFlags::SHORT_REF.union(FrameFlags::LONG_REF));
         }
+        self.prune_empty_slots();
     }
 
     /// FFmpeg's `ff_hevc_flush_dpb()`.
@@ -414,6 +429,7 @@ impl Dpb {
                 .ok_or(Error::Bug)?
                 .flags
                 .remove(FrameFlags::OUTPUT);
+            self.prune_empty_slots();
         }
     }
 }
