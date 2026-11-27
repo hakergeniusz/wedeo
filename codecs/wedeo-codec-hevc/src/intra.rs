@@ -373,57 +373,65 @@ pub fn intra_predict_tu(
         - (x0 + size as i32 * (1 << hshift)))
         >> hshift) as usize;
 
-    // Constrained intra prediction: a neighbour is usable only if its PU is intra.
+    // Constrained intra prediction: FFmpeg's `pred_template.c:167-207` rechecks
+    // each candidate at PU granularity. Every second PU along the neighbour is
+    // tested and any intra PU makes the candidate available; testing every
+    // sample and requiring *all* of them to be intra is too strict.
     if pps.constrained_intra_pred_flag {
         let pu = |v: i32| (v as u32 >> sps.log2_min_pu_size) as usize;
-        let is_intra = |px: i32, py: i32| -> bool {
+        let is_intra = |px_pu: usize, py_pu: usize| -> bool {
             picture
                 .tab_mvf
-                .get(pu(px), pu(py))
+                .get(px_pu, py_pu)
                 .is_some_and(|f| f.pred_flag.is_intra())
         };
-        if cand_left {
-            let mut ok = true;
-            for i in 0..size as i32 {
-                if !is_intra(x0 - 1, y0 + i * (1 << vshift)) {
-                    ok = false;
-                    break;
-                }
-            }
-            cand_left = ok;
+        let min_pu_size = 1i32 << sps.log2_min_pu_size;
+        let on_pu_edge_x = x0 % min_pu_size == 0;
+        let on_pu_edge_y = y0 % min_pu_size == 0;
+        let size_luma_h = size as i32 * (1 << hshift);
+        let size_luma_v = size as i32 * (1 << vshift);
+        let mut size_pu_h = size_luma_h >> sps.log2_min_pu_size;
+        let size_pu_v = size_luma_v >> sps.log2_min_pu_size;
+        if size_pu_h == 0 {
+            size_pu_h = 1;
         }
-        if cand_up {
-            let mut ok = true;
-            for i in 0..size as i32 {
-                if !is_intra(x0 + i * (1 << hshift), y0 - 1) {
-                    ok = false;
-                    break;
+        let any_intra = |first: usize, fixed: usize, count: i32, vertical: bool| -> bool {
+            let max = count.min(if vertical {
+                sps.min_pu_height as i32 - fixed as i32
+            } else {
+                sps.min_pu_width as i32 - fixed as i32
+            });
+            (0..max).step_by(2).any(|i| {
+                let idx = fixed + i as usize;
+                if vertical {
+                    is_intra(first, idx)
+                } else {
+                    is_intra(idx, first)
                 }
-            }
-            cand_up = ok;
+            })
+        };
+        if cand_bottom_left && on_pu_edge_x {
+            let x_left = pu(x0 - 1);
+            let y_bottom = pu(y0 + size_luma_v);
+            cand_bottom_left = any_intra(x_left, y_bottom, size_pu_v, true);
+        }
+        if cand_left && on_pu_edge_x {
+            let x_left = pu(x0 - 1);
+            let y_left = pu(y0);
+            cand_left = any_intra(x_left, y_left, size_pu_v, true);
         }
         if cand_up_left {
-            cand_up_left = is_intra(x0 - 1, y0 - 1);
+            cand_up_left = is_intra(pu(x0 - 1), pu(y0 - 1));
         }
-        if cand_up_right {
-            let mut ok = true;
-            for i in 0..size as i32 {
-                if !is_intra(x0 + size as i32 * (1 << hshift) + i, y0 - 1) {
-                    ok = false;
-                    break;
-                }
-            }
-            cand_up_right = ok;
+        if cand_up && on_pu_edge_y {
+            let x_top = pu(x0);
+            let y_top = pu(y0 - 1);
+            cand_up = any_intra(y_top, x_top, size_pu_h, false);
         }
-        if cand_bottom_left {
-            let mut ok = true;
-            for i in 0..size as i32 {
-                if !is_intra(x0 - 1, y0 + size as i32 * (1 << vshift) + i) {
-                    ok = false;
-                    break;
-                }
-            }
-            cand_bottom_left = ok;
+        if cand_up_right && on_pu_edge_y {
+            let x_right = pu(x0 + size_luma_h);
+            let y_top = pu(y0 - 1);
+            cand_up_right = any_intra(y_top, x_right, size_pu_h, false);
         }
     }
 
