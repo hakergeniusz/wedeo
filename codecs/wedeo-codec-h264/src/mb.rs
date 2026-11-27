@@ -4025,7 +4025,9 @@ fn decode_chroma_inter(
                     let dc_add = (dc_val + 32) >> 6;
                     {
                         let plane_name = if plane_idx == 0 { "U" } else { "V" };
-                        let mc_row0: Vec<u8> = (0..4).map(|i| plane_data[c_offset + i]).collect();
+                        // Stack array avoids a per-macroblock heap allocation while
+                        // keeping the trace output identical to the Vec<u8> form.
+                        let mc_row0: [u8; 4] = core::array::from_fn(|i| plane_data[c_offset + i]);
                         trace!(mb_x, mb_y, plane = plane_name, blk_x, blk_y,
                             dc_val, dc_add, mc_pred_row0 = ?mc_row0, "inter chroma DC-add");
                     }
