@@ -1166,3 +1166,33 @@ Measured (`/tmp/ai-agent/PAFF_DEBLOCK_PLAN.md`) on the same vector:
   frame MB rows into `inline_deblock_row`/`deblock_last_row`, and never route
   PAFF through MBAFF pair deblocking. Shared `row_progress` means the top field
   must be published complete at pair start to avoid self-deadlock.
+
+---
+
+## Appendix K: Full PAFF attempt 2026-11-27 (reverted)
+
+A complete attempt was made on top of `f4baf65` and reverted because it
+introduced 4 new 120 s timeouts in the FRext suite (total errors 1 -> 5:
+`brcm_freh6`, `Hi422FREXT16_SONY_A`, `Hi422FREXT18_SONY_A`,
+`HPCVFL_BRCM_A`, `HPCVFLNL_BRCM_A`). Observed before revert:
+
+- Field pairing + field MB addressing + field CABAC scan (the last already
+  committed) made the **top field of `Freh7_B.264` bit-exact** with FFmpeg on
+  every even row. This confirms Appendices E/H are correct.
+- DPB placeholders are created with `RefStatus::Unused`, so a bottom field
+  arriving before its top field's frame completes cannot see the top field as
+  a reference. Promoting the paired entry to `ShortTerm` with `ref_mask=1`
+  (top only) fixed self-reference (bottom rows changed from all-128 to real
+  content). Setting `ref_mask=3` lets the bottom field self-reference its own
+  unwritten rows and must be avoided.
+- With `ref_mask=1`, decoded bottom-field MVs still differed from FFmpeg
+  ground truth (`[0,-5]` expected; Wedeo produced `[0,1]`, `[4,1]`, ...), so
+  the bottom-field CABAC context / MV prediction needs its own ground truth.
+- Field-view MC (`&rp.y[parity*stride..]`, doubled stride, field-relative
+  coords, skip `wait_for_row` for self-reference) is likely the source of the
+  new timeouts; the exact deadlock was not isolated.
+
+Next attempt should: (1) isolate the timeout with a single-vector run before
+broad testing, (2) extract FFmpeg's bottom-field MV/context values at the
+first MB, and (3) promote the DPB entry to ShortTerm with top-only mask as
+above. Do not reapply this patch wholesale.
