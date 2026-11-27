@@ -28,7 +28,7 @@
   - [x] VP9 inter prediction — MV parsing/prediction (spatial+temporal), 8-tap subpel MC, compound prediction, reference frame management. 21 bugs fixed 2026-04-03.
   - [x] VP9 keyframe pixel conformance — 64/64 standard-size keyframes match FFmpeg bit-for-bit
   - [x] VP9 inter-frame bool decoder parity — symbol counts verified identical to FFmpeg (927 blocks). 4 bugs fixed: mode ctx indexing (1-per-8×8 vs 2-per-8×8), end_x_y edge clamping, MV clamping bounds, MC emu_edge offset (2026-04-05).
-  - [ ] VP9 inter frame pixel conformance — 211/226 vectors BITEXACT, 7 CRC differences, 8 zero-frame high-depth vectors. Remaining 8-bit failures include `210x202` and `segkey_adpq`. No vectors panic today.
+  - [ ] VP9 inter frame pixel conformance — 214/226 vectors BITEXACT, 4 CRC differences, 8 zero-frame high-depth vectors. Commit `d7ac5ba` fixed clipped NNZ edge-context merging, resolving `210x198`, `210x202` and `segkey_adpq`. No vectors panic today.
   - [x] VP9 odd-size OOB panics — the 74 historical `intra_pred.rs` panics no longer reproduce; odd-size vectors decode with correct geometry.
   - [ ] VP9 probability adaptation — `adapt_probs` not yet wired up after each frame decode
   - [ ] VP9 scaled prediction — silently skipped when ref/current dimensions differ

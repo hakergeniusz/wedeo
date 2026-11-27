@@ -210,3 +210,20 @@ extract the first divergent bool-decoder symbol in frame 6 of 210x198 by
 logging every `get_tree`/`get_prob` symbol in both decoders up to the block at
 MI (24,24), and check `vp9.c` partition probability context updates for the
 odd-width MI grid (`s->cols = (210+7)>>3 = 27`, `s->sb_cols = 4`).
+
+---
+
+## RESOLVED: clipped NNZ edge context (commit d7ac5ba, 2026-11-27)
+
+All three previously failing 8-bit vectors (`210x198`, `210x202`,
+`segkey_adpq`) are now bit-exact. Root cause: Wedeo's `merge_ctx()` in
+`codecs/wedeo-codec-vp9/src/block.rs` kept only the first NNZ entry when a
+`step`-wide merge was clipped at the frame edge, whereas FFmpeg's MERGE reads
+a full step-wide word from the backing NNZ array. With a clipped local copy,
+OR-ing all remaining entries reproduces FFmpeg's value.
+
+Measured result: target vector all 10 frames identical; VP9 sweep 211 -> 214
+exact vectors out of 225, with zero regressions. Earlier docs about NNZ
+context, loop-filter inputs and segmentation timing in these vectors are
+historical evidence of the same root cause and no longer describe current
+behaviour.
