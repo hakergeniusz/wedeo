@@ -55,7 +55,9 @@ Current (v0.1.1, wgpu+winit, ffplay pts_drift clock):
 - 3-thread architecture matching ffplay (read, video decode, audio decode)
 
 Remaining optimizations:
-- [ ] SIMD for MC lowpass filters (NEON on Apple Silicon) — 3x slower at qpel(2,2) vs (0,0)
+- [ ] SIMD for MC lowpass filters (NEON on Apple Silicon) - 3x slower at qpel(2,2) vs (0,0)
+- [x] Per-MB chroma DC trace heap allocation removed (`189ec4a`). Measured median wall-clock change was 1.9-2.5%, within run-to-run noise, so no speedup is claimed.
+- [ ] The MC path now uses preallocated `McScratch` and `bi_scratch_y/u/v`; remaining allocation cost needs a fresh profile before changing more code.
 
 ## Infrastructure (ongoing)
 
