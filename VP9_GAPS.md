@@ -139,3 +139,74 @@ bit-exact on FATE high-depth vectors may the early return be removed.
   `cargo clippy -p wedeo-codec-vp9 -p wedeo-core`.
 - `wedeo-framecrc` versus `ffmpeg -bitexact -i <8-bit VP9 vector> -f framecrc -`
   on a representative 8-bit vector.
+
+---
+
+## Other 8-bit failures: segkey_adpq and 210x198 (2026-11-27)
+
+# VP9 8-bit non-210x202 ground-truth triage (2026-11-27)
+
+Worktree: `/home/hakergeniusz/.local/share/opencode/worktree/695063/vp9-other8`
+Base commit: `5e47eb4` (clean tree, no patch committed).
+Binaries: `wedeo-framecrc` from `CARGO_TARGET_DIR=/var/cache/zstd5/wedeo-target-vp9-other8`
+and FFmpeg debug build `/var/cache/zstd5/ffmpeg-src-w62/ffmpeg_g`.
+Corpus: `/var/cache/zstd5/wedeo-ref/fate-suite/vp9-test-vectors/`.
+
+## Reproduction and symmetric comparison
+
+CRCs were compared on the CRC field only (wedeo uses tb 1/1000, FFmpeg 1001/30000).
+Raw YUV was decoded from both binaries with the **same** loop-filter setting;
+an earlier asymmetric comparison (wedeo `WEDEO_NO_DEBLOCK=1`, FFmpeg default)
+was discarded.
+
+### `vp90-2-15-segkey_adpq.webm` (852x480, 150 shown frames)
+
+- Wedeo CRCs match FFmpeg exactly for frames 0..91; first mismatch at frame 92.
+- Raw-YUV diff frame 92: 1318 Y pixels, first at (x=849,y=286), Wedeo 125 /
+  FFmpeg 124, magnitude max 172. U/V also differ (max 13 / 5).
+- Affected columns form 8x8-MI-aligned groups (192..217, 271..288, 656..687,
+  839..851); affected rows are 286..313, 335..393, 422..432, 470..479.
+- FFmpeg header ground truth via gdb (`vp9.c:805`, one stop per header):
+  frame 0 is keyframe with `seg_enabled=1, update_map=1, prob=255,255,128`.
+  Hidden altref frames occur in the stream; `update_map=1` again at decoded
+  header index 89, and displayed frame 92 is the first affected output.
+- Wedeo's segmentation state (`decoder.rs:498-506`, `block.rs:333-394`) mirrors
+  FFmpeg's retention rule (`vp9.c:1618-1670`) and temporal pred-prob path
+  (`vp9block.c:98-141`). No single measured field mismatch was obtained before
+  the time budget expired, so no patch was made.
+
+### `vp90-2-03-size-210x198.webm` (210x198, 10 frames)
+
+- Wedeo CRCs match frames 0..5; first mismatch at frame 6 (frames 6..9 differ).
+- Symmetric raw-YUV diff frame 6: 1646 Y pixels, first at (x=209,y=126),
+  Wedeo 33 / FFmpeg 32; U 264 px (max 4), V 325 px (max 3).
+- A flat +1/+2 luma band at y=127..132, x=196..207 and a large mismatch at the
+  bottom-right corner (y=192..197, x>=178, max |diff|=106) were measured.
+- FFmpeg header GT at decoded header index 6 (`gdb ignore 1 6`, `vp9.c:805`):
+  `w=210 h=198 kf=0 invis=0 errres=0 intraonly=0 resetctx=0 refreshrefmask=1`,
+  `refidx=0,1,2 signbias=0,0,0 framectx=0 refreshctx=1 parallelmode=0`,
+  `tile_cols_log2=0 tile_rows_log2=0 baseq=174 ydc=0 uvdc=0 uvac=0`,
+  `filtmode=4 use_last_frame_mvs=1`. Wedeo parses the same fields
+  (`refresh=1 ref_idx=[0,1,2] base_q_idx=174 tile 0,0`).
+- **Ruled out:** `use_last_frame_mvs`. Wedeo's `decoder.rs` debug log prints
+  the header default (`false`) *before* the `compute_use_last_frame_mvs`
+  override at line 245; a temporary trace at the override measured
+  `use_last=true` for frames 1..7, matching FFmpeg.
+- FFmpeg block GT (`vp9block.c:1292`, bottom-right region) and Wedeo block
+  trace (temporary, released) both show frame 5 matching, e.g. MI (24,24)
+  `bs=7 skip=0 mv=(-28,16)`. At frame 6 MI (24,24) FFmpeg decodes
+  `bs=11 (4x8 px), skip=1, inter, mv=(84,0)`, while Wedeo decodes a
+  `32x16 intra, skip=false` block. The partition/mode symbols have already
+  diverged by that point; no single upstream symbol was isolated before the
+  time budget expired.
+- The loop filter is not the cause: symmetric no-loop-filter and filtered
+  comparisons give the same 1646-pixel mismatch at frame 6.
+
+## Conclusion
+
+No measured single-cause fix was established for either vector within the
+budget. No source change was committed; the worktree is clean. Next agent:
+extract the first divergent bool-decoder symbol in frame 6 of 210x198 by
+logging every `get_tree`/`get_prob` symbol in both decoders up to the block at
+MI (24,24), and check `vp9.c` partition probability context updates for the
+odd-width MI grid (`s->cols = (210+7)>>3 = 27`, `s->sb_cols = 4`).
