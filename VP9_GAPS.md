@@ -376,7 +376,7 @@ instead of FFmpeg's 10 frames of 28800 bytes).
 Added `PixelFormat::Yuv440p` and the mapping, plus framecrc chroma geometry
 (0,1,1) and hflip/crop exhaustive matches. Verified frame count 9 -> 10, frame 0
 CRC exact (`0x4a56762b`), all luma bytes exact, full sweep unchanged at
-215/226 with no new failures. Remaining inter-frame chroma differences are a
+216/226 with no new failures. Remaining inter-frame chroma differences are a
 separate root cause (suspected sub-8x8 chroma MV under mixed subsampling).
 
 Follow-up: the inter-frame chroma differences were in sub-8x8 chroma MC for
@@ -402,7 +402,7 @@ from a direct copy of FFmpeg's `vp9dsp_template.c` reference program (the first
 version of that program mistakenly applied the -3 offset twice, making the Rust
 code look wrong; after correction they matched exactly).
 
-Verified: 8-bit sweep unchanged at 215/226 with identical match names, 1226
+Verified: 8-bit sweep unchanged at 216/226 with identical match names, 1226
 workspace tests pass. The 8-bit gate remains; stage 4 (u16 loop filter with
 bit-depth-scaled thresholds, then gate removal) is still open.
 
@@ -476,3 +476,17 @@ Paired values at frame 1 SB0, chroma U row0[16..19]:
 
 Next step: pair Wedeo's second predictor MV/filter and compound averaging
 rounding at that 16x8 block. No patch.
+
+---
+
+## RESOLVED: 4:4:0 sub-8x8 chroma MC (commit 2d6dcff, 2026-11-27)
+
+FFmpeg gdb at `vp9_mc_template.c:157`: the first divergent block is bs=11
+(Bs4x8), row=0 col=4, mv[0]=(27,2), mv[1]=(9,0). FFmpeg predicts the left and
+right 4x4 chroma halves with their own MVs; the 8x8 luma block covers 8x4
+chroma in 4:4:0 (ss_h=0, ss_v=1). Wedeo predicted once with the first MV.
+
+Added `sub8x8_chroma_mc_440` with vertical-MV averaging and per-half prediction,
+and corrected the compound average region to 8x4. Verified `yuv440` all 10
+frames byte-exact on Y/U/V; VP9 sweep 215/226 -> 216/226 with only `resize`
+and `yuv422` remaining. Full workspace tests pass.
