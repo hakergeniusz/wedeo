@@ -78,10 +78,11 @@ Three clusters:
 Report: `/tmp/ai-agent/H264_FREXT_CLASSIFICATION.md` (ephemeral; 25/25 vectors
 measured, caveat: used a prebuilt binary containing all current H.264 fixes).
 
-## HEVC failure map at 20/227 (2026-11-27)
+## HEVC failure map at 20/227 (classified 2026-11-27, rechecked 2026-11-28)
 
-Classification of all 209 failing vectors (207 CRC diffs + 2 neither-decoder
-frame vectors). Measured: frame CRCs, YUV first-diff coordinates/values, and
+At 18/227 this covered 209 failing vectors; at the current 20/227, 207 remain
+(205 CRC diffs + 2 neither-decoder frame vectors). Measured: frame CRCs,
+YUV first-diff coordinates/values, and
 FFmpeg no-loop-filter comparisons. Stage attribution is inferred from
 signatures/names/published gdb values, not Wedeo internal stage dumps.
 
