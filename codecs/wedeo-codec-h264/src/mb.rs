@@ -4134,14 +4134,15 @@ fn decode_intra8x8(
         // boundary above this MB). For blocks inside the MB it is always
         // available; for the top-right block it lives in the MB above; for the
         // top-left block it belongs to the above-left MB.
-        // In MBAFF field mode the row above in field coordinates is two MB
-        // rows up in the frame, not one (FFmpeg h264_mvpred.h:
-        // `top_xy = mb_xy - (mb_stride << MB_FIELD)`). A bottom-field MB in
-        // the first pair row therefore has no above-left sample at all. Using
-        // mb_y-1 here made `has_top_left` true with a fallback top_left of
-        // 128, which corrupted the filtered left sample for the top-left
-        // 8x8 block and shifted its DC prediction by +1.
-        let (above_left_row, has_above_left_row) = if ctx.is_mbaff && ctx.mb_field {
+        // In field mode (MBAFF field MBs and pure PAFF field pictures) the
+        // row above in field coordinates is two MB rows up in the frame, not
+        // one (FFmpeg h264_mvpred.h: `top_xy = mb_xy - (mb_stride <<
+        // MB_FIELD)`). A bottom-field MB in the first pair row therefore has
+        // no above-left sample at all. Using mb_y-1 here made
+        // `has_top_left` true with a fallback top_left of 128, which
+        // corrupted the filtered left sample for the top-left 8x8 block and
+        // shifted its prediction by +1 per row.
+        let (above_left_row, has_above_left_row) = if ctx.mb_field {
             (mb_y.saturating_sub(2), mb_y >= 2)
         } else {
             (mb_y.saturating_sub(1), mb_y > 0)
@@ -4173,9 +4174,10 @@ fn decode_intra8x8(
             } else {
                 // Top-right of the right 8x8 block = top-right MB.
                 // Must check slice_table to ensure the above-right MB has
-                // been decoded. In MBAFF field mode, the above row is from
-                // the previous pair row (mb_y-2), not mb_y-1.
-                let tr_y_opt = if ctx.is_mbaff && ctx.mb_field {
+                // been decoded. In field mode (MBAFF field MBs and pure PAFF
+                // field pictures), the above row is from the previous pair
+                // row (mb_y-2), not mb_y-1.
+                let tr_y_opt = if ctx.mb_field {
                     if mb_y >= 2 { Some(mb_y - 2) } else { None }
                 } else if mb_y > 0 {
                     Some(mb_y - 1)
