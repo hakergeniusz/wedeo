@@ -414,3 +414,27 @@ change it (that FFmpeg tree has no skip_loop_filter check for VP9). Conclusion:
 upstream MC/MV/coefficients are aligned; the remaining difference is in 4:2:2
 chroma loop filtering (`loopfilter.rs`), which was out of scope for that agent.
 No patch. Evidence: `/tmp/ai-agent/` vp9-422 logs (ephemeral).
+
+## vp90-2-05-resize.ivf: corrected ground truth and full design (2026-11-27)
+
+Earlier measurements used the wrong FFmpeg reference CRC. Ground truth:
+
+- The actual sweep command `ffmpeg -bitexact -i FILE -f framecrc -` uses
+  default `SWS_BICUBIC` autoscale and produces `0x8974d724`, not the
+  previously cited `0x7557ec0c` (which is `bicubic+accurate_rnd` or
+  `+bitexact`). `-sws_flags A/B` confirmed only plain bicubic matches the
+  default CRC.
+- FFmpeg CLI inserts `scaler_out`: 282x173 is upscaled to 352x288.
+- Frames 0-2 are bit-exact. Frames 3-5 differ in raw decode CRC even before
+  scaling. Frames 6-9 are natively 352x288 but still differ because they
+  reference the resized frames. Both scaled MC AND output bicubic scaling are
+  required; neither alone suffices.
+- `tests/fate/src/framecrc.rs` packs planes by `video.width/height` with no
+  display-size concept. `wedeo-cli` has no auto-scale. Scale target is the
+  first decoded frame size 352x288, not the IVF header's 320x240.
+
+Full design (182 lines) in `/tmp/ai-agent/VP9_RESIZE_SCALE.md`: add a
+`wedeo-filter-scale` crate porting swscale bicubic with fixed-point rounding
+and odd chroma-height edge handling, wire it into framecrc and CLI, restore
+scaled MC, and debug against `-noautoscale` raw CRCs. No patch; too large for
+one 20-minute round.
