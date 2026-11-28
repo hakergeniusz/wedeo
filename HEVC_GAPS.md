@@ -247,3 +247,28 @@ decode. Verified `VPSID_A_VIDYO_1` frames 0-2 byte-exact, first diff moved from
 frame 1 to frame 3, divergent bytes 233619 -> 45422. Full sweep 18/227 ->
 20/227 with `cip_B_NEC_2.bit` and `cip_B_NEC_3.bit` newly matching, all prior
 matches preserved, no new errors.
+
+## Largest remaining inter signature: 11-vector temporal merge (2026-11-28)
+
+After commit 8073af8, the largest exact shared signature among the 77 inter
+vectors is 11 vectors with `f1 Y(0,0) Wedeo 139 / FFmpeg 138`:
+`MERGE_A/B/C/D_TI_3`, `PMERGE_A/B/C/D/E_TI_3`, `RPS_A_docomo_4`,
+`RPS_F_docomo_1`. Next largest groups have only 5 and 3 members.
+
+Paired measurements at POC1 PU(0,0), 32x32:
+- FFmpeg skip merge candidate `BI`, ref=(0,0), mv=(-3,0)/(3,0), with all
+  `lc->na` neighbour flags zero, so the candidate must be temporal
+  (collocated). FFmpeg collocated: `colPic=2`, temporal `pf=L0`,
+  `colmv=(-6,-1)`, POC-scaled to `(-3,0)`.
+- Wedeo's merge call (gdb hit 257, x0=0,y0=0,32x32) returned `pf=BI`,
+  mv=(0,0)/(0,0), i.e. a zero temporal candidate. `temporal_luma_motion_vector`
+  was called twice (L0 and L1) in that call.
+
+The shared root cause is the temporal merge candidate for the first PU of the
+second decoded picture. The exact failing sub-step (collocated picture choice,
+tab_mvf sample, long-term/POC check, or scaling) was NOT pinned: the instrumented
+build needed a temporary `tracing` dependency in `wedeo-codec-hevc-refs` and did
+not finish behind the shared build lock within budget. No patch, gates not run.
+Evidence: `/tmp/ai-agent/partnext_evidence.md`, `/tmp/ai-agent/partnext_fastsig.log`.
+Next: pair inputs of `make_temporal` / `derive_temporal_colocated_mvs` at that
+call using source-level tracing.
