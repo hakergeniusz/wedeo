@@ -26,6 +26,7 @@ pub fn filter_picture(
     let ctb_size = 1i32 << sps.log2_ctb_size;
 
     if !disable_deblock {
+        restore_pcm_boundary_strengths(pic, sps);
         for ry in 0..sps.ctb_height as i32 {
             for rx in 0..sps.ctb_width as i32 {
                 let ctb = (ry * sps.ctb_width as i32 + rx) as usize;
@@ -80,6 +81,52 @@ pub fn filter_picture(
         }
     }
     Ok(())
+}
+
+/// FFmpeg's `hls_pcm_sample()` (hevcdec.c:1700) derives boundary strengths
+/// for I_PCM CUs before reading the PCM samples. Wedeo's `decode_pcm()`
+/// returns before the transform-tree path that normally calls
+/// `boundary_strengths()`, so PCM CUs have zero strengths. Replay that step
+/// from the per-PU PCM map and the stored CU depths before deblocking.
+fn restore_pcm_boundary_strengths(pic: &mut Picture, sps: &Sps) {
+    if !sps.pcm_enabled {
+        return;
+    }
+    let mut seen: Vec<(i32, i32, u32)> = Vec::new();
+    for y in (0..sps.height as i32).step_by(1 << sps.log2_min_pu_size) {
+        for x in (0..sps.width as i32).step_by(1 << sps.log2_min_pu_size) {
+            let px = (x as u32 >> sps.log2_min_pu_size) as usize;
+            let py = (y as u32 >> sps.log2_min_pu_size) as usize;
+            if pic
+                .is_pcm
+                .get(py * pic.min_pu_width + px)
+                .copied()
+                .unwrap_or(0)
+                == 0
+            {
+                continue;
+            }
+            let x_cb = (x as u32 >> sps.log2_min_cb_size) as usize;
+            let y_cb = (y as u32 >> sps.log2_min_cb_size) as usize;
+            let depth = pic
+                .tab_ct_depth
+                .get(y_cb * pic.min_cb_width + x_cb)
+                .copied()
+                .unwrap_or(0) as u32;
+            let log2_cb = sps.log2_ctb_size.saturating_sub(depth);
+            if log2_cb < sps.log2_min_cb_size {
+                continue;
+            }
+            let size = 1i32 << log2_cb;
+            let x0 = x & !(size - 1);
+            let y0 = y & !(size - 1);
+            if seen.contains(&(x0, y0, log2_cb)) {
+                continue;
+            }
+            seen.push((x0, y0, log2_cb));
+            boundary_strengths(pic, sps, x0, y0, log2_cb, true);
+        }
+    }
 }
 
 /// Deblock one CTB (FFmpeg's `deblocking_filter_CTB`).
