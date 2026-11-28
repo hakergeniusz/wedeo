@@ -72,6 +72,18 @@ pub enum PixelFormat {
     /// planar YUV 4:4:4, 36bpp, 12-bit per component, big-endian.
     /// Matches FFmpeg's `AV_PIX_FMT_YUV444P12BE`.
     Yuv444p12be = 130,
+    /// planar YUV 4:4:0, 20bpp, 10-bit per component, little-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV440P10LE`.
+    Yuv440p10le = 151,
+    /// planar YUV 4:4:0, 20bpp, 10-bit per component, big-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV440P10BE`.
+    Yuv440p10be = 150,
+    /// planar YUV 4:4:0, 24bpp, 12-bit per component, little-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV440P12LE`.
+    Yuv440p12le = 153,
+    /// planar YUV 4:4:0, 24bpp, 12-bit per component, big-endian.
+    /// Matches FFmpeg's `AV_PIX_FMT_YUV440P12BE`.
+    Yuv440p12be = 152,
 }
 
 impl PixelFormat {
@@ -119,6 +131,10 @@ impl PixelFormat {
             PixelFormat::Yuv422p12be => "yuv422p12be",
             PixelFormat::Yuv444p12le => "yuv444p12le",
             PixelFormat::Yuv444p12be => "yuv444p12be",
+            PixelFormat::Yuv440p10le => "yuv440p10le",
+            PixelFormat::Yuv440p10be => "yuv440p10be",
+            PixelFormat::Yuv440p12le => "yuv440p12le",
+            PixelFormat::Yuv440p12be => "yuv440p12be",
         }
     }
 }

@@ -118,17 +118,19 @@ impl YuvGeometry {
             // the FFmpeg-style format name below.
             _ => {
                 let name = format.name();
-                let (log2_chroma_w, log2_chroma_h) = if name.contains("p420") {
+                // FFmpeg-style names put the subsampling before `p`, e.g.
+                // `yuv420p10le` and `yuv440p12le`.
+                let (log2_chroma_w, log2_chroma_h) = if name.contains("420p") {
                     (1, 1)
-                } else if name.contains("p422") {
+                } else if name.contains("422p") {
                     (1, 0)
-                } else if name.contains("p440") {
+                } else if name.contains("440p") {
                     (0, 1)
-                } else if name.contains("p444") {
+                } else if name.contains("444p") {
                     (0, 0)
-                } else if name.contains("p410") {
+                } else if name.contains("410p") {
                     (2, 2)
-                } else if name.contains("p411") {
+                } else if name.contains("411p") {
                     (2, 0)
                 } else {
                     return None;

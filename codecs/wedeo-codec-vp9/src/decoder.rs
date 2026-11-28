@@ -122,10 +122,16 @@ impl Vp9Decoder {
         // output pixel format here (e.g. RGB), so those frames retain
         // their existing output count.
         let (bit_depth, subsampling_x, subsampling_y) = self.prev_color_config;
-        let prev_color = if output_pixel_format(bit_depth, subsampling_x, subsampling_y).is_some() {
-            self.prev_color_config
-        } else {
+        // Preserve the legacy 8-bit default for formats that have no output
+        // mapping here (e.g. 8-bit 4:4:0 / RGB). High-depth frames must keep
+        // their true configuration: falling back to 8-bit 4:2:0 would parse
+        // inter headers with the wrong profile and mix u8/u16 plane views.
+        let prev_color = if bit_depth == 8
+            && output_pixel_format(bit_depth, subsampling_x, subsampling_y).is_none()
+        {
             (8, true, true)
+        } else {
+            self.prev_color_config
         };
 
         // --- 1. Parse frame header ---
@@ -222,14 +228,9 @@ impl Vp9Decoder {
             return Ok(());
         }
 
-        // Only 8-bit 4:2:0 is fully supported for now.
-        if header.bit_depth != 8 {
-            warn!(
-                bit_depth = header.bit_depth,
-                "VP9 non-8-bit frame not yet supported"
-            );
-            return Ok(());
-        }
+        // 8, 10 and 12-bit frames all use the same reconstruction path: the
+        // sample container (`Plane::U8` / `Plane::U16`) follows the parsed bit
+        // depth, and the output format is selected by `output_pixel_format`.
 
         // On keyframe or error_resilient: reset all probability context slots to
         // defaults. Matches FFmpeg vp9.c:883-893.
@@ -634,9 +635,11 @@ fn output_pixel_format(
         (8, false, false) => Some(PixelFormat::Yuv444p),
         (10, true, true) => Some(PixelFormat::Yuv420p10le),
         (10, true, false) => Some(PixelFormat::Yuv422p10le),
+        (10, false, true) => Some(PixelFormat::Yuv440p10le),
         (10, false, false) => Some(PixelFormat::Yuv444p10le),
         (12, true, true) => Some(PixelFormat::Yuv420p12le),
         (12, true, false) => Some(PixelFormat::Yuv422p12le),
+        (12, false, true) => Some(PixelFormat::Yuv440p12le),
         (12, false, false) => Some(PixelFormat::Yuv444p12le),
         _ => None,
     }
@@ -1124,6 +1127,14 @@ mod tests {
         assert_eq!(
             output_pixel_format(8, false, true),
             Some(PixelFormat::Yuv440p)
+        );
+        assert_eq!(
+            output_pixel_format(10, false, true),
+            Some(PixelFormat::Yuv440p10le)
+        );
+        assert_eq!(
+            output_pixel_format(12, false, true),
+            Some(PixelFormat::Yuv440p12le)
         );
         assert_eq!(output_pixel_format(14, true, true), None);
     }

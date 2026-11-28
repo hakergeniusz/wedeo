@@ -131,6 +131,13 @@ fn format_info(format: PixelFormat) -> FormatInfo {
         PixelFormat::Yuv444p12le | PixelFormat::Yuv444p12be => {
             FormatInfo::new(0, 0, [2, 2, 2, 0], false)
         }
+        // 10/12-bit 4:4:0 (VP9 profiles 2/3).
+        PixelFormat::Yuv440p10le | PixelFormat::Yuv440p10be => {
+            FormatInfo::new(0, 1, [2, 2, 2, 0], false)
+        }
+        PixelFormat::Yuv440p12le | PixelFormat::Yuv440p12be => {
+            FormatInfo::new(0, 1, [2, 2, 2, 0], false)
+        }
         PixelFormat::None => FormatInfo::new(0, 0, [0, 0, 0, 0], false),
     }
 }

@@ -1,9 +1,8 @@
-// VP9 intra reconstruction: prediction + inverse transform + add.
+// VP9 intra and inter reconstruction: prediction + inverse transform + add.
 //
 // Translated from FFmpeg's libavcodec/vp9recon.c (`intra_recon`,
-// `check_intra_mode`).  Only the 8-bit / Profile 0 (4:2:0) path is
-// implemented; higher bit-depths and other chroma formats are not supported
-// yet.
+// `check_intra_mode`, `inter_recon`). The 8-bit path keeps its original
+// arithmetic; 10/12-bit frames run the same generic kernels on `Plane::U16`.
 //
 // LGPL-2.1-or-later — same licence as FFmpeg.
 
@@ -16,8 +15,8 @@ use wedeo_core::error::Result;
 use crate::block::BlockInfo;
 use crate::data::{BWH_TAB, INTRA_TXFM_TYPE};
 use crate::header::FrameHeader;
-use crate::idct::{itxfm_add, itxfm_add_lossless};
-use crate::intra_pred::intra_pred;
+use crate::idct::{ItxfmSample, itxfm_add, itxfm_add_lossless};
+use crate::intra_pred::{Sample, intra_pred};
 use crate::mc;
 use crate::refs::RefFrame;
 use crate::types::{IntraMode, TxSize, TxType};
@@ -105,6 +104,51 @@ impl Plane {
         match self {
             Self::U8(_) => None,
             Self::U16(data) => Some(data),
+        }
+    }
+}
+
+/// Connect FFmpeg's `uint8_t` / `uint16_t` sample instantiations to the
+/// `Plane` variants so one reconstruction routine can serve both depths.
+///
+/// The 8-bit instantiation borrows `Plane::U8`; 10/12-bit borrows
+/// `Plane::U16`. A mismatch is a decoder bug, not a stream error.
+pub trait PlaneSample: Sample {
+    /// Borrow a plane as a typed sample slice.
+    fn plane_slice(plane: &Plane) -> Option<&[Self]>;
+
+    /// Mutably borrow a plane as a typed sample slice.
+    fn plane_slice_mut(plane: &mut Plane) -> Option<&mut [Self]>;
+}
+
+impl PlaneSample for u8 {
+    fn plane_slice(plane: &Plane) -> Option<&[u8]> {
+        match plane {
+            Plane::U8(data) => Some(data),
+            Plane::U16(_) => None,
+        }
+    }
+
+    fn plane_slice_mut(plane: &mut Plane) -> Option<&mut [u8]> {
+        match plane {
+            Plane::U8(data) => Some(data),
+            Plane::U16(_) => None,
+        }
+    }
+}
+
+impl PlaneSample for u16 {
+    fn plane_slice(plane: &Plane) -> Option<&[u16]> {
+        match plane {
+            Plane::U8(_) => None,
+            Plane::U16(data) => Some(data),
+        }
+    }
+
+    fn plane_slice_mut(plane: &mut Plane) -> Option<&mut [u16]> {
+        match plane {
+            Plane::U8(_) => None,
+            Plane::U16(data) => Some(data),
         }
     }
 }
@@ -420,8 +464,8 @@ static EDGE_NEEDS: [EdgeNeeds; 15] = [
 ///
 /// Returns the resolved mode.
 #[allow(clippy::too_many_arguments)]
-fn prepare_intra_edges(
-    plane_buf: &[u8],
+fn prepare_intra_edges<P: Sample>(
+    plane_buf: &[P],
     stride: usize,
     px: usize,
     py: usize,
@@ -429,11 +473,16 @@ fn prepare_intra_edges(
     frame_h: usize,
     tile_col_start_px: usize,
     tx_px: usize,
-    above_buf: &mut [u8], // length >= tx_px + 1; above_buf[1..] = above pixels; above_buf[0] = top-left
-    left_buf: &mut [u8],  // length >= tx_px
+    above_buf: &mut [P], // length >= tx_px + 1; above_buf[1..] = above pixels; above_buf[0] = top-left
+    left_buf: &mut [P],  // length >= tx_px
     mode: IntraMode,
     have_right: bool, // FFmpeg: x < w - 1 (within-block check)
+    bit_depth: u8,
 ) -> IntraMode {
+    // FFmpeg vp9recon.c:153,173,212 uses `(128 << (bpp - 8)) -/+ 1`.
+    let mid = 128i32 << (bit_depth - 8);
+    let low = P::from_i32(mid - 1);
+    let high = P::from_i32(mid + 1);
     let mode_idx = mode as usize;
     debug_assert!(
         mode_idx < 10,
@@ -497,16 +546,16 @@ fn prepare_intra_edges(
                     let pad = if n_px_have > 0 {
                         plane_buf[src_row * stride + px + n_px_have - 1]
                     } else {
-                        127
+                        low
                     };
                     for i in n_px_have..n_px_need {
                         above_buf[i + 1] = pad;
                     }
                 }
             } else {
-                // No top neighbor — fill with 127.
+                // No top neighbor — fill with `(128 << (bpp - 8)) - 1`.
                 for i in 0..n_px_need {
-                    above_buf[i + 1] = 127;
+                    above_buf[i + 1] = low;
                 }
             }
             if needs.needs_topright {
@@ -531,9 +580,9 @@ fn prepare_intra_edges(
             if have_left && have_top {
                 above_buf[0] = plane_buf[(py - 1) * stride + px - 1];
             } else if have_top {
-                above_buf[0] = 128u8.wrapping_add(1); // 129
+                above_buf[0] = high; // `(128 << (bpp - 8)) + 1`
             } else {
-                above_buf[0] = 128u8.wrapping_sub(1); // 127
+                above_buf[0] = low; // `(128 << (bpp - 8)) - 1`
             }
         }
     }
@@ -556,7 +605,7 @@ fn prepare_intra_edges(
                     let pad = if n_have_rows > 0 {
                         plane_buf[(py + n_have_rows - 1) * stride + px - 1]
                     } else {
-                        129
+                        high
                     };
                     left_buf[n_have_rows..tx_px].fill(pad);
                 }
@@ -573,14 +622,14 @@ fn prepare_intra_edges(
                     let pad = if n_have_rows > 0 {
                         plane_buf[(py + n_have_rows - 1) * stride + px - 1]
                     } else {
-                        129
+                        high
                     };
                     left_buf[0..(tx_px - n_have_rows)].fill(pad);
                 }
             }
         } else {
-            // No left neighbor — fill with 129.
-            left_buf[..tx_px].fill(129);
+            // No left neighbor — fill with `(128 << (bpp - 8)) + 1`.
+            left_buf[..tx_px].fill(high);
         }
     }
 
@@ -599,12 +648,16 @@ fn prepare_intra_edges(
 /// * `block`  — decoded block info from the entropy-coding phase.
 /// * `header` — frame header (for lossless flag, dimensions, tile info).
 /// * `tile_col_start` — first 4×4 column of the current tile.
-pub fn reconstruct_intra_block(
+fn reconstruct_intra_block_impl<P: ItxfmSample + PlaneSample>(
     fb: &mut FrameBuffer,
     block: &BlockInfo,
     header: &FrameHeader,
     tile_col_start: usize,
 ) -> Result<()> {
+    let y = P::plane_slice_mut(&mut fb.y).expect("luma plane sample type matches bit depth");
+    let u = P::plane_slice_mut(&mut fb.u).expect("U plane sample type matches bit depth");
+    let v = P::plane_slice_mut(&mut fb.v).expect("V plane sample type matches bit depth");
+
     let bit_depth = header.bit_depth;
     let bs = block.bs as usize;
 
@@ -638,8 +691,9 @@ pub fn reconstruct_intra_block(
         // Scratch buffers for neighbor pixels.  Above needs tx_px + 4 entries
         // (one for top-left at index 0, tx_px for above, and up to 4 for
         // top-right).  Left needs tx_px entries.
-        let mut above_scratch = vec![128u8; tx_px + 5];
-        let mut left_scratch = vec![129u8; tx_px];
+        let mid = P::from_i32(128i32 << (bit_depth - 8));
+        let mut above_scratch = vec![mid; tx_px + 5];
+        let mut left_scratch = vec![P::from_i32((128i32 << (bit_depth - 8)) + 1); tx_px];
 
         let mut coef_idx = 0usize;
         let coef_per_tx = tx_px * tx_px;
@@ -676,7 +730,7 @@ pub fn reconstruct_intra_block(
                 let have_right = tx + tx_step < w4;
 
                 let resolved = prepare_intra_edges(
-                    &fb.y,
+                    y,
                     fb.y_stride,
                     px,
                     py,
@@ -688,6 +742,7 @@ pub fn reconstruct_intra_block(
                     &mut left_scratch,
                     mode,
                     have_right,
+                    bit_depth,
                 );
 
                 // intra_pred writes to a sub-slice of the frame buffer.
@@ -697,7 +752,7 @@ pub fn reconstruct_intra_block(
                 let top_left = above_scratch[0];
 
                 intra_pred(
-                    &mut fb.y[dst_offset..],
+                    &mut y[dst_offset..],
                     fb.y_stride,
                     above_slice,
                     &left_scratch,
@@ -714,17 +769,12 @@ pub fn reconstruct_intra_block(
                     let eob = coefs.iter().rposition(|&c| c != 0).map_or(0, |p| p + 1);
                     if eob > 0 {
                         if header.lossless {
-                            itxfm_add_lossless(
-                                &mut fb.y[dst_offset..],
-                                fb.y_stride,
-                                coefs,
-                                bit_depth,
-                            );
+                            itxfm_add_lossless(&mut y[dst_offset..], fb.y_stride, coefs, bit_depth);
                         } else {
                             let tx_type_raw = INTRA_TXFM_TYPE[mode as usize];
                             let tx_type = TxType::try_from(tx_type_raw).unwrap_or(TxType::DctDct);
                             itxfm_add(
-                                &mut fb.y[dst_offset..],
+                                &mut y[dst_offset..],
                                 fb.y_stride,
                                 coefs,
                                 block.tx_size,
@@ -759,8 +809,9 @@ pub fn reconstruct_intra_block(
     let uv_frame_h = rows_8x8 * (8 >> ss_v);
     let uv_tile_col_px = (tile_col_start * 4) >> ss_h;
 
-    let mut uv_above_scratch = vec![128u8; uv_tx_px + 5];
-    let mut uv_left_scratch = vec![129u8; uv_tx_px];
+    let uv_mid = P::from_i32(128i32 << (bit_depth - 8));
+    let mut uv_above_scratch = vec![uv_mid; uv_tx_px + 5];
+    let mut uv_left_scratch = vec![P::from_i32((128i32 << (bit_depth - 8)) + 1); uv_tx_px];
     let uv_stride = fb.uv_stride;
     let uv_mode = block.uv_mode;
     let coef_per_uv_tx = uv_tx_px * uv_tx_px;
@@ -785,7 +836,7 @@ pub fn reconstruct_intra_block(
                 // last available neighbor pixel (prepare_intra_edges does this
                 // via n_px_have). Only guard against writing outside the
                 // allocated buffer; never skip a valid edge block.
-                if dst_end > fb.u.len() || dst_end > fb.v.len() {
+                if dst_end > u.len() || dst_end > v.len() {
                     coef_idx += coef_per_uv_tx;
                     continue;
                 }
@@ -793,7 +844,7 @@ pub fn reconstruct_intra_block(
                 let uv_have_right = tx + uv_tx_step < uv_w4;
 
                 let resolved = prepare_intra_edges(
-                    &fb.u,
+                    u,
                     uv_stride,
                     px,
                     py,
@@ -805,6 +856,7 @@ pub fn reconstruct_intra_block(
                     &mut uv_left_scratch,
                     uv_mode,
                     uv_have_right,
+                    bit_depth,
                 );
 
                 let dst_offset = py * uv_stride + px;
@@ -812,7 +864,7 @@ pub fn reconstruct_intra_block(
                 let top_left = uv_above_scratch[0];
 
                 intra_pred(
-                    &mut fb.u[dst_offset..],
+                    &mut u[dst_offset..],
                     uv_stride,
                     above_slice,
                     &uv_left_scratch,
@@ -827,15 +879,10 @@ pub fn reconstruct_intra_block(
                     let eob = coefs.iter().rposition(|&c| c != 0).map_or(0, |p| p + 1);
                     if eob > 0 {
                         if header.lossless {
-                            itxfm_add_lossless(
-                                &mut fb.u[dst_offset..],
-                                uv_stride,
-                                coefs,
-                                bit_depth,
-                            );
+                            itxfm_add_lossless(&mut u[dst_offset..], uv_stride, coefs, bit_depth);
                         } else {
                             itxfm_add(
-                                &mut fb.u[dst_offset..],
+                                &mut u[dst_offset..],
                                 uv_stride,
                                 coefs,
                                 block.uv_tx_size,
@@ -868,7 +915,7 @@ pub fn reconstruct_intra_block(
                     .saturating_add(uv_tx_px);
                 // See the U-plane loop: edge blocks are predicted with
                 // replicated pixels instead of skipped.
-                if dst_end > fb.u.len() || dst_end > fb.v.len() {
+                if dst_end > u.len() || dst_end > v.len() {
                     coef_idx += coef_per_uv_tx;
                     continue;
                 }
@@ -876,7 +923,7 @@ pub fn reconstruct_intra_block(
                 let uv_have_right = tx + uv_tx_step < uv_w4;
 
                 let resolved = prepare_intra_edges(
-                    &fb.v,
+                    v,
                     uv_stride,
                     px,
                     py,
@@ -888,6 +935,7 @@ pub fn reconstruct_intra_block(
                     &mut uv_left_scratch,
                     uv_mode,
                     uv_have_right,
+                    bit_depth,
                 );
 
                 let dst_offset = py * uv_stride + px;
@@ -895,7 +943,7 @@ pub fn reconstruct_intra_block(
                 let top_left = uv_above_scratch[0];
 
                 intra_pred(
-                    &mut fb.v[dst_offset..],
+                    &mut v[dst_offset..],
                     uv_stride,
                     above_slice,
                     &uv_left_scratch,
@@ -910,16 +958,11 @@ pub fn reconstruct_intra_block(
                     let eob = coefs.iter().rposition(|&c| c != 0).map_or(0, |p| p + 1);
                     if eob > 0 {
                         if header.lossless {
-                            itxfm_add_lossless(
-                                &mut fb.v[dst_offset..],
-                                uv_stride,
-                                coefs,
-                                bit_depth,
-                            );
+                            itxfm_add_lossless(&mut v[dst_offset..], uv_stride, coefs, bit_depth);
                         } else {
                             // UV always uses DCT_DCT (vp9recon.c line 280).
                             itxfm_add(
-                                &mut fb.v[dst_offset..],
+                                &mut v[dst_offset..],
                                 uv_stride,
                                 coefs,
                                 block.uv_tx_size,
@@ -939,6 +982,24 @@ pub fn reconstruct_intra_block(
     Ok(())
 }
 
+/// Dispatch intra reconstruction to the sample container used by the frame.
+///
+/// FFmpeg instantiates `intra_recon` twice, once with `uint8_t` planes and
+/// once with `uint16_t` planes. The generic body below is the same in both
+/// cases; only the plane borrow changes.
+pub fn reconstruct_intra_block(
+    fb: &mut FrameBuffer,
+    block: &BlockInfo,
+    header: &FrameHeader,
+    tile_col_start: usize,
+) -> Result<()> {
+    if fb.bit_depth == 8 {
+        reconstruct_intra_block_impl::<u8>(fb, block, header, tile_col_start)
+    } else {
+        reconstruct_intra_block_impl::<u16>(fb, block, header, tile_col_start)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Inter block reconstruction
 // ---------------------------------------------------------------------------
@@ -947,7 +1008,7 @@ pub fn reconstruct_intra_block(
 ///
 /// Translated from `inter_recon` in vp9recon.c. Inter blocks always use
 /// `TxType::DctDct` for the inverse transform (no ADST for inter).
-pub fn reconstruct_inter_block(
+fn reconstruct_inter_block_impl<P: ItxfmSample + PlaneSample + mc::McSample>(
     fb: &mut FrameBuffer,
     block: &BlockInfo,
     header: &FrameHeader,
@@ -955,15 +1016,30 @@ pub fn reconstruct_inter_block(
 ) -> Result<()> {
     let bit_depth = header.bit_depth;
 
-    // 1. Motion compensation: write prediction into fb.
-    mc::inter_pred(
-        fb,
-        block,
-        ref_slots,
-        &header.ref_idx,
-        header.subsampling_x,
-        header.subsampling_y,
-    );
+    // 1. Motion compensation: write prediction into fb. The three mutable
+    // plane borrows end at this call so the residual pass can re-borrow them.
+    {
+        let y = P::plane_slice_mut(&mut fb.y).expect("luma plane sample type matches bit depth");
+        let u = P::plane_slice_mut(&mut fb.u).expect("U plane sample type matches bit depth");
+        let v = P::plane_slice_mut(&mut fb.v).expect("V plane sample type matches bit depth");
+        mc::inter_pred(
+            y,
+            u,
+            v,
+            fb.y_stride,
+            fb.uv_stride,
+            block,
+            ref_slots,
+            &header.ref_idx,
+            header.subsampling_x,
+            header.subsampling_y,
+            bit_depth,
+        );
+    }
+
+    let y = P::plane_slice_mut(&mut fb.y).expect("luma plane sample type matches bit depth");
+    let u = P::plane_slice_mut(&mut fb.u).expect("U plane sample type matches bit depth");
+    let v = P::plane_slice_mut(&mut fb.v).expect("V plane sample type matches bit depth");
 
     // 2. If skip, no residual to add.
     if block.skip {
@@ -996,10 +1072,10 @@ pub fn reconstruct_inter_block(
                 if eob > 0 {
                     let dst_offset = py * fb.y_stride + px;
                     if header.lossless {
-                        itxfm_add_lossless(&mut fb.y[dst_offset..], fb.y_stride, coefs, bit_depth);
+                        itxfm_add_lossless(&mut y[dst_offset..], fb.y_stride, coefs, bit_depth);
                     } else {
                         itxfm_add(
-                            &mut fb.y[dst_offset..],
+                            &mut y[dst_offset..],
                             fb.y_stride,
                             coefs,
                             block.tx_size,
@@ -1043,10 +1119,10 @@ pub fn reconstruct_inter_block(
                 if eob > 0 {
                     let dst_offset = py * uv_stride + px;
                     if header.lossless {
-                        itxfm_add_lossless(&mut fb.u[dst_offset..], uv_stride, coefs, bit_depth);
+                        itxfm_add_lossless(&mut u[dst_offset..], uv_stride, coefs, bit_depth);
                     } else {
                         itxfm_add(
-                            &mut fb.u[dst_offset..],
+                            &mut u[dst_offset..],
                             uv_stride,
                             coefs,
                             block.uv_tx_size,
@@ -1075,10 +1151,10 @@ pub fn reconstruct_inter_block(
                 if eob > 0 {
                     let dst_offset = py * uv_stride + px;
                     if header.lossless {
-                        itxfm_add_lossless(&mut fb.v[dst_offset..], uv_stride, coefs, bit_depth);
+                        itxfm_add_lossless(&mut v[dst_offset..], uv_stride, coefs, bit_depth);
                     } else {
                         itxfm_add(
-                            &mut fb.v[dst_offset..],
+                            &mut v[dst_offset..],
                             uv_stride,
                             coefs,
                             block.uv_tx_size,
@@ -1095,6 +1171,20 @@ pub fn reconstruct_inter_block(
     }
 
     Ok(())
+}
+
+/// Dispatch inter reconstruction to the frame's sample container.
+pub fn reconstruct_inter_block(
+    fb: &mut FrameBuffer,
+    block: &BlockInfo,
+    header: &FrameHeader,
+    ref_slots: &[Option<Arc<RefFrame>>; 8],
+) -> Result<()> {
+    if fb.bit_depth == 8 {
+        reconstruct_inter_block_impl::<u8>(fb, block, header, ref_slots)
+    } else {
+        reconstruct_inter_block_impl::<u16>(fb, block, header, ref_slots)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,5 +1254,62 @@ mod tests {
         assert_eq!(copy.bit_depth, 12);
         assert_eq!(copy.y_byte_stride(), fb.y_byte_stride());
         assert_eq!(copy.y.len_bytes(), fb.y.len_bytes());
+    }
+
+    #[test]
+    fn plane_sample_dispatch_selects_the_matching_variant() {
+        let mut fb = FrameBuffer::new(8, 8, 10, true, true);
+        assert!(u8::plane_slice(&fb.y).is_none());
+        assert_eq!(u16::plane_slice(&fb.y).unwrap().len(), 64 * 64);
+        u16::plane_slice_mut(&mut fb.y).unwrap()[0] = 777;
+        assert_eq!(u16::plane_slice(&fb.y).unwrap()[0], 777);
+
+        let mut fb8 = FrameBuffer::new(8, 8, 8, true, true);
+        u8::plane_slice_mut(&mut fb8.y).unwrap()[0] = 77;
+        assert_eq!(u8::plane_slice(&fb8.y).unwrap()[0], 77);
+        assert!(u16::plane_slice(&fb8.y).is_none());
+    }
+
+    #[test]
+    fn intra_edge_defaults_scale_with_bit_depth() {
+        // DIAG_DOWN_RIGHT keeps all three edge requirements at the top-left
+        // corner, so the three FFmpeg defaults are observable.
+        let mut above8 = vec![0u8; 9];
+        let mut left8 = vec![0u8; 8];
+        prepare_intra_edges(
+            &[0u8; 64],
+            8,
+            0,
+            0,
+            8,
+            8,
+            0,
+            8,
+            &mut above8,
+            &mut left8,
+            IntraMode::DiagDownRightPred,
+            true,
+            8,
+        );
+        assert_eq!((above8[0], above8[1], left8[0]), (127, 127, 129));
+
+        let mut above12 = vec![0u16; 9];
+        let mut left12 = vec![0u16; 8];
+        prepare_intra_edges(
+            &[0u16; 64],
+            8,
+            0,
+            0,
+            8,
+            8,
+            0,
+            8,
+            &mut above12,
+            &mut left12,
+            IntraMode::DiagDownRightPred,
+            true,
+            12,
+        );
+        assert_eq!((above12[0], above12[1], left12[0]), (2047, 2047, 2049));
     }
 }

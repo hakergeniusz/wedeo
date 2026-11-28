@@ -10,8 +10,9 @@
 // `pixel = uint16_t` instantiation of the same FFmpeg template.
 //
 // Only unscaled prediction is implemented. Scaled prediction (when ref
-// dimensions differ from the current frame) is not implemented. The decoder's
-// high-depth early return stays until stage 4 (loop filter) is complete.
+// dimensions differ from the current frame) is not implemented. The generic
+// `inter_pred` entry point now dispatches on the frame's sample container, so
+// both 8-bit and high-depth frames use the same prediction structure.
 //
 // LGPL-2.1-or-later - same licence as FFmpeg.
 
@@ -20,7 +21,7 @@ use std::sync::Arc;
 use crate::block::BlockInfo;
 use crate::data::{BWH_TAB, VP9_SUBPEL_FILTERS};
 use crate::intra_pred::Sample;
-use crate::recon::FrameBuffer;
+use crate::recon::PlaneSample;
 use crate::refs::RefFrame;
 use crate::types::BlockSize;
 
@@ -320,7 +321,7 @@ fn avg_scalar<P: Sample>(
 /// `src` must have at least `w + 7` accessible columns (3 before, 4 after).
 /// The filter operates on `src[x - 3 .. x + 4]` for each output pixel.
 #[allow(clippy::too_many_arguments)] // FFmpeg DSP ABI: dst/src, strides, w/h, taps, depth.
-fn filter_h_8tap<P: McSample>(
+fn filter_h_8tap<P: McSample + PlaneSample>(
     dst: &mut [P],
     dst_stride: usize,
     src: &[P],
@@ -337,7 +338,7 @@ fn filter_h_8tap<P: McSample>(
 ///
 /// `src` must have at least `h + 7` accessible rows (3 before, 4 after).
 #[allow(clippy::too_many_arguments)] // FFmpeg DSP ABI: dst/src, strides, w/h, taps, depth.
-fn filter_v_8tap<P: McSample>(
+fn filter_v_8tap<P: McSample + PlaneSample>(
     dst: &mut [P],
     dst_stride: usize,
     src: &[P],
@@ -356,7 +357,7 @@ fn filter_v_8tap<P: McSample>(
 /// `src` must have `(h + 7)` rows and `(w + 7)` cols of accessible data
 /// (3 pixels of margin on each side).
 #[allow(clippy::too_many_arguments)] // FFmpeg DSP ABI plus two tap arrays and a depth.
-fn filter_hv_8tap<P: McSample>(
+fn filter_hv_8tap<P: McSample + PlaneSample>(
     dst: &mut [P],
     dst_stride: usize,
     src: &[P],
@@ -389,7 +390,7 @@ fn copy_block<P: Sample>(
 
 /// Average dst with src: `dst[i] = (dst[i] + src[i] + 1) >> 1`.
 /// The 8-bit path is SIMD-dispatched; 16-bit uses the scalar i32 kernel.
-fn avg_block<P: McSample>(
+fn avg_block<P: McSample + PlaneSample>(
     dst: &mut [P],
     dst_stride: usize,
     src: &[P],
@@ -444,7 +445,7 @@ fn emu_edge<P: Sample>(
 /// * `filter_idx` - 0=Smooth, 1=Regular, 2=Sharp.
 /// * `bit_depth` - frame bit depth; only used by the 16-bit sample path.
 #[allow(clippy::too_many_arguments)] // FFmpeg mc_luma_unscaled ABI plus sample depth.
-pub fn mc_luma<P: McSample>(
+pub fn mc_luma<P: McSample + PlaneSample>(
     dst: &mut [P],
     dst_stride: usize,
     ref_plane: &[P],
@@ -511,7 +512,7 @@ pub fn mc_luma<P: McSample>(
 /// Translated from `mc_chroma_unscaled` in vp9recon.c.
 /// Chroma MV uses 4-bit subpel: `mx = mv.x * (1 << !ss_h) & 15`.
 #[allow(clippy::too_many_arguments)] // FFmpeg mc_chroma_unscaled ABI plus sample depth.
-pub fn mc_chroma<P: McSample>(
+pub fn mc_chroma<P: McSample + PlaneSample>(
     dst_u: &mut [P],
     dst_v: &mut [P],
     dst_stride: usize,
@@ -609,7 +610,7 @@ pub fn mc_chroma<P: McSample>(
 /// The `luma` flag distinguishes luma (3-bit, shift left) from chroma (4-bit,
 /// use directly). This avoids the ambiguity of guessing from the value.
 #[allow(clippy::too_many_arguments)] // FFmpeg mc dispatch ABI plus sample depth.
-fn mc_apply<P: McSample>(
+fn mc_apply<P: McSample + PlaneSample>(
     dst: &mut [P],
     dst_stride: usize,
     src: &[P],
@@ -681,15 +682,19 @@ fn rounded_div_mv_x4(a: [i16; 2], b: [i16; 2], c: [i16; 2], d: [i16; 2]) -> [i16
 /// For compound prediction: predicts ref0 into `fb`, predicts ref1 into a temp
 /// buffer, then averages.
 #[allow(clippy::too_many_arguments)]
-pub fn inter_pred(
-    fb: &mut FrameBuffer,
+pub fn inter_pred<P: McSample + PlaneSample>(
+    y: &mut [P],
+    u: &mut [P],
+    v: &mut [P],
+    y_stride: usize,
+    uv_stride: usize,
     block: &BlockInfo,
     ref_slots: &[Option<Arc<RefFrame>>; 8],
     ref_idx: &[u8; 3],
     ss_h: bool,
     ss_v: bool,
+    bit_depth: u8,
 ) {
-    let bit_depth = fb.bit_depth;
     let bs = block.bs as usize;
     let bw4 = BWH_TAB[0][bs][0] as usize;
     let bh4 = BWH_TAB[0][bs][1] as usize;
@@ -707,20 +712,32 @@ pub fn inter_pred(
 
     let filter = block.filter;
 
-    // Allocate an edge-emulation buffer (160-byte stride, enough for 64+7 rows).
-    let mut emu_buf = vec![0u8; 160 * 80];
+    // Allocate an edge-emulation buffer with the frame's sample width
+    // (160-sample stride, enough for 64+7 rows). A `u8` buffer would
+    // truncate high-depth references before the 8-tap filters run.
+    let mut emu_buf = vec![P::from_i32(0); 160 * 80];
 
     // --- Luma MC for ref[0] ---
     if bs > BlockSize::Bs8x8 as usize {
         // Sub-8x8: per-sub-block MC.
-        sub8x8_luma_mc(fb, block, ref0, col_px, row_px, filter, &mut emu_buf);
+        sub8x8_luma_mc(
+            y,
+            y_stride,
+            block,
+            ref0,
+            col_px,
+            row_px,
+            filter,
+            bit_depth,
+            &mut emu_buf,
+        );
     } else {
         // Normal block: single MV.
-        let dst_off = row_px * fb.y_stride + col_px;
+        let dst_off = row_px * y_stride + col_px;
         mc_luma(
-            &mut fb.y[dst_off..],
-            fb.y_stride,
-            &ref0.fb.y,
+            &mut y[dst_off..],
+            y_stride,
+            P::plane_slice(&ref0.fb.y).expect("reference luma plane sample type"),
             ref0.fb.y_stride,
             ref0.width as usize,
             ref0.height as usize,
@@ -751,7 +768,9 @@ pub fn inter_pred(
 
     if bs > BlockSize::Bs8x8 as usize {
         sub8x8_chroma_mc(
-            fb,
+            u,
+            v,
+            uv_stride,
             block,
             ref0,
             uv_col,
@@ -763,17 +782,18 @@ pub fn inter_pred(
             filter,
             ss_h,
             ss_v,
+            bit_depth,
             &mut emu_buf,
         );
     } else {
-        let u_off = uv_row * fb.uv_stride + uv_col;
+        let u_off = uv_row * uv_stride + uv_col;
         let v_off = u_off;
         mc_chroma(
-            &mut fb.u[u_off..],
-            &mut fb.v[v_off..],
-            fb.uv_stride,
-            &ref0.fb.u,
-            &ref0.fb.v,
+            &mut u[u_off..],
+            &mut v[v_off..],
+            uv_stride,
+            P::plane_slice(&ref0.fb.u).expect("reference U plane sample type"),
+            P::plane_slice(&ref0.fb.v).expect("reference V plane sample type"),
             ref0.fb.uv_stride,
             ref_uv_w,
             ref_uv_h,
@@ -823,15 +843,15 @@ pub fn inter_pred(
         } else {
             (uv_bw, uv_bh)
         };
-        let mut tmp_y = vec![0u8; fb.y_stride * avg_bh];
-        let mut tmp_u = vec![0u8; fb.uv_stride * avg_uv_bh];
-        let mut tmp_v = vec![0u8; fb.uv_stride * avg_uv_bh];
+        let mut tmp_y = vec![P::from_i32(0); y_stride * avg_bh];
+        let mut tmp_u = vec![P::from_i32(0); uv_stride * avg_uv_bh];
+        let mut tmp_v = vec![P::from_i32(0); uv_stride * avg_uv_bh];
 
         // Luma ref1 — per-sub-block for sub-8x8, single MC for >=8x8.
         if bs > BlockSize::Bs8x8 as usize {
             sub8x8_luma_mc_buf(
                 &mut tmp_y,
-                fb.y_stride,
+                y_stride,
                 block,
                 ref1,
                 col_px,
@@ -843,8 +863,8 @@ pub fn inter_pred(
         } else {
             mc_luma(
                 &mut tmp_y,
-                fb.y_stride,
-                &ref1.fb.y,
+                y_stride,
+                P::plane_slice(&ref1.fb.y).expect("reference luma plane sample type"),
                 ref1.fb.y_stride,
                 ref1.width as usize,
                 ref1.height as usize,
@@ -859,12 +879,12 @@ pub fn inter_pred(
             );
         }
         // Average luma.
-        let dst_off = row_px * fb.y_stride + col_px;
+        let dst_off = row_px * y_stride + col_px;
         avg_block(
-            &mut fb.y[dst_off..],
-            fb.y_stride,
+            &mut y[dst_off..],
+            y_stride,
             &tmp_y,
-            fb.y_stride,
+            y_stride,
             avg_bw,
             avg_bh,
         );
@@ -876,7 +896,7 @@ pub fn inter_pred(
             sub8x8_chroma_mc_buf(
                 &mut tmp_u,
                 &mut tmp_v,
-                fb.uv_stride,
+                uv_stride,
                 block,
                 ref1,
                 uv_col,
@@ -895,9 +915,9 @@ pub fn inter_pred(
             mc_chroma(
                 &mut tmp_u,
                 &mut tmp_v,
-                fb.uv_stride,
-                &ref1.fb.u,
-                &ref1.fb.v,
+                uv_stride,
+                P::plane_slice(&ref1.fb.u).expect("reference U plane sample type"),
+                P::plane_slice(&ref1.fb.v).expect("reference V plane sample type"),
                 ref1.fb.uv_stride,
                 ref1_uv_w,
                 ref1_uv_h,
@@ -913,20 +933,20 @@ pub fn inter_pred(
                 &mut emu_buf,
             );
         }
-        let u_off = uv_row * fb.uv_stride + uv_col;
+        let u_off = uv_row * uv_stride + uv_col;
         avg_block(
-            &mut fb.u[u_off..],
-            fb.uv_stride,
+            &mut u[u_off..],
+            uv_stride,
             &tmp_u,
-            fb.uv_stride,
+            uv_stride,
             avg_uv_bw,
             avg_uv_bh,
         );
         avg_block(
-            &mut fb.v[u_off..],
-            fb.uv_stride,
+            &mut v[u_off..],
+            uv_stride,
             &tmp_v,
-            fb.uv_stride,
+            uv_stride,
             avg_uv_bw,
             avg_uv_bh,
         );
@@ -941,18 +961,19 @@ pub fn inter_pred(
 ///
 /// `ri` selects which reference MV to use: 0 or 1.
 #[allow(clippy::too_many_arguments)]
-fn sub8x8_luma_mc_buf(
-    dst: &mut [u8],
+fn sub8x8_luma_mc_buf<P: McSample + PlaneSample>(
+    dst: &mut [P],
     dst_stride: usize,
     block: &BlockInfo,
     ref_frame: &RefFrame,
     col_px: usize,
     row_px: usize,
     filter: u8,
-    emu_buf: &mut [u8],
+    emu_buf: &mut [P],
     ri: usize,
 ) {
     let bit_depth = ref_frame.fb.bit_depth;
+    let ref_y = P::plane_slice(&ref_frame.fb.y).expect("reference luma plane sample type");
     let bs = block.bs;
     let ref_w = ref_frame.width as usize;
     let ref_h = ref_frame.height as usize;
@@ -965,7 +986,7 @@ fn sub8x8_luma_mc_buf(
                 mc_luma(
                     &mut dst[dst_off..],
                     dst_stride,
-                    &ref_frame.fb.y,
+                    ref_y,
                     ref_frame.fb.y_stride,
                     ref_w,
                     ref_h,
@@ -987,7 +1008,7 @@ fn sub8x8_luma_mc_buf(
                 mc_luma(
                     &mut dst[dst_off..],
                     dst_stride,
-                    &ref_frame.fb.y,
+                    ref_y,
                     ref_frame.fb.y_stride,
                     ref_w,
                     ref_h,
@@ -1010,7 +1031,7 @@ fn sub8x8_luma_mc_buf(
                 mc_luma(
                     &mut dst[dst_off..],
                     dst_stride,
-                    &ref_frame.fb.y,
+                    ref_y,
                     ref_frame.fb.y_stride,
                     ref_w,
                     ref_h,
@@ -1037,9 +1058,9 @@ fn sub8x8_luma_mc_buf(
 /// `ss_h == ss_v == 0`). A single averaged MV would leave most of the
 /// chroma block unwritten.
 #[allow(clippy::too_many_arguments)]
-fn sub8x8_chroma_mc_444(
-    dst_u: &mut [u8],
-    dst_v: &mut [u8],
+fn sub8x8_chroma_mc_444<P: McSample + PlaneSample>(
+    dst_u: &mut [P],
+    dst_v: &mut [P],
     dst_stride: usize,
     block: &BlockInfo,
     ref_frame: &RefFrame,
@@ -1048,12 +1069,12 @@ fn sub8x8_chroma_mc_444(
     ref_uv_w: usize,
     ref_uv_h: usize,
     filter: u8,
-    emu_buf: &mut [u8],
+    emu_buf: &mut [P],
     ri: usize,
 ) {
     let bit_depth = ref_frame.fb.bit_depth;
-    let ref_u = &ref_frame.fb.u;
-    let ref_v = &ref_frame.fb.v;
+    let ref_u = P::plane_slice(&ref_frame.fb.u).expect("reference U plane sample type");
+    let ref_v = P::plane_slice(&ref_frame.fb.v).expect("reference V plane sample type");
     let ref_stride = ref_frame.fb.uv_stride;
     match block.bs {
         BlockSize::Bs8x4 => {
@@ -1147,9 +1168,9 @@ fn sub8x8_chroma_mc_444(
 /// whole 8x8 luma block. Vertical pairs of luma MVs are averaged, while the
 /// left and right 4x4 chroma halves keep their own MVs for 4x8/4x4 blocks.
 #[allow(clippy::too_many_arguments)]
-fn sub8x8_chroma_mc_440(
-    dst_u: &mut [u8],
-    dst_v: &mut [u8],
+fn sub8x8_chroma_mc_440<P: McSample + PlaneSample>(
+    dst_u: &mut [P],
+    dst_v: &mut [P],
     dst_stride: usize,
     block: &BlockInfo,
     ref_frame: &RefFrame,
@@ -1158,12 +1179,12 @@ fn sub8x8_chroma_mc_440(
     ref_uv_w: usize,
     ref_uv_h: usize,
     filter: u8,
-    emu_buf: &mut [u8],
+    emu_buf: &mut [P],
     ri: usize,
 ) {
     let bit_depth = ref_frame.fb.bit_depth;
-    let ref_u = &ref_frame.fb.u;
-    let ref_v = &ref_frame.fb.v;
+    let ref_u = P::plane_slice(&ref_frame.fb.u).expect("reference U plane sample type");
+    let ref_v = P::plane_slice(&ref_frame.fb.v).expect("reference V plane sample type");
     let ref_stride = ref_frame.fb.uv_stride;
     match block.bs {
         BlockSize::Bs8x4 => {
@@ -1232,9 +1253,9 @@ fn sub8x8_chroma_mc_440(
 ///
 /// `ri` selects which reference MV to use: 0 or 1.
 #[allow(clippy::too_many_arguments)]
-fn sub8x8_chroma_mc_buf(
-    dst_u: &mut [u8],
-    dst_v: &mut [u8],
+fn sub8x8_chroma_mc_buf<P: McSample + PlaneSample>(
+    dst_u: &mut [P],
+    dst_v: &mut [P],
     dst_stride: usize,
     block: &BlockInfo,
     ref_frame: &RefFrame,
@@ -1247,10 +1268,12 @@ fn sub8x8_chroma_mc_buf(
     filter: u8,
     ss_h: bool,
     ss_v: bool,
-    emu_buf: &mut [u8],
+    emu_buf: &mut [P],
     ri: usize,
 ) {
     let bit_depth = ref_frame.fb.bit_depth;
+    let ref_u = P::plane_slice(&ref_frame.fb.u).expect("reference U plane sample type");
+    let ref_v = P::plane_slice(&ref_frame.fb.v).expect("reference V plane sample type");
     if !ss_h && !ss_v {
         sub8x8_chroma_mc_444(
             dst_u, dst_v, dst_stride, block, ref_frame, uv_col, uv_row, ref_uv_w, ref_uv_h, filter,
@@ -1281,8 +1304,8 @@ fn sub8x8_chroma_mc_buf(
         dst_u,
         dst_v,
         dst_stride,
-        &ref_frame.fb.u,
-        &ref_frame.fb.v,
+        ref_u,
+        ref_v,
         ref_frame.fb.uv_stride,
         ref_uv_w,
         ref_uv_h,
@@ -1300,16 +1323,19 @@ fn sub8x8_chroma_mc_buf(
 }
 
 /// MC luma for sub-8x8 blocks (per-sub-block MVs).
-fn sub8x8_luma_mc(
-    fb: &mut FrameBuffer,
+#[allow(clippy::too_many_arguments)] // FFmpeg mc_luma ABI plus the sample-plane slices.
+fn sub8x8_luma_mc<P: McSample + PlaneSample>(
+    y: &mut [P],
+    y_stride: usize,
     block: &BlockInfo,
     ref_frame: &RefFrame,
     col_px: usize,
     row_px: usize,
     filter: u8,
-    emu_buf: &mut [u8],
+    bit_depth: u8,
+    emu_buf: &mut [P],
 ) {
-    let bit_depth = fb.bit_depth;
+    let ref_y = P::plane_slice(&ref_frame.fb.y).expect("reference luma plane sample type");
     let bs = block.bs;
     let ref_w = ref_frame.width as usize;
     let ref_h = ref_frame.height as usize;
@@ -1319,11 +1345,11 @@ fn sub8x8_luma_mc(
             // Two 8x4 sub-blocks stacked vertically.
             for sub in 0..2 {
                 let sub_row = row_px + sub * 4;
-                let dst_off = sub_row * fb.y_stride + col_px;
+                let dst_off = sub_row * y_stride + col_px;
                 mc_luma(
-                    &mut fb.y[dst_off..],
-                    fb.y_stride,
-                    &ref_frame.fb.y,
+                    &mut y[dst_off..],
+                    y_stride,
+                    ref_y,
                     ref_frame.fb.y_stride,
                     ref_w,
                     ref_h,
@@ -1342,11 +1368,11 @@ fn sub8x8_luma_mc(
             // Two 4x8 sub-blocks side by side.
             for sub in 0..2 {
                 let sub_col = col_px + sub * 4;
-                let dst_off = row_px * fb.y_stride + sub_col;
+                let dst_off = row_px * y_stride + sub_col;
                 mc_luma(
-                    &mut fb.y[dst_off..],
-                    fb.y_stride,
-                    &ref_frame.fb.y,
+                    &mut y[dst_off..],
+                    y_stride,
+                    ref_y,
                     ref_frame.fb.y_stride,
                     ref_w,
                     ref_h,
@@ -1366,11 +1392,11 @@ fn sub8x8_luma_mc(
             for sub in 0..4 {
                 let sub_row = row_px + (sub >> 1) * 4;
                 let sub_col = col_px + (sub & 1) * 4;
-                let dst_off = sub_row * fb.y_stride + sub_col;
+                let dst_off = sub_row * y_stride + sub_col;
                 mc_luma(
-                    &mut fb.y[dst_off..],
-                    fb.y_stride,
-                    &ref_frame.fb.y,
+                    &mut y[dst_off..],
+                    y_stride,
+                    ref_y,
                     ref_frame.fb.y_stride,
                     ref_w,
                     ref_h,
@@ -1391,8 +1417,10 @@ fn sub8x8_luma_mc(
 
 /// MC chroma for sub-8x8 blocks (averaged MVs for 4:2:0).
 #[allow(clippy::too_many_arguments)]
-fn sub8x8_chroma_mc(
-    fb: &mut FrameBuffer,
+fn sub8x8_chroma_mc<P: McSample + PlaneSample>(
+    u: &mut [P],
+    v: &mut [P],
+    uv_stride: usize,
     block: &BlockInfo,
     ref_frame: &RefFrame,
     uv_col: usize,
@@ -1404,15 +1432,17 @@ fn sub8x8_chroma_mc(
     filter: u8,
     ss_h: bool,
     ss_v: bool,
-    emu_buf: &mut [u8],
+    bit_depth: u8,
+    emu_buf: &mut [P],
 ) {
-    let bit_depth = fb.bit_depth;
+    let ref_u = P::plane_slice(&ref_frame.fb.u).expect("reference U plane sample type");
+    let ref_v = P::plane_slice(&ref_frame.fb.v).expect("reference V plane sample type");
     if !ss_h && !ss_v {
-        let off = uv_row * fb.uv_stride + uv_col;
+        let off = uv_row * uv_stride + uv_col;
         sub8x8_chroma_mc_444(
-            &mut fb.u[off..],
-            &mut fb.v[off..],
-            fb.uv_stride,
+            &mut u[off..],
+            &mut v[off..],
+            uv_stride,
             block,
             ref_frame,
             uv_col,
@@ -1426,11 +1456,11 @@ fn sub8x8_chroma_mc(
         return;
     }
     if !ss_h && ss_v {
-        let off = uv_row * fb.uv_stride + uv_col;
+        let off = uv_row * uv_stride + uv_col;
         sub8x8_chroma_mc_440(
-            &mut fb.u[off..],
-            &mut fb.v[off..],
-            fb.uv_stride,
+            &mut u[off..],
+            &mut v[off..],
+            uv_stride,
             block,
             ref_frame,
             uv_col,
@@ -1470,13 +1500,13 @@ fn sub8x8_chroma_mc(
         }
     };
 
-    let u_off = uv_row * fb.uv_stride + uv_col;
+    let u_off = uv_row * uv_stride + uv_col;
     mc_chroma(
-        &mut fb.u[u_off..],
-        &mut fb.v[u_off..],
-        fb.uv_stride,
-        &ref_frame.fb.u,
-        &ref_frame.fb.v,
+        &mut u[u_off..],
+        &mut v[u_off..],
+        uv_stride,
+        ref_u,
+        ref_v,
         ref_frame.fb.uv_stride,
         ref_uv_w,
         ref_uv_h,
