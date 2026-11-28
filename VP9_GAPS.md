@@ -847,3 +847,25 @@ plus a full sweep and parity triage will not fit in that same 20 minutes,
 because the gate experiment previously needed ground-truth extraction when
 0/8 vectors matched. Budget: one round for the typing refactor, one round for
 compilation/unit tests, one round for gate removal and sweep triage.
+
+## yuv422 second-predictor edge samples (2026-11-28, no patch)
+
+FFmpeg gdb at `vp9_mc_template.c:423/436`, `col=4 row=0 bs=7 comp=1`:
+mv0=(11,-1), mv1=(-81,3), filter=1, ref0=0, ref1=2. ref0 U row0
+`[117,85,75,92,79,78,86,92]`; compound U row0
+`[109,84,76,98,86,79,85,95]`; derived second predictor
+`[100,82,76,103,92,79,83,97]`.
+
+Wedeo trace at the same block: identical mv0/mv1/filter/ref indices and
+identical ref0 U row0, but ref1 U row0 `[108,91,85,111,101,80,84,99]`,
+averaged U row0 `[113,88,80,102,90,79,85,96]`. The difference is in the
+second predictor's edge-emulation source pixels: FFmpeg emu row0 cols 0..14
+`[108,97,94,105,102,76,67,100,95,80,84,97,92,96,116]` vs Wedeo
+`[116,105,102,113,110,84,75,108,103,80,84,97,92,96,116]`. Only the first
+nine columns (chroma source x=7..15) differ; the rest match exactly.
+
+Conclusion: MV, filter, averaging rounding and first predictor are aligned.
+The cause is left-edge chroma samples of the reference frame (x=7..15), i.e.
+reference-frame content or left-edge loop filtering, outside the 8-bit
+compound-only scope. Frame 0 framecrc matches on both decoders (`0x37ac72e4`).
+No patch. Evidence: `/tmp/ai-agent/vp9422comp-*logs` (ephemeral).
