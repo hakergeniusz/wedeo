@@ -1953,8 +1953,27 @@ impl H264Decoder {
         let mut bot_left_modes = [-1i8; 4];
         let mut bot_left_avail = false;
         // MBAFF: save top-row context for the bottom MB (same as CABAC path).
+        // This holds the bottom MB of the previous pair, which is the spatial
+        // top neighbor of a field-mode bottom MB (FFmpeg: top_xy = mb_xy -
+        // (mb_stride << MB_FIELD)).
         let mut saved_top_modes_cavlc = [-1i8; 4];
         let mut saved_top_nz_luma_cavlc = [0u8; 4];
+        let mut saved_top_nz_cb_cavlc = [0u8; 2];
+        let mut saved_top_nz_cr_cavlc = [0u8; 2];
+        // Snapshot taken right after the top MB of a pair is decoded. A
+        // field-mode top MB in the next pair uses the top MB of the previous
+        // pair as its top neighbor when that MB was also field-mode; Wedeo's
+        // persistent top cache instead holds the previous pair's bottom MB.
+        let mut pair_top_modes = [-1i8; 4];
+        let mut pair_top_nz_luma = [0u8; 4];
+        let mut pair_top_nz_cb = [0u8; 2];
+        let mut pair_top_nz_cr = [0u8; 2];
+        let mut pair_top_field = false;
+        let mut prev_pair_top_modes = [-1i8; 4];
+        let mut prev_pair_top_nz_luma = [0u8; 4];
+        let mut prev_pair_top_nz_cb = [0u8; 2];
+        let mut prev_pair_top_nz_cr = [0u8; 2];
+        let mut prev_pair_top_field = false;
 
         'pair_loop: loop {
             if mb_y >= mb_height {
@@ -1971,6 +1990,14 @@ impl H264Decoder {
 
                 // MBAFF left-side neighbor: load the correct row's context.
                 if pair_pos == 0 {
+                    // Keep the top-MB snapshot from the previous pair: a
+                    // field-mode top MB in this pair may need it as its top
+                    // neighbor (FFmpeg h264_mvpred.h:527-530).
+                    prev_pair_top_modes = pair_top_modes;
+                    prev_pair_top_nz_luma = pair_top_nz_luma;
+                    prev_pair_top_nz_cb = pair_top_nz_cb;
+                    prev_pair_top_nz_cr = pair_top_nz_cr;
+                    prev_pair_top_field = pair_top_field;
                     fdc.neighbor_ctx.left_nz = top_left_nz;
                     fdc.neighbor_ctx.left_intra4x4_mode = top_left_modes;
                     fdc.neighbor_ctx.left_available = top_left_avail;
@@ -1979,11 +2006,29 @@ impl H264Decoder {
                     }
                     // MBAFF: save top-row context before top MB overwrites it.
                     let base = mb_x as usize * 4;
+                    let base_chroma = mb_x as usize * 2;
                     saved_top_modes_cavlc
                         .copy_from_slice(&fdc.neighbor_ctx.top_intra4x4_mode[base..base + 4]);
                     saved_top_nz_luma_cavlc
                         .copy_from_slice(&fdc.neighbor_ctx.top_nz_luma[base..base + 4]);
+                    saved_top_nz_cb_cavlc
+                        .copy_from_slice(&fdc.neighbor_ctx.top_nz_cb[base_chroma..base_chroma + 2]);
+                    saved_top_nz_cr_cavlc
+                        .copy_from_slice(&fdc.neighbor_ctx.top_nz_cr[base_chroma..base_chroma + 2]);
                 } else {
+                    // Snapshot the top MB of this pair right after it was
+                    // decoded (skip or coded); the next pair's field-mode
+                    // top MB may use it as the top neighbor.
+                    let base = mb_x as usize * 4;
+                    let base_chroma = mb_x as usize * 2;
+                    pair_top_modes
+                        .copy_from_slice(&fdc.neighbor_ctx.top_intra4x4_mode[base..base + 4]);
+                    pair_top_nz_luma.copy_from_slice(&fdc.neighbor_ctx.top_nz_luma[base..base + 4]);
+                    pair_top_nz_cb
+                        .copy_from_slice(&fdc.neighbor_ctx.top_nz_cb[base_chroma..base_chroma + 2]);
+                    pair_top_nz_cr
+                        .copy_from_slice(&fdc.neighbor_ctx.top_nz_cr[base_chroma..base_chroma + 2]);
+                    pair_top_field = mb_field_decoding_flag;
                     // Save top's right edge, load bottom's left.
                     top_left_nz = fdc.neighbor_ctx.left_nz;
                     top_left_modes = fdc.neighbor_ctx.left_intra4x4_mode;
@@ -1994,17 +2039,31 @@ impl H264Decoder {
                     if mb_x == 0 {
                         fdc.neighbor_ctx.new_row();
                     }
-                    // MBAFF field-mode: restore pre-top-MB top context.
+                    // MBAFF field-mode: restore pre-top-MB top context (the
+                    // bottom MB of the previous pair) for luma, chroma and
+                    // intra4x4 modes.
                     if mb_field_decoding_flag {
                         let base = mb_x as usize * 4;
+                        let base_chroma = mb_x as usize * 2;
                         fdc.neighbor_ctx.top_intra4x4_mode[base..base + 4]
                             .copy_from_slice(&saved_top_modes_cavlc);
                         fdc.neighbor_ctx.top_nz_luma[base..base + 4]
                             .copy_from_slice(&saved_top_nz_luma_cavlc);
+                        fdc.neighbor_ctx.top_nz_cb[base_chroma..base_chroma + 2]
+                            .copy_from_slice(&saved_top_nz_cb_cavlc);
+                        fdc.neighbor_ctx.top_nz_cr[base_chroma..base_chroma + 2]
+                            .copy_from_slice(&saved_top_nz_cr_cavlc);
                     }
                 }
                 fdc.neighbor_ctx.top_available = cur_y > 0
                     && fdc.slice_table[(mb_addr - mb_width) as usize] == fdc.current_slice;
+                // A field-mode MB two rows down addresses its top neighbor
+                // with a doubled stride (top_xy = mb_xy - 2*mb_stride). For
+                // the bottom MB of the first pair that neighbor is off-picture.
+                if mb_field_decoding_flag && cur_y & 1 != 0 {
+                    fdc.neighbor_ctx.top_available = cur_y >= 2
+                        && fdc.slice_table[(mb_addr - 2 * mb_width) as usize] == fdc.current_slice;
+                }
                 if mb_addr == first_mb_flat && mb_x == 0 {
                     fdc.neighbor_ctx.left_available = false;
                 }
@@ -2063,10 +2122,122 @@ impl H264Decoder {
                 // Set field mode for pixel reconstruction
                 fdc.mb_field = mb_field_decoding_flag;
 
-                fdc.neighbor_ctx.top_available = cur_y > 0
-                    && fdc.slice_table[(mb_addr - mb_width) as usize] == fdc.current_slice;
+                // FFmpeg's fill_decode_neighbors (h264_mvpred.h:487) picks one
+                // of four left_block_options remaps when the current MB and
+                // its left neighbor disagree on field/frame mode, and shifts
+                // top_xy for field-mode MBs. Wedeo's caches store frame-order
+                // rows, so parse with a field-view copy and copy only the
+                // current MB's frame-order update back afterwards.
+                let original_ctx = fdc.neighbor_ctx.clone();
+                let mut view = original_ctx.clone();
+                let mb_idx = mb_addr as usize;
+                let left_is_field = mb_x > 0 && fdc.mb_field_flag[mb_idx - 1];
+                let mismatch = mb_x > 0 && left_is_field != mb_field_decoding_flag;
+                let option = if !mismatch {
+                    0u8
+                } else if mb_field_decoding_flag {
+                    3u8 // current field, left frame: rows 0,2 / 0,2
+                } else if cur_y & 1 != 0 {
+                    1u8 // bottom pair, current frame, left field: rows 2,3
+                } else {
+                    2u8 // top pair, current frame, left field: rows 0,1
+                };
+                if option != 0 {
+                    let rows: [usize; 4] = match option {
+                        1 => [2, 3, 2, 3],
+                        2 => [0, 1, 0, 1],
+                        _ => [0, 2, 0, 2],
+                    };
+                    for (dst, &src) in rows.iter().enumerate() {
+                        // LTOP is the top of the left pair, LBOT the bottom.
+                        // At pair_pos==0 top_left_* holds the previous pair's
+                        // top; at pair_pos==1 it holds this pair's top.
+                        let (src_nz, src_mode, src_avail) = if option == 3 && dst >= 2 {
+                            (&bot_left_nz, &bot_left_modes, bot_left_avail)
+                        } else {
+                            (&top_left_nz, &top_left_modes, top_left_avail)
+                        };
+                        view.left_nz[dst] = if src_avail { src_nz[src] } else { 0 };
+                        view.left_intra4x4_mode[dst] = if src_avail { src_mode[src] } else { -1 };
+                    }
+                    // 4:2:0 chroma: options 1/2 reuse one row of the left MB;
+                    // option 3 reads row 0 from each field parent. 4:2:2 is
+                    // intentionally left untouched (separate work unit).
+                    if sps.chroma_format_idc == 1 {
+                        let cb = if option == 1 {
+                            top_left_nz[5]
+                        } else {
+                            top_left_nz[4]
+                        };
+                        let cr = if option == 1 {
+                            top_left_nz[7]
+                        } else {
+                            top_left_nz[6]
+                        };
+                        if option == 3 {
+                            view.left_nz[4] = if top_left_avail { cb } else { 0 };
+                            view.left_nz[5] = if bot_left_avail { bot_left_nz[4] } else { 0 };
+                            view.left_nz[6] = if top_left_avail { cr } else { 0 };
+                            view.left_nz[7] = if bot_left_avail { bot_left_nz[6] } else { 0 };
+                        } else {
+                            view.left_nz[4] = if top_left_avail { cb } else { 0 };
+                            view.left_nz[5] = view.left_nz[4];
+                            view.left_nz[6] = if top_left_avail { cr } else { 0 };
+                            view.left_nz[7] = view.left_nz[6];
+                        }
+                    }
+                    view.left_available = if option == 3 {
+                        top_left_avail && bot_left_avail
+                    } else {
+                        top_left_avail
+                    };
+                }
 
-                mb::decode_macroblock(fdc, br, hdr, sps, pps, mb_x, cur_y, ref_pics, ref_pics_l1)?;
+                // A field-mode top MB whose predecessor pair is field-coded
+                // takes its top neighbor from that pair's top MB, not from the
+                // bottom MB kept in the persistent cache.
+                if mb_field_decoding_flag && cur_y & 1 == 0 && prev_pair_top_field {
+                    let base = mb_x as usize * 4;
+                    let base_chroma = mb_x as usize * 2;
+                    view.top_intra4x4_mode[base..base + 4].copy_from_slice(&prev_pair_top_modes);
+                    view.top_nz_luma[base..base + 4].copy_from_slice(&prev_pair_top_nz_luma);
+                    view.top_nz_cb[base_chroma..base_chroma + 2]
+                        .copy_from_slice(&prev_pair_top_nz_cb);
+                    view.top_nz_cr[base_chroma..base_chroma + 2]
+                        .copy_from_slice(&prev_pair_top_nz_cr);
+                    view.top_available = cur_y >= 2
+                        && fdc.slice_table[(mb_addr - 2 * mb_width) as usize] == fdc.current_slice;
+                }
+
+                fdc.neighbor_ctx = view;
+                let decode_result = mb::decode_macroblock(
+                    fdc,
+                    br,
+                    hdr,
+                    sps,
+                    pps,
+                    mb_x,
+                    cur_y,
+                    ref_pics,
+                    ref_pics_l1,
+                );
+                let updated = std::mem::replace(&mut fdc.neighbor_ctx, original_ctx);
+                // write_back_non_zero_count/write_back_intra_pred_mode store
+                // the current MB in frame order regardless of field mode.
+                let base = mb_x as usize * 4;
+                let base_chroma = mb_x as usize * 2;
+                fdc.neighbor_ctx.left_nz = updated.left_nz;
+                fdc.neighbor_ctx.left_intra4x4_mode = updated.left_intra4x4_mode;
+                fdc.neighbor_ctx.left_available = updated.left_available;
+                fdc.neighbor_ctx.top_intra4x4_mode[base..base + 4]
+                    .copy_from_slice(&updated.top_intra4x4_mode[base..base + 4]);
+                fdc.neighbor_ctx.top_nz_luma[base..base + 4]
+                    .copy_from_slice(&updated.top_nz_luma[base..base + 4]);
+                fdc.neighbor_ctx.top_nz_cb[base_chroma..base_chroma + 2]
+                    .copy_from_slice(&updated.top_nz_cb[base_chroma..base_chroma + 2]);
+                fdc.neighbor_ctx.top_nz_cr[base_chroma..base_chroma + 2]
+                    .copy_from_slice(&updated.top_nz_cr[base_chroma..base_chroma + 2]);
+                decode_result?;
                 post_decode_mb_hires(fdc, hdr, mb_x, cur_y, ref_pics, ref_pics_l1, None);
                 mbs_decoded += 1;
             }
