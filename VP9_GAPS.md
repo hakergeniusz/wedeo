@@ -885,9 +885,9 @@ Verified with a freshly built binary: all 8 high-depth vectors now decode with
 correct frame counts and no panics; 10-bit 4:2:0 and 10-bit 4:4:4 are
 byte-exact. At this commit the sweep moved 216/226 -> 218/226 with 0
 ZERO-FRAME, 0 ERROR. After the later coefficient fix (`3a3b67b`) the
-verified sweep is 220/226. Six CRC differences (one resize, one 8-bit
-4:2:2, four high-depth chroma-subsampling), 0 zero-frame, 0 error remain.
-8-bit match names unchanged. Note: the earlier stale sweep script pointed at
+sweep was 220/226; after the cat6 fix it is 222/226. Four CRC differences
+(one resize, one 8-bit 4:2:2, two high-depth 4:2:2), 0 zero-frame, 0 error
+remain. 8-bit match names unchanged. Note: the earlier stale sweep script pointed at
 `wedeo-target-verifydocs` and misleadingly reported 214/226 with 8 ZERO.
 
 ## Resize scaling: new swscale graph backend (2026-11-28, no patch)
@@ -960,3 +960,22 @@ precision fix is not the missing piece. Next: add block-level tracing to
 recon.rs::reconstruct_intra_block_impl::<u16> and pair with ffmpeg_g at
 vp9_mc_template.c around the x=32 block. Source-level trace build was blocked
 by the shared lock; no patch.
+
+## RESOLVED: high-depth cat6 coefficient extra bits (2026-11-28)
+
+The high-depth 4:4:0 block-boundary divergence was a bool-decoder desync, not
+a reconstruction or chroma-packing bug. FFmpeg's
+`decode_coeffs_b_generic` (vp9block.c:879-886) reads two extra probability-255
+bits for 10-bit coefficients and four for 12-bit coefficients in the cat6
+magnitude range. Wedeo used the 8-bit branch for every bit depth, so the first
+cat6 coefficient consumed the wrong number of bits and every following symbol
+in the tile was corrupted. gdb on ffmpeg_g at vp9block.c:879 with
+`vp93-2-20-10bit-yuv440.webm` hit the branch 8 times with `bpp=10`.
+
+`block.rs::decode_coeffs_block` now reads those bits in FFmpeg's order before
+the common cat6 bits. Measured with a fresh debug binary at this commit:
+10-bit and 12-bit 4:4:0 are byte-exact on all 20 frames each (baseline first
+frame W=0x7ff37d97/F=0x09ab2b74 and 12760 differing Y pixels became 0);
+10/12-bit 4:2:0 and 4:4:4 remain exact. The 226-vector sweep moved
+220/226 -> 222/226 with 0 ZERO-FRAME and 0 ERROR; the four remaining diffs are
+resize, 8-bit yuv422 and 10/12-bit yuv422. No new failures.

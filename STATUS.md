@@ -14,7 +14,7 @@ are the current ones.
 | JVT-AVC_V1 | 78/135 | [H264.md](H264.md) |
 | JVT-FR-EXT (FRext) | 44/69 | [H264_HIGHDEPTH_GAPS.md](H264_HIGHDEPTH_GAPS.md), [PAFF_RESEARCH.md](PAFF_RESEARCH.md) |
 | HEVC, native port | 32/227 | [HEVC_GAPS.md](HEVC_GAPS.md), [HEVC_MERGE_TRIAGE.md](HEVC_MERGE_TRIAGE.md) |
-| VP9 | 220/226 | Six CRC differences (one resize, one 8-bit 4:2:2, four 10/12-bit); no zero-frame or error vectors; [VP9_GAPS.md](VP9_GAPS.md), [VP9_NNZ_GAPS.md](VP9_NNZ_GAPS.md) |
+| VP9 | 222/226 | Four CRC differences (one resize, one 8-bit 4:2:2, two high-depth 4:2:2); no zero-frame or error vectors; [VP9_GAPS.md](VP9_GAPS.md), [VP9_NNZ_GAPS.md](VP9_NNZ_GAPS.md) |
 | Opus SILK, `silk-lbrr-mono.mka` | 9.79 dB SNR (was -4.05 dB before pre-skip) | [DIVERGENCES.md](DIVERGENCES.md) |
 
 ## Current caveats

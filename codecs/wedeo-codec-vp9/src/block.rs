@@ -2080,8 +2080,20 @@ fn decode_coeffs_block(
                         + (i32::from(bd.get_prob(134)) << 1)
                         + i32::from(bd.get_prob(130))
                 } else {
-                    // cat6: variable extra bits (8-bit path: 14 extra bits)
-                    67 + (i32::from(bd.get_prob(254)) << 13)
+                    // cat6: variable extra bits. FFmpeg's
+                    // decode_coeffs_b_generic reads two additional high-order
+                    // bits for 10-bit and four for 12-bit coefficients
+                    // (vp9block.c:879-886), all with probability 255.
+                    let mut cat6 = 67_i32;
+                    if bit_depth == 12 {
+                        cat6 += i32::from(bd.get_prob(255)) << 17;
+                        cat6 += i32::from(bd.get_prob(255)) << 16;
+                    }
+                    if bit_depth >= 10 {
+                        cat6 += i32::from(bd.get_prob(255)) << 15;
+                        cat6 += i32::from(bd.get_prob(255)) << 14;
+                    }
+                    cat6 + (i32::from(bd.get_prob(254)) << 13)
                         + (i32::from(bd.get_prob(254)) << 12)
                         + (i32::from(bd.get_prob(254)) << 11)
                         + (i32::from(bd.get_prob(252)) << 10)
