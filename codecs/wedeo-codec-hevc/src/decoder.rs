@@ -1709,7 +1709,8 @@ impl CtuDecoder<'_, '_> {
         }
 
         let current_mv = if merge {
-            let temporal = make_temporal(self.dpb, &self.rpl, self.sh, self.collocated);
+            let temporal =
+                make_temporal(self.dpb, self.pictures, &self.rpl, self.sh, self.collocated);
             let cur_mvf = &self.pic.tab_mvf;
             luma_mv_merge_mode(
                 self.geo,
@@ -1767,7 +1768,7 @@ impl CtuDecoder<'_, '_> {
         n_pb_h: i32,
         na: NeighbourAvailability,
     ) -> Result<MvField> {
-        let temporal = make_temporal(self.dpb, &self.rpl, self.sh, self.collocated);
+        let temporal = make_temporal(self.dpb, self.pictures, &self.rpl, self.sh, self.collocated);
         let mut mv = MvField {
             pred_flag: PredFlag::INTRA,
             ..Default::default()
@@ -1906,18 +1907,28 @@ impl CtuDecoder<'_, '_> {
 }
 
 /// Build the collocated context for temporal MV derivation.
+///
+/// FFmpeg keeps one `tab_mvf` per frame and writes MVs into it while decoding
+/// that frame. Wedeo writes MVs into `Picture::tab_mvf`, so read the
+/// collocated picture's table here: the DPB frame's own table is allocated at
+/// `min_cb` granularity and is never populated.
 fn make_temporal<'a>(
     dpb: &'a Dpb,
+    pictures: &'a PictureStore,
     rpl: &'a [RefPicList; 2],
     sh: &SliceHeader,
     collocated: Option<FrameRef>,
 ) -> Option<TemporalCtx<'a>> {
-    let frame = dpb.resolve(collocated?)?;
+    let handle = collocated?;
+    let frame = dpb.resolve(handle)?;
+    let col_mvf = &pictures.get(handle)?.tab_mvf;
     Some(TemporalCtx {
         poc: sh.poc,
         col_frame: frame,
+        col_mvf,
         cur_rpl: rpl,
         collocated_list: sh.collocated_list,
+        temporal_mvp_enabled: sh.slice_temporal_mvp_enabled_flag,
     })
 }
 

@@ -41,10 +41,18 @@ pub struct TemporalCtx<'a> {
     pub poc: i32,
     /// Collocated reference frame (`lc->collocated_ref`).
     pub col_frame: &'a HevcFrame,
+    /// The collocated picture's MV field table. FFmpeg keeps one `tab_mvf`
+    /// per frame (allocated at `min_pu` granularity) and writes into it while
+    /// decoding that frame. Wedeo stores MVs in `Picture::tab_mvf`, so the
+    /// DPB frame's own table is never populated; read the picture's table
+    /// instead when deriving collocated motion vectors.
+    pub col_mvf: &'a MvFieldTable,
     /// Current picture's active reference lists (`lc->rpl`).
     pub cur_rpl: &'a [RefPicList; 2],
     /// `sh->collocated_list` (`L0` or `L1`).
     pub collocated_list: usize,
+    /// `sh->slice_temporal_mvp_enabled_flag`.
+    pub temporal_mvp_enabled: bool,
 }
 
 /// FFmpeg's `temporal_luma_motion_vector()`.
@@ -63,7 +71,7 @@ pub fn temporal_luma_motion_vector(
     ref_idx_lx: usize,
     x: usize,
 ) -> (bool, Mv) {
-    let tab_mvf = &temporal.col_frame.tab_mvf;
+    let tab_mvf = temporal.col_mvf;
     if tab_mvf.data.is_empty() {
         return (false, Mv::ZERO);
     }
@@ -749,6 +757,7 @@ pub fn luma_mv_mvp_mode(
     if num < 2
         && mvp_lx_flag == num
         && let Some(temporal) = params.temporal
+        && temporal.temporal_mvp_enabled
     {
         let (available_col, mv_col) =
             temporal_luma_motion_vector(geo, temporal, x0, y0, n_pb_w, n_pb_h, ref_idx, lx);
