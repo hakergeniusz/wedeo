@@ -25,7 +25,7 @@ pixels.
 
 ## Overall parity
 
-Current at HEAD `58d2c0c`: 20/227 bit-exact vectors. The progression below is
+Current at HEAD `58d2c0c`: 23/227 bit-exact vectors. The progression below is
 recorded at the commits named in each step.
 
 Baseline at `f6d844c` was 3/227 bit-exact vectors: one real match,
@@ -75,7 +75,7 @@ edges, while `cbf_luma` is used only for a TU's own top/left edges. Wedeo's
 internal loops of `boundary_strengths()`.
 
 Verified: both frames byte-exact on all planes; full 227-vector sweep 8/227 ->
-20/227 with no regressions (`DSLICE_B_HHI_5.bit` only load-timeout, already
+23/227 with no regressions (`DSLICE_B_HHI_5.bit` only load-timeout, already
 failing before).
 
 ## CIP_A_Panasonic_3.bit first divergence (2026-11-27, no patch)
@@ -135,12 +135,12 @@ flags, including an `on_pu_edge` condition. Wedeo now follows that rule.
 
 Verified: target vector luma diffs 2353 -> 1867, total differing bytes
 3287 -> 2809, first diff moved from (80,61) to (72,62). Full 227-vector sweep
-unchanged at 20/227 with no new errors.
+unchanged at 23/227 with no new errors.
 
 Resolved later by `e7a65a6`: FFmpeg's CIP sample replacement macros
 (`EXTEND_LEFT_CIP`, `EXTEND_DOWN_CIP`, `EXTEND_UP_CIP`, `EXTEND_RIGHT_CIP`) are
 now applied after neighbour collection. `CIP_A_Panasonic_3.bit` became
-byte-exact (2809 -> 0 differing bytes) and HEVC parity rose to 20/227.
+byte-exact (2809 -> 0 differing bytes) and HEVC parity rose to 23/227.
 
 ## Intra prediction exonerated on IPRED/CIP vectors (2026-11-27)
 
@@ -174,7 +174,7 @@ FFmpeg (Y(320,1) 28->29, Cb(160,0) 151->152). Wedeo's SAO left neighbour was
 
 After the fix: Cb(160,0)=153, Cr(160,0)=123, both first chroma diffs gone.
 IPRED differing bytes 5901 -> 5577 (Y 170->54). Full 227-vector sweep stays
-20/227 with no new errors; the DSLICE_B_HHI_5 timeout disappeared (errors
+23/227 with no new errors; the DSLICE_B_HHI_5 timeout disappeared (errors
 3 -> 2). CIP_A_Panasonic_3 was unchanged (2809 diffs) at that point; the later
 CIP sample-replacement fix `e7a65a6` made it byte-exact (0 diffs).
 
@@ -208,7 +208,7 @@ bounds, and `1c1693d` allocates separate edge buffers per component (FFmpeg
 `hevcdec.c:150-166`). Their conflict in `filter.rs` was resolved by keeping
 both the diagonal-CTB selection and the per-component indexing.
 
-Full 227-vector sweep: 10/227 -> **20/227 MATCH** with zero regressions. Newly
+Full 227-vector sweep: 10/227 -> **23/227 MATCH** with zero regressions. Newly
 matching vectors: `EXT_A_ericsson_4.bit`, `POC_A_Bossen_3.bit`,
 `IPRED_A_docomo_2.bit`, `IPRED_B_Nokia_3.bit`, `IPRED_C_Mitsubishi_2.bit`,
 `IPRED_C_Mitsubishi_3.bit`, `MAXBINS_A_TI_4.bit`, `OPFLAG_B_Qualcomm_1.bit`.
@@ -245,7 +245,7 @@ shared `f1 Y(102,0)` signature seen across seven differently named vectors.
 Fix: set `self.part_mode` immediately after computing `intra_split`, before PU
 decode. Verified `VPSID_A_VIDYO_1` frames 0-2 byte-exact, first diff moved from
 frame 1 to frame 3, divergent bytes 233619 -> 45422. Full sweep 18/227 ->
-20/227 with `cip_B_NEC_2.bit` and `cip_B_NEC_3.bit` newly matching, all prior
+23/227 with `cip_B_NEC_2.bit` and `cip_B_NEC_3.bit` newly matching, all prior
 matches preserved, no new errors.
 
 ## Largest remaining inter signature: 11-vector temporal merge (2026-11-28)
@@ -272,3 +272,18 @@ not finish behind the shared build lock within budget. No patch, gates not run.
 Evidence: `/tmp/ai-agent/partnext_evidence.md`, `/tmp/ai-agent/partnext_fastsig.log`.
 Next: pair inputs of `make_temporal` / `derive_temporal_colocated_mvs` at that
 call using source-level tracing.
+
+## 12-bit 4:4:4 output format (commit 7fb422c, 2026-11-28)
+
+Six vectors failed in `receive_frame` with `Not yet implemented` because
+`map_pixel_format()` lacked `(12, 3) => Yuv444p12le` and `decoder.rs` returned
+`PatchwelcomeNotImplemented`. FFmpeg decodes all six to `yuv444p12le` with
+1/1/1/2/2/8 frames. Added the format mapping in `sps.rs`, the decoder fallback,
+and explicit framecrc plane geometry. Three vectors are now byte-exact
+(`12bit-444-qp74/75`, `IPCM_B_RExt_NEC`) with CRCs `0xe49d741e`, `0xd93c96fd`,
+`0x1f808406`. Three more have correct frame count/format but still differ in
+PRA/SAO RExt stages. Full sweep 20/227 -> 23/227 with all prior matches kept.
+
+Also: 11 vectors with `Not yet implemented` in `decode_packet` share a
+multi-layer/multi-view VPS extension parse limitation (no single simple gate);
+18 `Invalid data found` vectors are a mix of WPP/RPS/PCM/422-10bit causes.
