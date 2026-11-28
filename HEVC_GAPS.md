@@ -213,3 +213,22 @@ matching vectors: `EXT_A_ericsson_4.bit`, `POC_A_Bossen_3.bit`,
 `IPRED_A_docomo_2.bit`, `IPRED_B_Nokia_3.bit`, `IPRED_C_Mitsubishi_2.bit`,
 `IPRED_C_Mitsubishi_3.bit`, `MAXBINS_A_TI_4.bit`, `OPFLAG_B_Qualcomm_1.bit`.
 Both ERROR entries remain vectors where neither decoder emits frames.
+
+## Sony/RAP cluster triage (2026-11-27, no patch)
+
+- `RAP_A_docomo_4.bit`: Wedeo emits 0 frames vs FFmpeg 86;
+  `RAP_B_Bossen_1.bit`: 64 vs 80 frames. Both are frame-count issues, not
+  pixel-level divergence targets.
+- No file actually starts with `Sony_`; the Sony family uses `*_Sony_*` /
+  `*_SONY_*` and all currently fail.
+- `INITQP_A_Sony_1.bit`: the apparent frame 0 difference came from an older
+  binary; with a current HEAD build frame 0 is exact. gdb and Wedeo tracing
+  at CTB(5,1) matched through deblock and SAO, so that location is cleared.
+- `SLIST_A_Sony_4.bit`: frame 0 exact; frame 1 differs massively
+  (Y 381005/399360 bytes). Paired trace shows the divergence already at
+  `filter_picture()` entry for decode-order frame 4: Wedeo Y(1,0)=156,
+  Y(80,0)=152 vs FFmpeg 151/135. The cause is reconstruction/reference-frame
+  selection or slice reordering, not deblock/SAO.
+
+No measured single cause in budget; probes reverted, no patch. Evidence:
+`/tmp/ai-agent/HEVC_CLUSTER_B_EVIDENCE.md` (ephemeral).
