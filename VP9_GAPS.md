@@ -883,8 +883,10 @@ frames.
 
 Verified with a freshly built binary: all 8 high-depth vectors now decode with
 correct frame counts and no panics; 10-bit 4:2:0 and 10-bit 4:4:4 are
-byte-exact. VP9 sweep 216/226 -> 220/226 with 0 ZERO-FRAME and 8 CRC
-differences (resize, yuv422, plus six 10/12-bit chroma-subsampling vectors).
+byte-exact. At this commit the sweep moved 216/226 -> 218/226 with 0
+ZERO-FRAME, 0 ERROR. After the later coefficient fix (`3a3b67b`) the
+verified sweep is 220/226. Six CRC differences (one resize, one 8-bit
+4:2:2, four high-depth chroma-subsampling), 0 zero-frame, 0 error remain.
 8-bit match names unchanged. Note: the earlier stale sweep script pointed at
 `wedeo-target-verifydocs` and misleadingly reported 214/226 with 8 ZERO.
 
