@@ -643,6 +643,7 @@ impl CabacDecodeCache {
         cabac_nb: &CabacNeighborCtx,
         nb: &crate::mb::MbaffNeighbors,
         curr_field: bool,
+        frame_mbaff: bool,
     ) {
         // left_block_options[option][0..4]: 4x4 block rows of the left MB
         // that feed the four rows of the scan8 left MVD/ref cache.
@@ -681,15 +682,21 @@ impl CabacDecodeCache {
                 }
                 // MBAFF field/frame mapping (FFmpeg h264_mvpred.h MAP_MVS):
                 // a field MB treats frame neighbors as half-pel vertical refs.
-                let top_is_field = cabac_nb.mb_field_flag[ti];
-                for col in 0..4 {
-                    let idx = 4 + col;
-                    map_mbaff_neighbor(
-                        &mut self.ref_cache[list][idx],
-                        &mut self.mvd_cache[list][idx],
-                        curr_field,
-                        top_is_field,
-                    );
+                // FFmpeg applies MAP_MVS only inside `if (FRAME_MBAFF(h))`, which
+                // is false for pure PAFF field pictures (`picture_structure !=
+                // PICT_FRAME`). Applying it to PAFF halves the neighbor mvd_y
+                // and shifts the mvd_y context index.
+                if frame_mbaff {
+                    let top_is_field = cabac_nb.mb_field_flag[ti];
+                    for col in 0..4 {
+                        let idx = 4 + col;
+                        map_mbaff_neighbor(
+                            &mut self.ref_cache[list][idx],
+                            &mut self.mvd_cache[list][idx],
+                            curr_field,
+                            top_is_field,
+                        );
+                    }
                 }
                 // else: intra → ref stays LIST_NOT_USED, mvd stays [0,0]
             }
@@ -709,12 +716,14 @@ impl CabacDecodeCache {
                     self.ref_cache[list][cache_pos] = ref_store[li * 4 + 1 + (block_row & !1)];
                     // mvd: right-column block of the selected row
                     self.mvd_cache[list][cache_pos] = mvd_store[li * 16 + 3 + block_row * 4];
-                    map_mbaff_neighbor(
-                        &mut self.ref_cache[list][cache_pos],
-                        &mut self.mvd_cache[list][cache_pos],
-                        curr_field,
-                        cabac_nb.mb_field_flag[li],
-                    );
+                    if frame_mbaff {
+                        map_mbaff_neighbor(
+                            &mut self.ref_cache[list][cache_pos],
+                            &mut self.mvd_cache[list][cache_pos],
+                            curr_field,
+                            cabac_nb.mb_field_flag[li],
+                        );
+                    }
                 }
             }
         }
@@ -2066,6 +2075,9 @@ pub fn decode_mb_cabac(
     // reference count (FFmpeg `rc = ref_count[list] << MB_MBAFF(sl)`).
     // Pure PAFF field pictures have `mb_field = 1` but `mb_mbaff = 0`.
     mb_mbaff: bool,
+    // FFmpeg `FRAME_MBAFF(h)`: mb_aff_frame && picture_structure == PICT_FRAME.
+    // PAFF field pictures have mb_field=1 but FRAME_MBAFF=0.
+    frame_mbaff: bool,
     chroma_format_idc: u8,
     nb: &crate::mb::MbaffNeighbors,
 ) -> Result<Macroblock> {
@@ -2389,7 +2401,7 @@ pub fn decode_mb_cabac(
     // 5. Inter prediction — fill scan8 cache and decode ref/mvd.
     // The cache handles both cross-MB and intra-MB neighbor lookups via scan8.
     if !is_intra {
-        cache.fill(cabac_nb, nb, mb_field);
+        cache.fill(cabac_nb, nb, mb_field, frame_mbaff);
     }
 
     if !is_intra && (slice_type == SliceType::P || slice_type == SliceType::SP) {
