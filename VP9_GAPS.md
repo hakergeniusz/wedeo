@@ -887,3 +887,27 @@ byte-exact. VP9 sweep 216/226 -> 218/226 with 0 ZERO-FRAME and 8 CRC
 differences (resize, yuv422, plus six 10/12-bit chroma-subsampling vectors).
 8-bit match names unchanged. Note: the earlier stale sweep script pointed at
 `wedeo-target-verifydocs` and misleadingly reported 214/226 with 8 ZERO.
+
+## Resize scaling: new swscale graph backend (2026-11-28, no patch)
+
+FFmpeg n9.1's CLI uses the NEW swscale graph backend, not legacy
+`initFilter`/`ff_swscale`: `vf_scale.c:321` calls `sws_alloc_context()` with
+`is_legacy_init=0` and runs `ff_sws_graph_run()` (graph.c + ops/uops). The
+system ffmpeg has `--disable-debug`, so op-list logs are unavailable.
+
+A Python prototype of the legacy bicubic path (`/tmp/ai-agent/scale_proto.py`)
+scaled 282x173 -> 352x288 with 6276/101376 luma and 1392/25344 U pixels off by
+one: algorithm family is right but rounding differs from the new backend, so it
+is not bit-exact.
+
+Frame-offset trap: in the raw dump frames 0-2 and 6-9 are 152064 bytes while
+frames 3-5 are 73320 bytes; frame 3 starts at `3*152064`, not `3*73320`.
+
+Gate 1 remains blocked by decoder-side scaled MC: frames 6-9 are natively
+352x288 yet still differ because they reference resized frames. Debug order:
+restore scaled MC against `-noautoscale` raw CRC (`0x86150420` for frame 3),
+then implement output bicubic against the autoscale CRC `0x8974d724`.
+
+Full design: `/tmp/ai-agent/VP9_SCALE_IMPL_DESIGN.md` (ephemeral). Estimate:
+5-10 min to capture the op-list with a debug ffmpeg/C harness, 20-40 min for
+150-250 lines of Rust plus golden tests, and scaled MC is a separate prerequisite.
