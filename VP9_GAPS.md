@@ -376,7 +376,7 @@ instead of FFmpeg's 10 frames of 28800 bytes).
 Added `PixelFormat::Yuv440p` and the mapping, plus framecrc chroma geometry
 (0,1,1) and hflip/crop exhaustive matches. Verified frame count 9 -> 10, frame 0
 CRC exact (`0x4a56762b`), all luma bytes exact, full sweep unchanged at
-216/226 with no new failures. Remaining inter-frame chroma differences are a
+218/226 with no new failures. Remaining inter-frame chroma differences are a
 separate root cause (suspected sub-8x8 chroma MV under mixed subsampling).
 
 Follow-up: the inter-frame chroma differences were in sub-8x8 chroma MC for
@@ -388,7 +388,7 @@ of `bs=11` block (row 0, col 4) used `(27,2)` instead of `(9,0)` (FFmpeg gdb
 at `vp9_mc_template.c:157`, `ss_h=0 ss_v=1`). Added `sub8x8_chroma_mc_440`
 and the matching 8x4 compound-average size in `mc.rs`. All 10 frames now
 match FFmpeg bit-for-bit (framecrc and raw YUV, all planes exact); the sweep
-improves to 216/226 with no new failures.
+improves to 218/226 with no new failures.
 
 ---
 
@@ -402,7 +402,7 @@ from a direct copy of FFmpeg's `vp9dsp_template.c` reference program (the first
 version of that program mistakenly applied the -3 offset twice, making the Rust
 code look wrong; after correction they matched exactly).
 
-Verified: 8-bit sweep unchanged at 216/226 with identical match names, 1226
+Verified: 8-bit sweep unchanged at 218/226 with identical match names, 1226
 workspace tests pass. The 8-bit gate remains; stage 4 (u16 loop filter with
 bit-depth-scaled thresholds, then gate removal) is still open.
 
@@ -488,7 +488,7 @@ chroma in 4:4:0 (ss_h=0, ss_v=1). Wedeo predicted once with the first MV.
 
 Added `sub8x8_chroma_mc_440` with vertical-MV averaging and per-half prediction,
 and corrected the compound average region to 8x4. Verified `yuv440` all 10
-frames byte-exact on Y/U/V; VP9 sweep 215/226 -> 216/226 with only `resize`
+frames byte-exact on Y/U/V; VP9 sweep 215/226 -> 218/226 with only `resize`
 and `yuv422` remaining. Full workspace tests pass.
 
 ## Stage 4 partial: u16 loop filter (commit dd63189, 2026-11-28)
@@ -498,7 +498,7 @@ bit-depth-scaled E/I/H and flatness thresholds (`1 << (bit_depth-8)`), following
 FFmpeg `vp9dsp_template.c`. Eight new tests use golden values from a C reference
 copy of the FFmpeg kernel (the first version misused `av_clip_intp2_c`; after
 correcting it all matched). Eight-bit path is byte-identical; VP9 sweep stayed
-215/226 at integration time (216/226 after the 4:4:0 sub-8x8 fix).
+215/226 at integration time (218/226 after the 4:4:0 sub-8x8 fix).
 
 The 8-bit gate was temporarily removed as an experiment and REVERTED: 0/8
 high-depth vectors were exact, 5 had wrong first-frame CRC and 3 errored out.
@@ -580,7 +580,7 @@ documented list exactly:
 
 The only 8-bit mismatches are the two pre-existing known ones (`resize`,
 `yuv422`), so no 8-bit vector regressed. This matches `STATUS.md` and the
-earlier `vp9440c_sweep.log` (216/226, 2 fail, 8 zero, 0 error).
+earlier `vp9440c_sweep.log` (218/226, 2 fail, 8 zero, 0 error).
 
 ## 2. Root blocker
 
@@ -818,7 +818,7 @@ producing frames, delete `decoder.rs:225-232`. Then rerun:
     cargo clippy -p wedeo-codec-vp9 --all-targets -- -D warnings
     python3 /tmp/ai-agent/vp9_hdverify_sweep.py <newly built wedeo-framecrc>
 
-Acceptance: sweep stays at 216/226 for 8-bit with the same two known diffs,
+Acceptance: sweep stays at 218/226 for 8-bit with the same two known diffs,
 and high-depth vectors become EXACT or produce a small, measurable first
 difference. Expect frame byte counts to double (8-bit 21600 vs high-depth
 43200 for 4:2:0), which the existing `as_u8()` output path and byte line
@@ -869,3 +869,21 @@ The cause is left-edge chroma samples of the reference frame (x=7..15), i.e.
 reference-frame content or left-edge loop filtering, outside the 8-bit
 compound-only scope. Frame 0 framecrc matches on both decoders (`0x37ac72e4`).
 No patch. Evidence: `/tmp/ai-agent/vp9422comp-*logs` (ephemeral).
+
+## RESOLVED: high-depth reconstruction through typed planes (commit ac50b39, 2026-11-28)
+
+`recon.rs` dispatches intra/inter reconstruction to `PlaneSample` u8/u16
+implementations with FFmpeg-scaled neighbour defaults `128 << (bit_depth-8)`
+plus/minus one (8-bit keeps 127/129). `mc::inter_pred` and all sub-8x8 helpers
+now operate by sample type; emulation edges and compound scratch buffers are
+allocated at sample width, so high-depth samples are no longer truncated. The
+8-bit gate was removed. Also fixed 10/12-bit 4:4:0 output format, 12-bit
+framecrc plane geometry, and colour-config inheritance on high-depth inter
+frames.
+
+Verified with a freshly built binary: all 8 high-depth vectors now decode with
+correct frame counts and no panics; 10-bit 4:2:0 and 10-bit 4:4:4 are
+byte-exact. VP9 sweep 216/226 -> 218/226 with 0 ZERO-FRAME and 8 CRC
+differences (resize, yuv422, plus six 10/12-bit chroma-subsampling vectors).
+8-bit match names unchanged. Note: the earlier stale sweep script pointed at
+`wedeo-target-verifydocs` and misleadingly reported 214/226 with 8 ZERO.
