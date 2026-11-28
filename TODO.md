@@ -28,7 +28,7 @@
   - [x] VP9 inter prediction — MV parsing/prediction (spatial+temporal), 8-tap subpel MC, compound prediction, reference frame management. 21 bugs fixed 2026-04-03.
   - [x] VP9 keyframe pixel conformance — 64/64 standard-size keyframes match FFmpeg bit-for-bit
   - [x] VP9 inter-frame bool decoder parity — symbol counts verified identical to FFmpeg (927 blocks). 4 bugs fixed: mode ctx indexing (1-per-8×8 vs 2-per-8×8), end_x_y edge clamping, MV clamping bounds, MC emu_edge offset (2026-04-05).
-  - [ ] VP9 inter frame pixel conformance — 220/226 vectors BITEXACT, 8 CRC differences, 8 zero-frame high-depth vectors. Commit `d7ac5ba` fixed clipped NNZ edge-context merging, resolving `210x198`, `210x202` and `segkey_adpq`. No vectors panic today.
+  - [ ] VP9 inter frame pixel conformance — 220/226 vectors BITEXACT, 6 CRC differences (one resize, one 8-bit 4:2:2, four 10/12-bit), 0 zero-frame vectors and 0 errors. Commit `d7ac5ba` fixed clipped NNZ edge-context merging, resolving `210x198`, `210x202` and `segkey_adpq`. No vectors panic today.
   - [x] VP9 odd-size OOB panics — the 74 historical `intra_pred.rs` panics no longer reproduce; odd-size vectors decode with correct geometry.
   - [ ] VP9 probability adaptation — `adapt_probs` not yet wired up after each frame decode
   - [ ] VP9 scaled prediction — silently skipped when ref/current dimensions differ
@@ -48,7 +48,7 @@
 
 **Target: smooth 1080p24 playback with A/V sync ≤ ±40ms. ACHIEVED.**
 
-Current (v0.1.1, wgpu+winit, ffplay pts_drift clock):
+Measured on player v0.1.1 (wgpu+winit, ffplay pts_drift clock; the workspace is now v0.2.0):
 - 24.0fps steady, 0 frame drops on 1080p H.264 @ 23.976fps
 - A/V sync drift: <40ms (within ffplay's correction threshold)
 - GPU YUV→RGB via WGSL shader (BT.601/709, MPEG/JPEG range)

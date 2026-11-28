@@ -1,8 +1,10 @@
 # Wedeo measured status
 
-Snapshot at commit `58d2c0c` (2026-11-27). Counts are bit-exact framecrc matches
-against FFmpeg unless an SNR is stated. Research appendices keep their original
-dates and commits; the numbers below are the current ones.
+Verified at HEAD `0dc5dd1` (2026-11-28) with a freshly built binary.
+Counts are bit-exact framecrc matches against FFmpeg, except the JVT rows,
+which are MD5 matches against the ITU reference YUV, and rows stating an SNR.
+Research appendices keep their original dates and commits; the numbers below
+are the current ones.
 
 | Area | Measured result | Details / gaps |
 |---|---|---|
@@ -12,7 +14,7 @@ dates and commits; the numbers below are the current ones.
 | JVT-AVC_V1 | 78/135 | [H264.md](H264.md) |
 | JVT-FR-EXT (FRext) | 44/69 | [H264_HIGHDEPTH_GAPS.md](H264_HIGHDEPTH_GAPS.md), [PAFF_RESEARCH.md](PAFF_RESEARCH.md) |
 | HEVC, native port | 32/227 | [HEVC_GAPS.md](HEVC_GAPS.md), [HEVC_MERGE_TRIAGE.md](HEVC_MERGE_TRIAGE.md) |
-| VP9 | 220/226 | Eight CRC differences, 8 CRC differences including six high-depth vectors; [VP9_GAPS.md](VP9_GAPS.md), [VP9_NNZ_GAPS.md](VP9_NNZ_GAPS.md) |
+| VP9 | 220/226 | Six CRC differences (one resize, one 8-bit 4:2:2, four 10/12-bit); no zero-frame or error vectors; [VP9_GAPS.md](VP9_GAPS.md), [VP9_NNZ_GAPS.md](VP9_NNZ_GAPS.md) |
 | Opus SILK, `silk-lbrr-mono.mka` | 9.79 dB SNR (was -4.05 dB before pre-skip) | [DIVERGENCES.md](DIVERGENCES.md) |
 
 ## Current caveats
@@ -90,8 +92,8 @@ measured, caveat: used a prebuilt binary containing all current H.264 fixes).
 
 ## HEVC failure map at 32/227 (classified 2026-11-27, rechecked 2026-11-28)
 
-At 18/227 this covered 209 failing vectors; at the current 32/227, 207 remain
-(205 CRC diffs + 2 neither-decoder frame vectors). Measured: frame CRCs,
+At 18/227 this covered 209 failing vectors; at the current 32/227, 195 remain
+(193 CRC diffs + 2 neither-decoder frame vectors). Measured: frame CRCs,
 YUV first-diff coordinates/values, and
 FFmpeg no-loop-filter comparisons. Stage attribution is inferred from
 signatures/names/published gdb values, not Wedeo internal stage dumps.
