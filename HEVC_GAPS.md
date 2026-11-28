@@ -303,3 +303,23 @@ missing `slice_temporal_mvp_enabled_flag` check for AMVP. Verified twice with a
 freshly built binary: full sweep 23/227 -> **32/227** with nine new matches and
 no regressions. Both ERROR entries remain vectors where neither decoder emits
 frames.
+
+## Temporal candidates aligned after commit ab1fa7e (2026-11-28, no patch)
+
+At HEAD b632d28, paired ffmpeg_g gdb and Wedeo source-level traces on frame 1
+(POC 1):
+
+- MERGE_A_TI_3.bit first PU(0,0): both decoders have temp_col L0/ref0
+  (-6,-1), colpoc=2, collist=L1, current RPL L0=[0,2,4]/L1=[2,4,0],
+  collocated RPL L0=[0,4]/L1=[4,0], scaled BI(-3,0)/(3,0). The old
+  f1 Y(0,0) 139/138 signature is gone. Current first diff is Y(204,14),
+  PU(196,0), with both decoders using L0 ref1 (18,6) from collocated (36,12).
+- PMERGE_A_TI_3.bit first diffs near Y(271,0): PUs (256,0), (256,4), (240,0)
+  have identical temporal candidates and final MVs.
+- MERGE_B_TI_3.bit and RPS_A_docomo_4.bit first-diff PUs also show no missing,
+  zero or POC-scaling-divergent temporal candidates.
+
+Conclusion: collocated picture selection, tab_mvf sampling, long-term/POC
+checks and scaling are all correct after the MV-table fix. Residual pixel
+differences are downstream of MV derivation (MC/deblock/SAO). No patch, gates
+not run, tree clean. Evidence: /tmp/ai-agent/w10hetmp_evidence.md (ephemeral).
