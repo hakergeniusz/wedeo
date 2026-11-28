@@ -1592,10 +1592,14 @@ pub fn get_nz_neighbors(
             let nza = if blk_x > 0 {
                 nz_cache[block_idx - 1]
             } else {
-                let li = if blk_y < 2 { left_idx } else { left_idx_bot };
+                // 4:2:0 chroma has only two 4x4 rows per plane: row 0 uses
+                // left_xy[LTOP], row 1 uses left_xy[LBOT] (FFmpeg
+                // h264_mvpred.h:702-705). The `< 2` test belongs to the
+                // 4:2:2 path, which has four rows per plane; applying it here
+                // makes MBAFF field/frame mismatches read the wrong left MB.
+                let li = if blk_y == 0 { left_idx } else { left_idx_bot };
                 if let Some(li) = li {
-                    let chroma_row =
-                        LEFT_CHROMA_NZ_ROW[left_block_option as usize][blk_y.min(1)] as usize;
+                    let chroma_row = LEFT_CHROMA_NZ_ROW[left_block_option as usize][blk_y] as usize;
                     let left_blk = base + chroma_row * 2 + 1;
                     cabac_nb.nz_count[li * 40 + left_blk]
                 } else {
