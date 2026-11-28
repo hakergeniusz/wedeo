@@ -1,6 +1,6 @@
 # Wedeo measured status
 
-Verified at HEAD `0dc5dd1` (2026-11-28) with a freshly built binary.
+Verified at HEAD `bfa97e3` (2026-11-28) with a freshly built binary.
 Counts are bit-exact framecrc matches against FFmpeg, except the JVT rows,
 which are MD5 matches against the ITU reference YUV, and rows stating an SNR.
 Research appendices keep their original dates and commits; the numbers below
