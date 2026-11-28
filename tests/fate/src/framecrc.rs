@@ -112,6 +112,7 @@ impl YuvGeometry {
             // H.264 FRext High 4:2:2 / 4:4:4, 10-bit.
             PixelFormat::Yuv422p10le | PixelFormat::Yuv422p10be => (1, 0, 2),
             PixelFormat::Yuv444p10le | PixelFormat::Yuv444p10be => (0, 0, 2),
+            PixelFormat::Yuv444p12le | PixelFormat::Yuv444p12be => (0, 0, 2),
             PixelFormat::Yuv420p16le | PixelFormat::Yuv420p16be => (1, 1, 2),
             // Newly added planar variants (e.g. yuv422p12le) are derived from
             // the FFmpeg-style format name below.

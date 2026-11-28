@@ -2291,6 +2291,7 @@ impl HevcDecoder {
                         (0, 8) => Some(PixelFormat::Gray8),
                         (1, 8) => Some(PixelFormat::Yuv420p),
                         (1, 10) => Some(PixelFormat::Yuv420p10le),
+                        (3, 12) => Some(PixelFormat::Yuv444p12le),
                         _ => None,
                     })
             })

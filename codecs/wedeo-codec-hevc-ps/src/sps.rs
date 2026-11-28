@@ -253,7 +253,8 @@ fn map_pixel_format(chroma_format_idc: u32, bit_depth: u32) -> Option<PixelForma
         (8, 2) => Some(PixelFormat::Yuv422p),
         (8, 3) => Some(PixelFormat::Yuv444p),
         (10, 1) => Some(PixelFormat::Yuv420p10le),
-        // Core does not yet expose 9/12-bit or 422/444 10-bit formats.
+        (12, 3) => Some(PixelFormat::Yuv444p12le),
+        // Core does not yet expose 9-bit or the remaining 10/12-bit variants.
         _ => None,
     }
 }
