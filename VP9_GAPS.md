@@ -379,6 +379,17 @@ CRC exact (`0x4a56762b`), all luma bytes exact, full sweep unchanged at
 215/226 with no new failures. Remaining inter-frame chroma differences are a
 separate root cause (suspected sub-8x8 chroma MV under mixed subsampling).
 
+Follow-up: the inter-frame chroma differences were in sub-8x8 chroma MC for
+4:4:0 (`ss_h=0, ss_v=1`). FFmpeg's `vp9_mc_template.c` covers the whole 8x8
+luma region with one 8x4 chroma block, averaging the two vertical sub-block
+MVs for 8x4/4x4 and using separate left/right MVs for 4x8/4x4. Wedeo used a
+single 4x4 chroma prediction with the first sub-block MV, so the right half
+of `bs=11` block (row 0, col 4) used `(27,2)` instead of `(9,0)` (FFmpeg gdb
+at `vp9_mc_template.c:157`, `ss_h=0 ss_v=1`). Added `sub8x8_chroma_mc_440`
+and the matching 8x4 compound-average size in `mc.rs`. All 10 frames now
+match FFmpeg bit-for-bit (framecrc and raw YUV, all planes exact); the sweep
+improves to 216/226 with no new failures.
+
 ---
 
 ## Stage 3 complete: u16 MC (commit 366b35a, 2026-11-27)

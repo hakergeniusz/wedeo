@@ -812,7 +812,14 @@ pub fn inter_pred(
         let (avg_uv_bw, avg_uv_bh) = if bs > BlockSize::Bs8x8 as usize {
             // Sub-8x8 blocks cover an 8x8 luma region; in 4:4:4 chroma
             // covers the same 8x8 region (FFmpeg vp9_mc_template.c).
-            if !ss_h && !ss_v { (8, 8) } else { (4, 4) }
+            if !ss_h && !ss_v {
+                (8, 8)
+            } else if !ss_h && ss_v {
+                // 4:4:0 chroma covers the whole 8x8 luma region: 8x4.
+                (8, 4)
+            } else {
+                (4, 4)
+            }
         } else {
             (uv_bw, uv_bh)
         };
@@ -1134,6 +1141,93 @@ fn sub8x8_chroma_mc_444(
     }
 }
 
+/// MC chroma for sub-8x8 blocks in 4:4:0 (`ss_h == false`, `ss_v == true`).
+///
+/// FFmpeg's `vp9_mc_template.c` writes one 8x4 chroma region spanning the
+/// whole 8x8 luma block. Vertical pairs of luma MVs are averaged, while the
+/// left and right 4x4 chroma halves keep their own MVs for 4x8/4x4 blocks.
+#[allow(clippy::too_many_arguments)]
+fn sub8x8_chroma_mc_440(
+    dst_u: &mut [u8],
+    dst_v: &mut [u8],
+    dst_stride: usize,
+    block: &BlockInfo,
+    ref_frame: &RefFrame,
+    uv_col: usize,
+    uv_row: usize,
+    ref_uv_w: usize,
+    ref_uv_h: usize,
+    filter: u8,
+    emu_buf: &mut [u8],
+    ri: usize,
+) {
+    let bit_depth = ref_frame.fb.bit_depth;
+    let ref_u = &ref_frame.fb.u;
+    let ref_v = &ref_frame.fb.v;
+    let ref_stride = ref_frame.fb.uv_stride;
+    match block.bs {
+        BlockSize::Bs8x4 => {
+            let mv = rounded_div_mv_x2(block.mv[0][ri], block.mv[2][ri]);
+            mc_chroma(
+                dst_u, dst_v, dst_stride, ref_u, ref_v, ref_stride, ref_uv_w, ref_uv_h, uv_row,
+                uv_col, &mv, 8, 4, filter, bit_depth, false, true, emu_buf,
+            );
+        }
+        BlockSize::Bs4x8 => {
+            for sub in 0..2 {
+                let off = sub * 4;
+                mc_chroma(
+                    &mut dst_u[off..],
+                    &mut dst_v[off..],
+                    dst_stride,
+                    ref_u,
+                    ref_v,
+                    ref_stride,
+                    ref_uv_w,
+                    ref_uv_h,
+                    uv_row,
+                    uv_col + off,
+                    &block.mv[sub][ri],
+                    4,
+                    4,
+                    filter,
+                    bit_depth,
+                    false,
+                    true,
+                    emu_buf,
+                );
+            }
+        }
+        BlockSize::Bs4x4 => {
+            for sub in 0..2 {
+                let off = sub * 4;
+                let mv = rounded_div_mv_x2(block.mv[sub][ri], block.mv[sub + 2][ri]);
+                mc_chroma(
+                    &mut dst_u[off..],
+                    &mut dst_v[off..],
+                    dst_stride,
+                    ref_u,
+                    ref_v,
+                    ref_stride,
+                    ref_uv_w,
+                    ref_uv_h,
+                    uv_row,
+                    uv_col + off,
+                    &mv,
+                    4,
+                    4,
+                    filter,
+                    bit_depth,
+                    false,
+                    true,
+                    emu_buf,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 /// MC chroma for sub-8x8 blocks into arbitrary buffers (for compound ref[1]).
 ///
 /// `ri` selects which reference MV to use: 0 or 1.
@@ -1159,6 +1253,13 @@ fn sub8x8_chroma_mc_buf(
     let bit_depth = ref_frame.fb.bit_depth;
     if !ss_h && !ss_v {
         sub8x8_chroma_mc_444(
+            dst_u, dst_v, dst_stride, block, ref_frame, uv_col, uv_row, ref_uv_w, ref_uv_h, filter,
+            emu_buf, ri,
+        );
+        return;
+    }
+    if !ss_h && ss_v {
+        sub8x8_chroma_mc_440(
             dst_u, dst_v, dst_stride, block, ref_frame, uv_col, uv_row, ref_uv_w, ref_uv_h, filter,
             emu_buf, ri,
         );
@@ -1309,6 +1410,24 @@ fn sub8x8_chroma_mc(
     if !ss_h && !ss_v {
         let off = uv_row * fb.uv_stride + uv_col;
         sub8x8_chroma_mc_444(
+            &mut fb.u[off..],
+            &mut fb.v[off..],
+            fb.uv_stride,
+            block,
+            ref_frame,
+            uv_col,
+            uv_row,
+            ref_uv_w,
+            ref_uv_h,
+            filter,
+            emu_buf,
+            0,
+        );
+        return;
+    }
+    if !ss_h && ss_v {
+        let off = uv_row * fb.uv_stride + uv_col;
+        sub8x8_chroma_mc_440(
             &mut fb.u[off..],
             &mut fb.v[off..],
             fb.uv_stride,
