@@ -128,3 +128,9 @@ samples only fell 100864 -> 100359/100608, FRext dropped 44/69 -> 42/69 with
 two new errors, and the failure moved to `chroma_pred_mode`. A correct fix needs
 top-neighbor and other paths together, beyond a single-cause patch.
 Evidence: `/tmp/ai-agent/firstcol_evidence.md` (ephemeral).
+
+## SP1_BT_A closed (2026-11-28, no Wedeo action)
+
+The ITU official golden YUV MD5 ca0b3580... is correct and must not be changed. FFmpeg w62 debug (`ffmpeg_g -threads 1 -bitexact`) produces MD5 8f1fe866... byte-identical to Wedeo for all 400 frames. ITU diverges from frame 10 onward (first diff Y(0,0): ITU 27 vs FFmpeg/Wedo 33; 390/400 frames differ). Every 10th frame is an SP slice (slice_type=3) with sp_for_switch_flag=0.
+
+Root cause is in the reference decoder: H.264 8.6.1 requires SP slices with sp_for_switch_flag=0 to re-quantize in the transform domain, but FFmpeg `h264_slice.c:1915-1919` parses and discards sp_for_switch_flag/slice_qs_delta, and `slice_type_nos = slice_type & 3` demotes SP (6) to P (2). gdb confirmed `slice_type=6 slice_type_nos=2`; the CAVLC path still has `//FIXME SP correct ?`. Wedeo likewise decodes SP as P, so it correctly matches FFmpeg. Implementing full 8.6.1 would deliberately diverge from the verification target and is not a single-cause fix. Evidence: /tmp/ai-agent/SP1_BT_A_no_fix_evidence.md (ephemeral).
