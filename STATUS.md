@@ -35,9 +35,19 @@ dates and commits; the numbers below are the current ones.
 Of the 55 JVT-AVC_V1 FAIL entries, only `FM1_BT_B`, `FM1_FT_E` (FMO, which
 FFmpeg w62 also rejects) and `SP1_BT_A` are nominally progressive. `SP1_BT_A`
 was measured: Wedeo and the debug FFmpeg produce byte-identical raw YUV for all
-400 frames (MD5 `8f1fe866...` on both). The suite's expected hash `ca0b3580...`
-differs from FFmpeg's own output, so this FAIL is a stale reference hash, not a
-decoding divergence. `sp2_bt_b` has no vector file in the reference directory.
+400 frames (MD5 `8f1fe866b567fe41a8327c68805c1352` on both). The suite's
+expected hash `ca0b3580f448cc1e07f81a4756273b59` is not stale: it is exactly
+the MD5 of `sp1_bt_a.yuv` in the official ITU archive
+`SP1_BT_A.zip` (archive MD5 `23c47c4535e838cb2ac4e98eb05c9238`, matching
+`source_checksum`; extracted `sp1_bt_a.h264` MD5 `5d48ba43dc52819ab3ebfd3df6e07e36`
+matches the local vector). The ITU reference YUV is byte-identical to FFmpeg's
+output for frames 0-9, then diverges from frame 10 (first difference at frame
+10, Y(0,0): ITU 27 vs FFmpeg 33; 390/400 frames differ, no frame shift).
+Therefore this FAIL is a real divergence from the ITU reference output, not a
+reference-hash error; the manifest hash must not be rewritten to FFmpeg's MD5.
+FFmpeg w61, w62 and system n9.1 all produce `8f1fe866...`, so no pinned-version
+difference explains the mismatch. `sp2_bt_b` has no vector file in the reference
+directory.
 
 `CABREF3_Sand_D` was inspected and is PAFF (`frame_mbs_only_flag=0,
 mb_adaptive_frame_field_flag=0`), so it belongs to the interlaced workstream.
