@@ -55,3 +55,25 @@ workstream, not a progressive fixable target. Previously timing-out FREH10-1/2
 now pass.
 
 Evidence: `/tmp/ai-agent/frext_no_fix_evidence.md` (ephemeral).
+
+## FRext interlaced failure clusters (2026-11-27, all 25 measured)
+
+Every remaining FRext failure diverges on frame 0 in the Y plane. Deblocking is
+not the root cause for 23/25 (disabling it changes frame-0 differences by under
+1.3%). Entropy is mixed: 17 CABAC and 8 CAVLC vectors, so a CABAC-only fix
+cannot solve the group. A key observation: Wedeo's frame 0 has huge zero-filled
+areas, e.g. `FREXT02_JVC_C` has 100864/101376 zero luma samples (only the first
+MB column was written), suggesting missing macroblock coverage rather than
+arithmetic error.
+
+Three clusters:
+1. Even-row / frame-mode intra reconstruction (13 vectors). Representative
+   `FREXT02_JVC_C`. First step: trace why only the first MB column is written.
+2. Odd-row / bottom-field inter reconstruction (8 vectors). Representative
+   `HCAFF1_HHI_B`, with a measured bottom MB(1,1) mvd divergence [1,0] vs
+   [1,-2] (PAFF_RESEARCH.md Appendix U).
+3. High-depth 4:2:2 residual (4 vectors, yuv422p10le), representative
+   `Hi422FREXT16_SONY_A`, deltas -1023 to +622.
+
+Report: `/tmp/ai-agent/H264_FREXT_CLASSIFICATION.md` (ephemeral; 25/25 vectors
+measured, caveat: used a prebuilt binary containing all current H.264 fixes).
