@@ -11,7 +11,7 @@ dates and commits; the numbers below are the current ones.
 | FATE CABAC | 27/27 | [H264.md](H264.md) |
 | JVT-AVC_V1 | 78/135 | [H264.md](H264.md) |
 | JVT-FR-EXT (FRext) | 44/69 | [H264_HIGHDEPTH_GAPS.md](H264_HIGHDEPTH_GAPS.md), [PAFF_RESEARCH.md](PAFF_RESEARCH.md) |
-| HEVC, native port | 23/227 | [HEVC_GAPS.md](HEVC_GAPS.md), [HEVC_MERGE_TRIAGE.md](HEVC_MERGE_TRIAGE.md) |
+| HEVC, native port | 32/227 | [HEVC_GAPS.md](HEVC_GAPS.md), [HEVC_MERGE_TRIAGE.md](HEVC_MERGE_TRIAGE.md) |
 | VP9 | 218/226 | Eight CRC differences, 8 CRC differences including six high-depth vectors; [VP9_GAPS.md](VP9_GAPS.md), [VP9_NNZ_GAPS.md](VP9_NNZ_GAPS.md) |
 | Opus SILK, `silk-lbrr-mono.mka` | 9.79 dB SNR (was -4.05 dB before pre-skip) | [DIVERGENCES.md](DIVERGENCES.md) |
 
@@ -88,9 +88,9 @@ Three clusters:
 Report: `/tmp/ai-agent/H264_FREXT_CLASSIFICATION.md` (ephemeral; 25/25 vectors
 measured, caveat: used a prebuilt binary containing all current H.264 fixes).
 
-## HEVC failure map at 23/227 (classified 2026-11-27, rechecked 2026-11-28)
+## HEVC failure map at 32/227 (classified 2026-11-27, rechecked 2026-11-28)
 
-At 18/227 this covered 209 failing vectors; at the current 23/227, 207 remain
+At 18/227 this covered 209 failing vectors; at the current 32/227, 207 remain
 (205 CRC diffs + 2 neither-decoder frame vectors). Measured: frame CRCs,
 YUV first-diff coordinates/values, and
 FFmpeg no-loop-filter comparisons. Stage attribution is inferred from
