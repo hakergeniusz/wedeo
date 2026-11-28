@@ -102,3 +102,19 @@ signatures/names/published gdb values, not Wedeo internal stage dumps.
 
 Important: `-skip_loop_filter all` cannot separate deblock from SAO. Report:
 `/tmp/ai-agent/HEVC_CLASSIFICATION.md` (ephemeral).
+
+## FREXT02_JVC_C first-column clue resolved (2026-11-28, no patch)
+
+The huge zero-filled areas in Wedeo's frame 0 (100864/101376 zero luma samples)
+are NOT a slice start address, missing slice, context reset or row-progress
+gate. FFmpeg gdb shows a single slice with `first_mb=0` and normal MBAFF MB
+order. Wedeo trace hit `CAVLC error site 532`: `zeros_left < 0` aborts at the
+second MB pair, leaving the rest of the frame at zero.
+
+FFmpeg's nC sequence at MB(1,0) diverges from Wedeo's starting at the third
+residual block, matching a missing `left_block_options[3]` field/frame left
+neighbor remapping. A candidate remap was tried but failed the gates: zero
+samples only fell 100864 -> 100359/100608, FRext dropped 44/69 -> 42/69 with
+two new errors, and the failure moved to `chroma_pred_mode`. A correct fix needs
+top-neighbor and other paths together, beyond a single-cause patch.
+Evidence: `/tmp/ai-agent/firstcol_evidence.md` (ephemeral).
