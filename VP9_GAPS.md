@@ -937,3 +937,24 @@ ITXFM coefficient handling, NOT the 8-bit compound path.
 
 Next round should target invisible ALTREF single-reference chroma reconstruction,
 not compound averaging. No patch, gates not run, tree clean.
+
+## High-depth 4:4:0 keyframe block clue (2026-11-28, no patch)
+
+Fresh debug binary at 0dc5dd1 measured: 10/12-bit 4:2:0 and 4:4:4 are
+10/10 exact; 10/12-bit 4:2:2 is 1/10 (frame 0 exact, first diff frame 1);
+10/12-bit 4:4:0 is 0/20 with first diff at frame 0 (10-bit W0 0x7ff37d97 vs
+F0 0x09ab2b74; 12-bit 0x1988e74b vs 0xebac7560). 8-bit 4:4:0 is 10/10 exact.
+
+Raw YUV (160x90 4:4:0, 57600 bytes/frame): 10-bit 440 frame 0 first mismatch
+at (32,0) on ALL planes (W=0/498/511 vs F=520/703/598). The first two 16x16
+blocks of row 0 are exact; block (row0,col2) has 167/256 luma mismatches;
+rows 2-4 col0-1 fully mismatch. The divergence is a BLOCK-LEVEL split at
+x=32 on the keyframe and affects luma too, ruling out a pure u16 chroma-packing
+bug and the frame-to-frame chroma-geometry hypothesis.
+
+FFmpeg -skip_loop_filter all gives the same frame-0 CRC, so loop filter is not
+the cause. `coefs_y/u/v` are already Vec<i32>, so commit 3a3b67b's coefficient
+precision fix is not the missing piece. Next: add block-level tracing to
+recon.rs::reconstruct_intra_block_impl::<u16> and pair with ffmpeg_g at
+vp9_mc_template.c around the x=32 block. Source-level trace build was blocked
+by the shared lock; no patch.
