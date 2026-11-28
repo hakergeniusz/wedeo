@@ -937,6 +937,10 @@ impl CtuDecoder<'_, '_> {
             );
         }
         let intra_split = part_mode == PartMode::PartNxN && pred_mode_intra;
+        // FFmpeg stores lc->cu.part_mode before decoding the PUs, so merge
+        // candidate derivation sees this CU's partition (not the previous
+        // CU's) when checking partIdx-dependent neighbour availability.
+        self.part_mode = part_mode;
 
         let mut pcm_flag = false;
         if pred_mode_intra {
@@ -1090,7 +1094,6 @@ impl CtuDecoder<'_, '_> {
                 }
             }
             self.intra_split = intra_split;
-            self.part_mode = part_mode;
             self.pred_mode_intra = pred_mode_intra;
             self.cu_transquant_bypass = cu_transquant_bypass;
             self.max_trafo_depth = if pred_mode_intra {
