@@ -13,7 +13,7 @@ See [STATUS.md](STATUS.md) for a one-page snapshot of the current measured state
 
 ## Highlights
 
-- **Bit-exact verification:** 199/283 vectors are bit-exact across four H.264 suites, using FFmpeg framecrc for FATE and ITU reference MD5 for JVT (50/52 FATE CAVLC, 27/27 FATE CABAC, 78/135 JVT-AVC_V1, 44/69 JVT-FR-EXT). Two CAVLC FMO vectors produce no frames in either decoder; see `H264.md` for details.
+- **Bit-exact verification:** 200/283 vectors are bit-exact across four H.264 suites, using FFmpeg framecrc for FATE and ITU reference MD5 for JVT (50/52 FATE CAVLC, 27/27 FATE CABAC, 79/135 JVT-AVC_V1, 44/69 JVT-FR-EXT). Two CAVLC FMO vectors produce no frames in either decoder; see `H264.md` for details.
 - **Native video decoders:** H.264 (77/77 decodable progressive FATE vectors bitexact), VP9 (222/226 vectors bit-exact), VP8, MPEG-1/2, FLAC, and HEVC (32/227 vectors bit-exact against FFmpeg; native port still in progress).
 - **Containers:** demuxers for WAV, IVF, MP4/MOV, Matroska/WebM, MPEG-TS, Ogg, FLV, AVI, and raw H.264/HEVC. Muxers for WAV, IVF, MP4/MOV, Matroska/WebM, MPEG-TS, and FLV.
 - **Bitstream filters:** H.264 and HEVC MP4-to-Annex B, and AAC ADTS-to-ASC, with registry-driven initialization.

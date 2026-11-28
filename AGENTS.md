@@ -15,7 +15,7 @@ Measured state at HEAD `bfa97e3` (2026-11-28), from `STATUS.md`:
 
 | Area | Result |
 |---|---|
-| H.264, four suites combined | 199/283 (CAVLC 50/52, CABAC 27/27, JVT-AVC_V1 78/135, JVT-FR-EXT 44/69) |
+| H.264, four suites combined | 200/283 (CAVLC 50/52, CABAC 27/27, JVT-AVC_V1 79/135, JVT-FR-EXT 44/69) |
 | HEVC, native port | 32/227 |
 | VP9 | 222/226 (four CRC differences, no zero-frame or error vectors) |
 | Opus SILK, `silk-lbrr-mono.mka` | 9.79 dB SNR |

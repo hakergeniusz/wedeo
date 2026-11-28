@@ -3,7 +3,7 @@
 ## State (historical snapshot, 2026-11-24)
 
 These numbers describe that snapshot only. Current measured parity is in
-`STATUS.md` (H.264 four-suite 199/283, VP9 222/226, HEVC 32/227).
+`STATUS.md` (H.264 four-suite 200/283, VP9 222/226, HEVC 32/227).
 
 - `main` = `ddbbd7d` + H.264 encoder work (not yet pushed). VP8 bit-exact (3364/3364), w72 VP9 SIMD, w78 CLI multi-input merged, Theora duration fix, Ogg cover-art/w79, H264 MBAFF termination alignment, w85 structured framecrc comparison, VP9 sub-8x8 MV/context alignment (`13ccb4f`).
 - H.264 encoder: new `adapters/wedeo-h264-rusty` wraps pure-Rust `rusty_h264-encoder` 0.17.4 (BSD-2-Clause dependency, adapter glue LGPL). Adds `Encoder::extradata()` so the CLI can hand avcC to the MP4 muxer. `wedeo-cli -i av1.mp4 -c:v h264 out.mp4` verified: 30-frame output decodes cleanly under ffmpeg.

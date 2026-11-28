@@ -8,7 +8,7 @@ Wedeo now pairs top/bottom fields and uses field-view MC as a bounded step
 (commit `e61b4af`, Appendix Q), with documented trade-offs. Full interlaced
 pixel parity is still open. Appendices before Q record the earlier state and
 the then-current FRext baseline of 42/69; current FRext parity is 44/69 and the
-four-suite total is 199/283. See `STATUS.md` for the compact snapshot.
+four-suite total is 200/283. See `STATUS.md` for the compact snapshot.
 
 ## CRITICAL CORRECTION TO THE INITIAL ASSUMPTION
 

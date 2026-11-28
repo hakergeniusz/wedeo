@@ -1,6 +1,6 @@
 # Wedeo measured status
 
-Verified at HEAD `bfa97e3` (2026-11-28) with a freshly built binary.
+Verified at HEAD `03bb296` (2026-11-28) with a freshly built binary.
 Counts are bit-exact framecrc matches against FFmpeg, except the JVT rows,
 which are MD5 matches against the ITU reference YUV, and rows stating an SNR.
 Research appendices keep their original dates and commits; the numbers below
@@ -8,10 +8,10 @@ are the current ones.
 
 | Area | Measured result | Details / gaps |
 |---|---|---|
-| H.264, four suites combined | **199/283** | [H264.md](H264.md) |
+| H.264, four suites combined | **200/283** | [H264.md](H264.md) |
 | FATE CAVLC | 50/52 | Two FMO vectors yield no frames in either decoder; [H264_FMO_NOTES.md](H264_FMO_NOTES.md) |
 | FATE CABAC | 27/27 | [H264.md](H264.md) |
-| JVT-AVC_V1 | 78/135 | [H264.md](H264.md) |
+| JVT-AVC_V1 | 79/135 | [H264.md](H264.md) |
 | JVT-FR-EXT (FRext) | 44/69 | [H264_HIGHDEPTH_GAPS.md](H264_HIGHDEPTH_GAPS.md), [PAFF_RESEARCH.md](PAFF_RESEARCH.md) |
 | HEVC, native port | 32/227 | [HEVC_GAPS.md](HEVC_GAPS.md), [HEVC_MERGE_TRIAGE.md](HEVC_MERGE_TRIAGE.md) |
 | VP9 | 222/226 | Four CRC differences (one resize, one 8-bit 4:2:2, two high-depth 4:2:2); no zero-frame or error vectors; [VP9_GAPS.md](VP9_GAPS.md), [VP9_NNZ_GAPS.md](VP9_NNZ_GAPS.md) |
@@ -28,13 +28,18 @@ are the current ones.
   Q and S.
 - FMO is deliberately rejected: FFmpeg w62 rejects it too and emits zero
   frames. The FM1_BT_B rejection-path hang was fixed at `d86b9d2`.
-- Older docs recording 3/227, 8/227, 211/226, 42/69, 197/283 or "PAFF not
-  implemented" describe earlier measurements or states; use the linked gap
-  docs for the measured progression.
+- The MBAFF 4:2:0 chroma AC NNZ bottom-left neighbor fix (`03bb296`) made
+  `CAMACI3_Sony_C` frame 0 byte-exact and lifted JVT-AVC_V1 from 78/135 to
+  79/135 and the four-suite total from 199/283 to 200/283. Full suite, fmt,
+  clippy and workspace tests were re-verified on main with a fresh binary; the
+  four known ERROR vectors and the remaining FAILs are unchanged.
+- Older docs recording 3/227, 8/227, 211/226, 42/69, 197/283, 199/283 or
+  "PAFF not implemented" describe earlier measurements or states; use the
+  linked gap docs for the measured progression.
 
 ## JVT-AVC_V1 failure classification (2026-11-27)
 
-Of the 55 JVT-AVC_V1 FAIL entries, only `FM1_BT_B`, `FM1_FT_E` (FMO, which
+Of the 54 JVT-AVC_V1 FAIL entries, only `FM1_BT_B`, `FM1_FT_E` (FMO, which
 FFmpeg w62 also rejects) and `SP1_BT_A` are nominally progressive. `SP1_BT_A`
 was measured: Wedeo and the debug FFmpeg produce byte-identical raw YUV for all
 400 frames (MD5 `8f1fe866b567fe41a8327c68805c1352` on both). The suite's

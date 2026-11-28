@@ -5,13 +5,15 @@
 Measured at HEAD `bfa97e3` with a freshly built binary. See [STATUS.md](STATUS.md)
 for the authoritative compact table and the evidence links.
 
-- H.264, four suites: **199/283** vectors BITEXACT
+- H.264, four suites: **200/283** vectors BITEXACT
 - H.264 FATE CAVLC: **50/52** (two FMO vectors produce no frames in either decoder)
 - H.264 FATE CABAC: **27/27** progressive conformance files BITEXACT
-- H.264 JVT-AVC_V1: **78/135**; JVT-FR-EXT: **44/69**
+- H.264 JVT-AVC_V1: **79/135**; JVT-FR-EXT: **44/69**
 - H.264 interlaced: PAFF field pairing and field-view MC landed as a bounded step
-  with documented trade-offs. Full MBAFF/PAFF pixel parity remains open; see
-  `PAFF_RESEARCH.md` Appendices Q and S.
+  with documented trade-offs. The MBAFF 4:2:0 chroma AC NNZ fix at `03bb296`
+  made `CAMACI3_Sony_C` frame 0 byte-exact and lifted JVT-AVC_V1 to 79/135,
+  with other frames still diverging independently. Full MBAFF/PAFF pixel parity
+  remains open; see `PAFF_RESEARCH.md` Appendices Q and S.
 - HEVC, native port: **32/227** conformance vectors BITEXACT
 - VP9: **222/226** vectors BITEXACT (four CRC differences: one resize, one 8-bit
   4:2:2, two high-depth 4:2:2; zero zero-frame vectors and zero errors). Wave 10
@@ -77,7 +79,7 @@ Single-threaded gap: wedeo is **12x slower** than FFmpeg (scalar Rust vs C+NEON)
 
 ## Next Steps (open gaps)
 
-- **H.264 interlaced (84 of 283 vectors still non-matching).** All 25 remaining
+- **H.264 interlaced (83 of 283 vectors still non-matching).** All 25 remaining
   JVT-FR-EXT failures are field-coded (`field_order=tt`). Three measured
   clusters: even-row frame-mode intra with only the first MB column written
   (`FREXT02_JVC_C`, traced to `zeros_left < 0` and a missing field/frame left
