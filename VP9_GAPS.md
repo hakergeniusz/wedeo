@@ -915,3 +915,25 @@ Full design: `/tmp/ai-agent/VP9_SCALE_IMPL_DESIGN.md` (ephemeral). Estimate:
 ## RESOLVED: high-depth coefficient precision (commit 3a3b67b, 2026-11-28)
 
 12-bit 4:2:0 frames had 3473 pixels with delta exactly +2048. FFmpeg `vp9block.c:906-918` writes 32-bit coefficients with `AV_WN32A` on high-depth paths; Wedeo cast every coefficient through `as i16 as i32`, truncating 12-bit values. `block.rs` now keeps high-depth coefficients at 32-bit precision. Verified with a freshly built binary: 12-bit 4:2:0 and 12-bit 4:4:4 are byte-exact; VP9 sweep 218/226 -> 220/226 with 0 ZERO-FRAME, 0 ERROR and no new failures (the six remaining diffs are a strict subset of the prior eight).
+
+## yuv422 divergence is in the invisible ALTREF reference frame (2026-11-28, no patch)
+
+Paired gdb (ffmpeg_g vp9recon.c:377) and Wedeo source-level trace at frame 1,
+SB0, bs=7 comp=1 col=4 row=0, second predictor mx=15 my=6 x=10 y=0, ref1=slot 2:
+- FFmpeg ref1 U row0 cols0..21 `[128,130,102,82,103,108,91,108,97,94,105,102,76,67,100,95,80,84,97,92,96,116]`
+- Wedeo ref1 row0 `[128,131,106,84,111,116,99,116,105,102,113,110,84,75,108,103,80,84,97,92,96,116]`
+
+ref0 matched exactly, and MV/filter/ref indices/averaging were aligned; the
+emulated window 7..21 is inside the 80-wide chroma plane, so out-of-bounds
+reading is ruled out. The difference comes from slot 2's own content.
+
+FFmpeg gdb: slot 2 is decode-order frame 3 (packet pts=20, show_frame=0,
+refresh_frame_flags=4), later displayed by show_existing_frame at pts=180 - an
+invisible ALTREF frame. That frame's U/V row0 differ at cols1..15 while Y is
+byte-identical; -skip_loop_filter showed it is not LPF. Both decoders used
+comp=0 with matching MVs (236,0)/(90,-1) and matching emulated inputs at
+x=21 y=-1, so the ALTREF chroma error is in single-reference reconstruction /
+ITXFM coefficient handling, NOT the 8-bit compound path.
+
+Next round should target invisible ALTREF single-reference chroma reconstruction,
+not compound averaging. No patch, gates not run, tree clean.
