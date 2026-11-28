@@ -23,7 +23,7 @@ See [STATUS.md](STATUS.md) for a one-page snapshot of the current measured state
 
 ## Quick start
 
-Requires Rust 1.89+ (the repo pins stable with rustfmt and clippy). `nasm` is needed for the `rav1d` assembly. System `ffmpeg` is needed only for conformance checks.
+Requires Rust 1.95+ (the repo pins stable with rustfmt and clippy). `nasm` is needed for the `rav1d` assembly. System `ffmpeg` is needed only for conformance checks.
 
 ```bash
 git clone https://github.com/hakergeniusz/wedeo.git
