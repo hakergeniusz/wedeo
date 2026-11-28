@@ -490,3 +490,19 @@ Added `sub8x8_chroma_mc_440` with vertical-MV averaging and per-half prediction,
 and corrected the compound average region to 8x4. Verified `yuv440` all 10
 frames byte-exact on Y/U/V; VP9 sweep 215/226 -> 216/226 with only `resize`
 and `yuv422` remaining. Full workspace tests pass.
+
+## Stage 4 partial: u16 loop filter (commit dd63189, 2026-11-28)
+
+`loopfilter.rs` now has a `LpfSample` trait over u8/u16, `clip_u16`, and
+bit-depth-scaled E/I/H and flatness thresholds (`1 << (bit_depth-8)`), following
+FFmpeg `vp9dsp_template.c`. Eight new tests use golden values from a C reference
+copy of the FFmpeg kernel (the first version misused `av_clip_intp2_c`; after
+correcting it all matched). Eight-bit path is byte-identical; VP9 sweep stayed
+215/226 at integration time (216/226 after the 4:4:0 sub-8x8 fix).
+
+The 8-bit gate was temporarily removed as an experiment and REVERTED: 0/8
+high-depth vectors were exact, 5 had wrong first-frame CRC and 3 errored out.
+Root cause: `recon.rs` and `mc::inter_pred` still pass `Plane`'s byte view to
+the u16 kernels, and the emulation edge buffers are still `u8`, so high-depth
+samples get truncated. Next step: wire the `Plane::U16` variant through
+reconstruction and MC before removing the gate.
