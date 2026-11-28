@@ -1752,6 +1752,7 @@ fn decode_coeffs(
                 &mut txb,
                 n_coef_y,
                 is_tx32,
+                hdr.bit_depth,
                 p,
                 nnz,
                 scan,
@@ -1820,6 +1821,7 @@ fn decode_coeffs(
                     &mut txb,
                     n_coef_uv,
                     is_tx32_uv,
+                    hdr.bit_depth,
                     p_uv,
                     nnz,
                     scan_uv,
@@ -1947,6 +1949,7 @@ fn decode_coeffs_block(
     coef: &mut [i32],
     n_coeffs: usize,
     is_tx32x32: bool,
+    bit_depth: u8,
     p: &[[[u8; 3]; 6]; 6], // [band][ctx][3]
     nnz: usize,
     scan: &[i16],
@@ -2119,8 +2122,14 @@ fn decode_coeffs_block(
         };
 
         if rc < coef.len() {
-            // FFmpeg stores coefficients as int16_t for 8bpp, truncating to 16 bits.
-            coef[rc] = dequant as i16 as i32;
+            // FFmpeg's decode_coeffs_b_generic stores 8-bit coefficients into
+            // int16_t[n], but high-depth coefficients into int32_t[n] via
+            // AV_WN32A. Only the 8-bit path truncates to 16 bits.
+            coef[rc] = if bit_depth == 8 {
+                dequant as i16 as i32
+            } else {
+                dequant
+            };
         }
 
         // Update NNZ neighbour context.
