@@ -24,7 +24,7 @@
 - [x] **AV1 decoder via rav1d** — `adapters/wedeo-rav1d/` wraps rav1d behind wedeo `Decoder` trait.
 - [x] **Video player with audio** — `bins/wedeo-play/` has full A/V playback: wgpu+winit GPU rendering, cpal audio output, ffplay-style A/V sync (pts_drift audio clock), resampling via wedeo-resample, 5.1→stereo downmix, volume control, pause. Supports H.264/AV1 video + symphonia audio codecs.
   - [ ] Seek — removed (was buggy), needs proper reimplementation with ffplay serial mechanism
-- [x] **VP9 decoder** — native Rust, IVF/WebM demuxer, bool decoder, intra/inter prediction, IDCT, loop filter. ~5K lines across 12 modules.
+- [x] **VP9 decoder** — native Rust, IVF/WebM demuxer, bool decoder, intra/inter prediction, IDCT, loop filter. ~21K lines across 19 modules.
   - [x] VP9 inter prediction — MV parsing/prediction (spatial+temporal), 8-tap subpel MC, compound prediction, reference frame management. 21 bugs fixed 2026-04-03.
   - [x] VP9 keyframe pixel conformance — 64/64 standard-size keyframes match FFmpeg bit-for-bit
   - [x] VP9 inter-frame bool decoder parity — symbol counts verified identical to FFmpeg (927 blocks). 4 bugs fixed: mode ctx indexing (1-per-8×8 vs 2-per-8×8), end_x_y edge clamping, MV clamping bounds, MC emu_edge offset (2026-04-05).
@@ -32,7 +32,7 @@
   - [x] VP9 odd-size OOB panics — the 74 historical `intra_pred.rs` panics no longer reproduce; odd-size vectors decode with correct geometry.
   - [ ] VP9 probability adaptation — `adapt_probs` not yet wired up after each frame decode
   - [ ] VP9 scaled prediction — silently skipped when ref/current dimensions differ
-  - [ ] VP9 10/12-bit support - stage 1 complete at commit `61398bf`: FFmpeg-numbered pixel formats, output format selection and 4:2:2/4:4:4 chroma allocation. The 8-bit gate stays until the u16 sample path is bit-exact; staged design in `VP9_GAPS.md`.
+  - [x] VP9 10/12-bit support - the full u16 path (formats, storage, intra, IDCT, MC, loop filter, reconstruction) is in place; the cat6 extension-bit fix at `bfa97e3` made 10/12-bit 4:4:0 byte-exact and lifted parity to 222/226. Remaining work is two high-depth 4:2:2 CRC differences tracked above; design and evidence in `VP9_GAPS.md`.
   - [ ] VP9 superframe parsing
 - [x] **HEVC decoder and encoder** - `adapters/wedeo-h265-oxideav` wraps pure-Rust `oxideav-h265` (MIT): full decode and I/P/B encode registered as `hevc_oxideav`. MP4 (hvcC + length-prefixed samples) and MPEG-TS (Annex B) output verified against FFmpeg. The native HEVC port remains partial.
   - [ ] VP9 8-bit odd-size - `vp90-2-03-size-210x202.webm`: frame 0 exact, frame 1 first inter divergence at x=157, y=203 (154 vs 155). Measured with gdb: the row filter inputs q0/q1 already differ by 1 before filtering, so the loop filter is faithful and the root cause is upstream. Measured further to the initial NNZ coefficient context of a 32x32 block; see `VP9_NNZ_GAPS.md`.

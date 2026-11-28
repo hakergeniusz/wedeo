@@ -2,7 +2,7 @@
 
 Historical ground truth measured 2026-11-27 at HEAD `5e47eb4`. The root cause
 was fixed by `d7ac5ba`; see the RESOLVED section in `VP9_GAPS.md`. Current VP9
-parity is 215/226; see `STATUS.md`.
+parity is 222/226; see `STATUS.md`.
 
 ## Pre-loop-filter evidence
 
