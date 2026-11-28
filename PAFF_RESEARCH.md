@@ -1917,3 +1917,23 @@ temporary `trace!()` probes in Wedeo to pair bins at MB(1,0).
 No patch, no commit; the 18-minute cold build did not finish under parallel
 load so the remaining gates were not run. Evidence:
 `/tmp/ai-agent/mbaffcab_no_fix_evidence.md` (ephemeral).
+
+---
+
+## Appendix X: pure-PAFF CABAC now aligned (2026-11-28, no patch)
+
+After commit eb59a58 (MAP_MVS gated on FRAME_MBAFF), gdb on `Freh7_B.264`
+first bottom MB (mb_x=0, mb_y=1) and Wedeo source-level tracing agree exactly:
+mvd `[0,-5]`, predictor `[0,0]`, final MV `[0,-5]`; second partition mvd `[0,9]`,
+predictor `[0,-5]`, final MV `[0,4]`; mvd entry low=16846600 range=271 pos=4,
+state40/47/48 = 0/10/13. This resolves the divergence first seen in
+Appendix L/N. `HCAFF1_HHI` also matches: mvd [38,3]/[1,0],
+amvd0=0/38, amvd1=0/3, final MV [38,3]/[39,3].
+
+With deblocking disabled, Freh7_B frame 0 first differs at Y(16,1)
+(Wedo 232 vs FFmpeg 255); even rows only diverge from y=32, consistent with
+bottom-field errors propagating into the paired frame. Since CABAC bins,
+contexts, ref counts and MV prediction are identical, the remaining divergence
+is in reference sampling, field-view MC or field pairing - outside CABAC.
+No patch; FRext stays 44/69 with zero errors.
+Evidence: `/tmp/ai-agent/paffmvd2/evidence.md` (ephemeral).
