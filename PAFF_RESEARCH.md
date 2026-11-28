@@ -1937,3 +1937,21 @@ contexts, ref counts and MV prediction are identical, the remaining divergence
 is in reference sampling, field-view MC or field pairing - outside CABAC.
 No patch; FRext stays 44/69 with zero errors.
 Evidence: `/tmp/ai-agent/paffmvd2/evidence.md` (ephemeral).
+
+## Appendix Y: pure-PAFF intra8x8 above-left candidate (2026-11-28, no patch)
+
+At `Freh7_B.264` frame 0, the first divergent pixel Y(16,1) (Wedo 232 vs
+FFmpeg 255) lies inside bottom-field MB(1,1), which is an intra 8x8DCT MB, not
+a motion-compensated block. FFmpeg gdb at `h264_mb.c:651` reported dir=1
+(horizontal), topleft_available=0, prediction sum 12896 and first row 242 x8.
+Wedeo source-level tracing at the same MB gave prediction sum 12648, i.e. 248
+lower = 8 x 31, consistent with `fl[0]` being filtered using a fallback
+top_left=128 instead of left[0].
+
+Candidate cause: in `decode_intra8x8`, pure PAFF (`mb_field=true`,
+`is_mbaff=false`) still uses frame row `mb_y-1` for above-left/top-right
+availability instead of the field row `mb_y-2` that FFmpeg uses. Commit 1f5a1fb
+already fixed the analogous MBAFF case. A one-line gate was staged but never
+built or verified because the shared build slot was saturated; it was reverted
+as instructed. Next round: build and gate this exact change. Evidence:
+`/tmp/ai-agent/` PAFF fieldmc logs (ephemeral).
