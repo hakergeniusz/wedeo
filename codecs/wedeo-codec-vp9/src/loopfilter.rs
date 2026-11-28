@@ -9,6 +9,7 @@
 use crate::block::BlockInfo;
 use crate::data::BWH_TAB;
 use crate::header::FrameHeader;
+use crate::intra_pred::Sample;
 use crate::recon::FrameBuffer;
 // BlockSize/TxSize imported for doc reference but types used via as usize casts.
 
@@ -223,50 +224,121 @@ fn clip_u8(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
-/// 4-tap filter — vp9dsp_template.c:1862–1886.
+/// Clamp to the valid sample range of a high-depth plane (`av_clip_pixel`
+/// with `pixel = uint16_t` in FFmpeg's `bit_depth_template.c`).
 #[inline(always)]
-fn filter4(p1: u8, p0: u8, q0: u8, q1: u8, hev_thresh: u8) -> (u8, u8, u8, u8) {
-    let p1i = p1 as i32;
-    let p0i = p0 as i32;
-    let q0i = q0 as i32;
-    let q1i = q1 as i32;
+fn clip_u16(v: i32, bit_depth: u8) -> u16 {
+    v.clamp(0, (1i32 << bit_depth) - 1) as u16
+}
 
-    let hev = (p1i - p0i).abs() > hev_thresh as i32 || (q1i - q0i).abs() > hev_thresh as i32;
+/// Pixel-container dispatch for the loop filter kernels.
+///
+/// FFmpeg instantiates `vp9dsp_template.c` once with `pixel = uint8_t` and
+/// once per high depth with `pixel = uint16_t`. The arithmetic is identical;
+/// only the final store's clip differs.
+trait LpfSample: Sample {
+    fn clip_pixel(v: i32, bit_depth: u8) -> Self;
+}
+
+impl LpfSample for u8 {
+    #[inline(always)]
+    fn clip_pixel(v: i32, _bit_depth: u8) -> Self {
+        clip_u8(v)
+    }
+}
+
+impl LpfSample for u16 {
+    #[inline(always)]
+    fn clip_pixel(v: i32, bit_depth: u8) -> Self {
+        clip_u16(v, bit_depth)
+    }
+}
+
+/// 4-tap filter — vp9dsp_template.c:1862–1886.
+///
+/// `hev_thresh` and `bit_depth` mirror FFmpeg's `H` and `BIT_DEPTH`: the
+/// signed deltas are clipped to `intp2(BIT_DEPTH - 1)` instead of the 8-bit
+/// `[-128, 127]` range when filtering a high-depth plane.
+#[inline(always)]
+fn filter4<P: LpfSample>(p1: P, p0: P, q0: P, q1: P, hev_thresh: i32, bit_depth: u8) -> [P; 4] {
+    let p1i = p1.to_i32();
+    let p0i = p0.to_i32();
+    let q0i = q0.to_i32();
+    let q1i = q1.to_i32();
+
+    let min_f = -(1i32 << (bit_depth - 1));
+    let max_f = (1i32 << (bit_depth - 1)) - 1;
+    let clip_f = |v: i32| v.clamp(min_f, max_f);
+
+    let hev = (p1i - p0i).abs() > hev_thresh || (q1i - q0i).abs() > hev_thresh;
 
     if hev {
-        let f = (p1i - q1i).clamp(-128, 127);
-        let f = (3 * (q0i - p0i) + f).clamp(-128, 127);
-        let f1 = (f + 4).min(127) >> 3;
-        let f2 = (f + 3).min(127) >> 3;
-        (p1, clip_u8(p0i + f2), clip_u8(q0i - f1), q1)
+        let f = clip_f(p1i - q1i);
+        let f = clip_f(3 * (q0i - p0i) + f);
+        let f1 = (f + 4).min(max_f) >> 3;
+        let f2 = (f + 3).min(max_f) >> 3;
+        [
+            p1,
+            P::clip_pixel(p0i + f2, bit_depth),
+            P::clip_pixel(q0i - f1, bit_depth),
+            q1,
+        ]
     } else {
-        let f = (3 * (q0i - p0i)).clamp(-128, 127);
-        let f1 = (f + 4).min(127) >> 3;
-        let f2 = (f + 3).min(127) >> 3;
+        let f = clip_f(3 * (q0i - p0i));
+        let f1 = (f + 4).min(max_f) >> 3;
+        let f2 = (f + 3).min(max_f) >> 3;
         let f3 = (f1 + 1) >> 1;
-        (
-            clip_u8(p1i + f3),
-            clip_u8(p0i + f2),
-            clip_u8(q0i - f1),
-            clip_u8(q1i - f3),
-        )
+        [
+            P::clip_pixel(p1i + f3, bit_depth),
+            P::clip_pixel(p0i + f2, bit_depth),
+            P::clip_pixel(q0i - f1, bit_depth),
+            P::clip_pixel(q1i - f3, bit_depth),
+        ]
     }
 }
 
 /// 8-tap filter — vp9dsp_template.c:1856–1861.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn filter8(p3: u8, p2: u8, p1: u8, p0: u8, q0: u8, q1: u8, q2: u8, q3: u8) -> [u8; 8] {
-    let p = [p0 as i32, p1 as i32, p2 as i32, p3 as i32];
-    let q = [q0 as i32, q1 as i32, q2 as i32, q3 as i32];
+fn filter8<P: LpfSample>(
+    p3: P,
+    p2: P,
+    p1: P,
+    p0: P,
+    q0: P,
+    q1: P,
+    q2: P,
+    q3: P,
+    bit_depth: u8,
+) -> [P; 8] {
+    let p = [p0.to_i32(), p1.to_i32(), p2.to_i32(), p3.to_i32()];
+    let q = [q0.to_i32(), q1.to_i32(), q2.to_i32(), q3.to_i32()];
     [
         p3,
-        clip_u8((p[3] + p[3] + p[3] + 2 * p[2] + p[1] + p[0] + q[0] + 4) >> 3),
-        clip_u8((p[3] + p[3] + p[2] + 2 * p[1] + p[0] + q[0] + q[1] + 4) >> 3),
-        clip_u8((p[3] + p[2] + p[1] + 2 * p[0] + q[0] + q[1] + q[2] + 4) >> 3),
-        clip_u8((p[2] + p[1] + p[0] + 2 * q[0] + q[1] + q[2] + q[3] + 4) >> 3),
-        clip_u8((p[1] + p[0] + q[0] + 2 * q[1] + q[2] + q[3] + q[3] + 4) >> 3),
-        clip_u8((p[0] + q[0] + q[1] + 2 * q[2] + q[3] + q[3] + q[3] + 4) >> 3),
+        P::clip_pixel(
+            (p[3] + p[3] + p[3] + 2 * p[2] + p[1] + p[0] + q[0] + 4) >> 3,
+            bit_depth,
+        ),
+        P::clip_pixel(
+            (p[3] + p[3] + p[2] + 2 * p[1] + p[0] + q[0] + q[1] + 4) >> 3,
+            bit_depth,
+        ),
+        P::clip_pixel(
+            (p[3] + p[2] + p[1] + 2 * p[0] + q[0] + q[1] + q[2] + 4) >> 3,
+            bit_depth,
+        ),
+        P::clip_pixel(
+            (p[2] + p[1] + p[0] + 2 * q[0] + q[1] + q[2] + q[3] + 4) >> 3,
+            bit_depth,
+        ),
+        P::clip_pixel(
+            (p[1] + p[0] + q[0] + 2 * q[1] + q[2] + q[3] + q[3] + 4) >> 3,
+            bit_depth,
+        ),
+        P::clip_pixel(
+            (p[0] + q[0] + q[1] + 2 * q[2] + q[3] + q[3] + q[3] + 4) >> 3,
+            bit_depth,
+        ),
         q3,
     ]
 }
@@ -274,37 +346,56 @@ fn filter8(p3: u8, p2: u8, p1: u8, p0: u8, q0: u8, q1: u8, q2: u8, q3: u8) -> [u
 /// 16-tap filter — vp9dsp_template.c:1827–1854.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn filter16(
-    p7: u8,
-    p6: u8,
-    p5: u8,
-    p4: u8,
-    p3: u8,
-    p2: u8,
-    p1: u8,
-    p0: u8,
-    q0: u8,
-    q1: u8,
-    q2: u8,
-    q3: u8,
-    q4: u8,
-    q5: u8,
-    q6: u8,
-    q7: u8,
-) -> [u8; 16] {
+fn filter16<P: LpfSample>(
+    p7: P,
+    p6: P,
+    p5: P,
+    p4: P,
+    p3: P,
+    p2: P,
+    p1: P,
+    p0: P,
+    q0: P,
+    q1: P,
+    q2: P,
+    q3: P,
+    q4: P,
+    q5: P,
+    q6: P,
+    q7: P,
+    bit_depth: u8,
+) -> [P; 16] {
     let p = [
-        p0 as i32, p1 as i32, p2 as i32, p3 as i32, p4 as i32, p5 as i32, p6 as i32, p7 as i32,
+        p0.to_i32(),
+        p1.to_i32(),
+        p2.to_i32(),
+        p3.to_i32(),
+        p4.to_i32(),
+        p5.to_i32(),
+        p6.to_i32(),
+        p7.to_i32(),
     ];
     let q = [
-        q0 as i32, q1 as i32, q2 as i32, q3 as i32, q4 as i32, q5 as i32, q6 as i32, q7 as i32,
+        q0.to_i32(),
+        q1.to_i32(),
+        q2.to_i32(),
+        q3.to_i32(),
+        q4.to_i32(),
+        q5.to_i32(),
+        q6.to_i32(),
+        q7.to_i32(),
     ];
     [
         p7,
-        clip_u8((p[7] * 7 + p[6] * 2 + p[5] + p[4] + p[3] + p[2] + p[1] + p[0] + q[0] + 8) >> 4),
-        clip_u8(
-            (p[7] * 6 + p[6] + p[5] * 2 + p[4] + p[3] + p[2] + p[1] + p[0] + q[0] + q[1] + 8) >> 4,
+        P::clip_pixel(
+            (p[7] * 7 + p[6] * 2 + p[5] + p[4] + p[3] + p[2] + p[1] + p[0] + q[0] + 8) >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
+            (p[7] * 6 + p[6] + p[5] * 2 + p[4] + p[3] + p[2] + p[1] + p[0] + q[0] + q[1] + 8) >> 4,
+            bit_depth,
+        ),
+        P::clip_pixel(
             (p[7] * 5
                 + p[6]
                 + p[5]
@@ -318,8 +409,9 @@ fn filter16(
                 + q[2]
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[7] * 4
                 + p[6]
                 + p[5]
@@ -334,8 +426,9 @@ fn filter16(
                 + q[3]
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[7] * 3
                 + p[6]
                 + p[5]
@@ -351,8 +444,9 @@ fn filter16(
                 + q[4]
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[7] * 2
                 + p[6]
                 + p[5]
@@ -369,8 +463,9 @@ fn filter16(
                 + q[5]
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[7]
                 + p[6]
                 + p[5]
@@ -388,8 +483,9 @@ fn filter16(
                 + q[6]
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[6]
                 + p[5]
                 + p[4]
@@ -407,8 +503,9 @@ fn filter16(
                 + q[7]
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[5]
                 + p[4]
                 + p[3]
@@ -425,8 +522,9 @@ fn filter16(
                 + q[7] * 2
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[4]
                 + p[3]
                 + p[2]
@@ -442,8 +540,9 @@ fn filter16(
                 + q[7] * 3
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[3]
                 + p[2]
                 + p[1]
@@ -458,8 +557,9 @@ fn filter16(
                 + q[7] * 4
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[2]
                 + p[1]
                 + p[0]
@@ -473,11 +573,16 @@ fn filter16(
                 + q[7] * 5
                 + 8)
                 >> 4,
+            bit_depth,
         ),
-        clip_u8(
+        P::clip_pixel(
             (p[1] + p[0] + q[0] + q[1] + q[2] + q[3] + q[4] + q[5] * 2 + q[6] + q[7] * 6 + 8) >> 4,
+            bit_depth,
         ),
-        clip_u8((p[0] + q[0] + q[1] + q[2] + q[3] + q[4] + q[5] + q[6] * 2 + q[7] * 7 + 8) >> 4),
+        P::clip_pixel(
+            (p[0] + q[0] + q[1] + q[2] + q[3] + q[4] + q[5] + q[6] * 2 + q[7] * 7 + 8) >> 4,
+            bit_depth,
+        ),
         q7,
     ]
 }
@@ -509,13 +614,23 @@ fn needs_filter(
 /// Flat8in check — vp9dsp_template.c:1821–1824.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn is_flat8in(p3: i32, p2: i32, p1: i32, p0: i32, q0: i32, q1: i32, q2: i32, q3: i32) -> bool {
-    (p1 - p0).abs() <= 1
-        && (q1 - q0).abs() <= 1
-        && (p2 - p0).abs() <= 1
-        && (q2 - q0).abs() <= 1
-        && (p3 - p0).abs() <= 1
-        && (q3 - q0).abs() <= 1
+fn is_flat8in(
+    p3: i32,
+    p2: i32,
+    p1: i32,
+    p0: i32,
+    q0: i32,
+    q1: i32,
+    q2: i32,
+    q3: i32,
+    flat_limit: i32,
+) -> bool {
+    (p1 - p0).abs() <= flat_limit
+        && (q1 - q0).abs() <= flat_limit
+        && (p2 - p0).abs() <= flat_limit
+        && (q2 - q0).abs() <= flat_limit
+        && (p3 - p0).abs() <= flat_limit
+        && (q3 - q0).abs() <= flat_limit
 }
 
 /// Flat8out check — vp9dsp_template.c:1815–1818.
@@ -532,15 +647,16 @@ fn is_flat8out(
     q5: i32,
     q6: i32,
     q7: i32,
+    flat_limit: i32,
 ) -> bool {
-    (p7 - p0).abs() <= 1
-        && (p6 - p0).abs() <= 1
-        && (p5 - p0).abs() <= 1
-        && (p4 - p0).abs() <= 1
-        && (q4 - q0).abs() <= 1
-        && (q5 - q0).abs() <= 1
-        && (q6 - q0).abs() <= 1
-        && (q7 - q0).abs() <= 1
+    (p7 - p0).abs() <= flat_limit
+        && (p6 - p0).abs() <= flat_limit
+        && (p5 - p0).abs() <= flat_limit
+        && (p4 - p0).abs() <= flat_limit
+        && (q4 - q0).abs() <= flat_limit
+        && (q5 - q0).abs() <= flat_limit
+        && (q6 - q0).abs() <= flat_limit
+        && (q7 - q0).abs() <= flat_limit
 }
 
 // ---------------------------------------------------------------------------
@@ -553,9 +669,14 @@ fn is_flat8out(
 // ---------------------------------------------------------------------------
 
 /// Apply the unified VP9 loop filter for one 8-pixel edge.
+///
+/// `e_val`, `i_val` and `h_val` are the unscaled LUT values from FFmpeg's
+/// `filter_lut`. `loop_filter()` in `vp9dsp_template.c` shifts all three by
+/// `BIT_DEPTH - 8` before comparing them against high-depth samples; the
+/// flatness limit `F` is scaled by the same amount.
 #[allow(clippy::too_many_arguments)]
-fn loop_filter_edge(
-    dst: &mut [u8],
+fn loop_filter_edge_impl<P: LpfSample>(
+    dst: &mut [P],
     offset: usize,
     stridea: usize, // along the edge (iterate 8 pixels)
     strideb: isize, // perpendicular (into p/q sides)
@@ -563,7 +684,15 @@ fn loop_filter_edge(
     i_val: i32,
     h_val: i32,
     wd: usize,
+    bit_depth: u8,
 ) {
+    debug_assert!(bit_depth >= 8);
+    let shift = bit_depth - 8;
+    let e_val = e_val << shift;
+    let i_val = i_val << shift;
+    let h_val = h_val << shift;
+    let flat_limit = 1i32 << shift;
+
     let dst_len = dst.len();
     for i in 0..8 {
         let base = offset + i * stridea;
@@ -574,7 +703,7 @@ fn loop_filter_edge(
         if min_idx < 0 || max_idx as usize >= dst_len {
             continue;
         }
-        let at = |off: isize| -> i32 { dst[(base as isize + off * strideb) as usize] as i32 };
+        let at = |off: isize| -> i32 { dst[(base as isize + off * strideb) as usize].to_i32() };
 
         let p3 = at(-4);
         let p2 = at(-3);
@@ -590,7 +719,7 @@ fn loop_filter_edge(
         }
 
         let flat8in = if wd >= 8 {
-            is_flat8in(p3, p2, p1, p0, q0, q1, q2, q3)
+            is_flat8in(p3, p2, p1, p0, q0, q1, q2, q3, flat_limit)
         } else {
             false
         };
@@ -613,10 +742,25 @@ fn loop_filter_edge(
             let q5 = at(5);
             let q6 = at(6);
             let q7 = at(7);
-            if is_flat8out(p7, p6, p5, p4, p0, q0, q4, q5, q6, q7) {
+            if is_flat8out(p7, p6, p5, p4, p0, q0, q4, q5, q6, q7, flat_limit) {
                 let r = filter16(
-                    p7 as u8, p6 as u8, p5 as u8, p4 as u8, p3 as u8, p2 as u8, p1 as u8, p0 as u8,
-                    q0 as u8, q1 as u8, q2 as u8, q3 as u8, q4 as u8, q5 as u8, q6 as u8, q7 as u8,
+                    P::from_i32(p7),
+                    P::from_i32(p6),
+                    P::from_i32(p5),
+                    P::from_i32(p4),
+                    P::from_i32(p3),
+                    P::from_i32(p2),
+                    P::from_i32(p1),
+                    P::from_i32(p0),
+                    P::from_i32(q0),
+                    P::from_i32(q1),
+                    P::from_i32(q2),
+                    P::from_i32(q3),
+                    P::from_i32(q4),
+                    P::from_i32(q5),
+                    P::from_i32(q6),
+                    P::from_i32(q7),
+                    bit_depth,
                 );
                 // Write p6..p1, p0, q0, q1..q6
                 // r[0]=p7 (unchanged), r[15]=q7 (unchanged)
@@ -644,7 +788,15 @@ fn loop_filter_edge(
 
         if wd >= 8 && flat8in {
             let r = filter8(
-                p3 as u8, p2 as u8, p1 as u8, p0 as u8, q0 as u8, q1 as u8, q2 as u8, q3 as u8,
+                P::from_i32(p3),
+                P::from_i32(p2),
+                P::from_i32(p1),
+                P::from_i32(p0),
+                P::from_i32(q0),
+                P::from_i32(q1),
+                P::from_i32(q2),
+                P::from_i32(q3),
+                bit_depth,
             );
             for (off, val) in [
                 (-3isize, r[1]),
@@ -657,8 +809,15 @@ fn loop_filter_edge(
                 dst[(base as isize + off * strideb) as usize] = val;
             }
         } else {
-            let (np1, np0, nq0, nq1) = filter4(p1 as u8, p0 as u8, q0 as u8, q1 as u8, h_val as u8);
-            for (off, val) in [(-2isize, np1), (-1, np0), (0, nq0), (1, nq1)] {
+            let r = filter4(
+                P::from_i32(p1),
+                P::from_i32(p0),
+                P::from_i32(q0),
+                P::from_i32(q1),
+                h_val,
+                bit_depth,
+            );
+            for (off, val) in [(-2isize, r[0]), (-1, r[1]), (0, r[2]), (1, r[3])] {
                 dst[(base as isize + off * strideb) as usize] = val;
             }
         }
@@ -674,8 +833,8 @@ fn loop_filter_edge(
 /// Simplified version: no mix2 batching — each stacked pair is filtered
 /// as two separate 8-pixel calls.  Produces identical results, just slower.
 #[allow(clippy::too_many_arguments)]
-fn filter_plane_cols(
-    plane: &mut [u8],
+fn filter_plane_cols<P: LpfSample>(
+    plane: &mut [P],
     plane_off: usize,
     stride: usize,
     sb_col: usize,
@@ -685,7 +844,13 @@ fn filter_plane_cols(
     mask: &[[u8; 4]; 8],
     lim_lut: &[u8; 64],
     mblim_lut: &[u8; 64],
+    bit_depth: u8,
 ) {
+    // FFmpeg's `loop_filter()` receives the bit depth from the DSP instance;
+    // keep it in one place so every edge call scales E/I/H identically.
+    let lfe = |dst: &mut [P], offset, stridea, strideb, e, i, h, wd| {
+        loop_filter_edge_impl(dst, offset, stridea, strideb, e, i, h, wd, bit_depth);
+    };
     // lvl_idx walks through level[64] with stride 8, stepping 2 rows per
     // outer iteration for luma (ss_v=0) or 4 rows for chroma (ss_v=1).
     let mut lvl_idx: usize = 0; // index into level[]
@@ -717,43 +882,25 @@ fn filter_plane_cols(
                     if hmask1[0] & x as u8 != 0 {
                         if hmask2[0] & x as u8 != 0 {
                             // 16-tap: two stacked 8-pixel edges (lf_16_fn with stridea=stride)
-                            loop_filter_edge(plane, ptr, stride, 1, e, ii, h as i32, 16);
-                            loop_filter_edge(
-                                plane,
-                                ptr + 8 * stride,
-                                stride,
-                                1,
-                                e,
-                                ii,
-                                h as i32,
-                                16,
-                            );
+                            lfe(plane, ptr, stride, 1, e, ii, h as i32, 16);
+                            lfe(plane, ptr + 8 * stride, stride, 1, e, ii, h as i32, 16);
                         } else {
                             // FFmpeg: dsp.loop_filter_8[2][0] == loop_filter_h_16_8_c,
                             // i.e. one 16-tap-wide edge (mask class 0).
-                            loop_filter_edge(plane, ptr, stride, 1, e, ii, h as i32, 16);
+                            lfe(plane, ptr, stride, 1, e, ii, h as i32, 16);
                         }
                     } else if hm2 & x as u8 != 0 {
                         let wd1 = if hmask1[1] & x as u8 != 0 { 8 } else { 4 };
-                        loop_filter_edge(plane, ptr, stride, 1, e, ii, h as i32, wd1);
+                        lfe(plane, ptr, stride, 1, e, ii, h as i32, wd1);
                         let l2 = level[(l_idx + (8 << ss_v)).min(63)] as usize;
                         let h2 = l2 >> 4;
                         let e2 = mblim_lut[l2] as i32;
                         let i2 = lim_lut[l2] as i32;
                         let wd2 = if hmask2[1] & x as u8 != 0 { 8 } else { 4 };
-                        loop_filter_edge(
-                            plane,
-                            ptr + 8 * stride,
-                            stride,
-                            1,
-                            e2,
-                            i2,
-                            h2 as i32,
-                            wd2,
-                        );
+                        lfe(plane, ptr + 8 * stride, stride, 1, e2, i2, h2 as i32, wd2);
                     } else {
                         let wd = if hmask1[1] & x as u8 != 0 { 8 } else { 4 };
-                        loop_filter_edge(plane, ptr, stride, 1, e, ii, h as i32, wd);
+                        lfe(plane, ptr, stride, 1, e, ii, h as i32, wd);
                     }
                 } else if hm2 & x as u8 != 0 {
                     let l2 = level[(l_idx + (8 << ss_v)).min(63)] as usize;
@@ -761,7 +908,7 @@ fn filter_plane_cols(
                     let e = mblim_lut[l2] as i32;
                     let ii = lim_lut[l2] as i32;
                     let wd = if hmask2[1] & x as u8 != 0 { 8 } else { 4 };
-                    loop_filter_edge(plane, ptr + 8 * stride, stride, 1, e, ii, h as i32, wd);
+                    lfe(plane, ptr + 8 * stride, stride, 1, e, ii, h as i32, wd);
                 }
             }
 
@@ -780,30 +927,21 @@ fn filter_plane_cols(
                     let ii = lim_lut[l] as i32;
 
                     if hm23 & x as u8 != 0 {
-                        loop_filter_edge(plane, ptr + 4, stride, 1, e, ii, h as i32, 4);
+                        lfe(plane, ptr + 4, stride, 1, e, ii, h as i32, 4);
                         let l2 = level[(l_idx + (8 << ss_v)).min(63)] as usize;
                         let h2 = l2 >> 4;
                         let e2 = mblim_lut[l2] as i32;
                         let i2 = lim_lut[l2] as i32;
-                        loop_filter_edge(
-                            plane,
-                            ptr + 4 + 8 * stride,
-                            stride,
-                            1,
-                            e2,
-                            i2,
-                            h2 as i32,
-                            4,
-                        );
+                        lfe(plane, ptr + 4 + 8 * stride, stride, 1, e2, i2, h2 as i32, 4);
                     } else {
-                        loop_filter_edge(plane, ptr + 4, stride, 1, e, ii, h as i32, 4);
+                        lfe(plane, ptr + 4, stride, 1, e, ii, h as i32, 4);
                     }
                 } else if hm23 & x as u8 != 0 {
                     let l2 = level[(l_idx + (8 << ss_v)).min(63)] as usize;
                     let h = l2 >> 4;
                     let e = mblim_lut[l2] as i32;
                     let ii = lim_lut[l2] as i32;
-                    loop_filter_edge(plane, ptr + 4 + 8 * stride, stride, 1, e, ii, h as i32, 4);
+                    lfe(plane, ptr + 4 + 8 * stride, stride, 1, e, ii, h as i32, 4);
                 }
                 l_idx += 1;
             }
@@ -824,8 +962,8 @@ fn filter_plane_cols(
 /// Filter horizontal (row) edges for one plane within one superblock.
 // Index-based loop preserves 1-to-1 correspondence with FFmpeg's filter_plane_rows.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
-fn filter_plane_rows(
-    plane: &mut [u8],
+fn filter_plane_rows<P: LpfSample>(
+    plane: &mut [P],
     plane_off: usize,
     stride: usize,
     sb_row: usize,
@@ -835,7 +973,11 @@ fn filter_plane_rows(
     mask: &[[u8; 4]; 8],
     lim_lut: &[u8; 64],
     mblim_lut: &[u8; 64],
+    bit_depth: u8,
 ) {
+    let lfe = |dst: &mut [P], offset, stridea, strideb, e, i, h, wd| {
+        loop_filter_edge_impl(dst, offset, stridea, strideb, e, i, h, wd, bit_depth);
+    };
     let mut lvl_idx: usize = 0;
     let mut dst_off = plane_off;
 
@@ -861,42 +1003,24 @@ fn filter_plane_rows(
                     if vmask[0] & x as u8 != 0 {
                         if vmask[0] & x_next as u8 != 0 {
                             // 16-tap: two side-by-side 8-pixel edges (lf_16_fn with stridea=1)
-                            loop_filter_edge(plane, ptr, 1, stride as isize, e, ii, h as i32, 16);
-                            loop_filter_edge(
-                                plane,
-                                ptr + 8,
-                                1,
-                                stride as isize,
-                                e,
-                                ii,
-                                h as i32,
-                                16,
-                            );
+                            lfe(plane, ptr, 1, stride as isize, e, ii, h as i32, 16);
+                            lfe(plane, ptr + 8, 1, stride as isize, e, ii, h as i32, 16);
                         } else {
                             // FFmpeg: dsp.loop_filter_8[2][1] == loop_filter_v_16_8_c.
-                            loop_filter_edge(plane, ptr, 1, stride as isize, e, ii, h as i32, 16);
+                            lfe(plane, ptr, 1, stride as isize, e, ii, h as i32, 16);
                         }
                     } else if vm & x_next as u8 != 0 {
                         let wd1 = if vmask[1] & x as u8 != 0 { 8 } else { 4 };
-                        loop_filter_edge(plane, ptr, 1, stride as isize, e, ii, h as i32, wd1);
+                        lfe(plane, ptr, 1, stride as isize, e, ii, h as i32, wd1);
                         let l2 = level[(l_idx + 1 + ss_h).min(63)] as usize;
                         let h2 = l2 >> 4;
                         let e2 = mblim_lut[l2] as i32;
                         let i2 = lim_lut[l2] as i32;
                         let wd2 = if vmask[1] & x_next as u8 != 0 { 8 } else { 4 };
-                        loop_filter_edge(
-                            plane,
-                            ptr + 8,
-                            1,
-                            stride as isize,
-                            e2,
-                            i2,
-                            h2 as i32,
-                            wd2,
-                        );
+                        lfe(plane, ptr + 8, 1, stride as isize, e2, i2, h2 as i32, wd2);
                     } else {
                         let wd = if vmask[1] & x as u8 != 0 { 8 } else { 4 };
-                        loop_filter_edge(plane, ptr, 1, stride as isize, e, ii, h as i32, wd);
+                        lfe(plane, ptr, 1, stride as isize, e, ii, h as i32, wd);
                     }
                 } else if vm & x_next as u8 != 0 {
                     let l2 = level[(l_idx + 1 + ss_h).min(63)] as usize;
@@ -904,7 +1028,7 @@ fn filter_plane_rows(
                     let e = mblim_lut[l2] as i32;
                     let ii = lim_lut[l2] as i32;
                     let wd = if vmask[1] & x_next as u8 != 0 { 8 } else { 4 };
-                    loop_filter_edge(plane, ptr + 8, 1, stride as isize, e, ii, h as i32, wd);
+                    lfe(plane, ptr + 8, 1, stride as isize, e, ii, h as i32, wd);
                 }
             }
 
@@ -918,7 +1042,7 @@ fn filter_plane_rows(
                     let ii = lim_lut[l] as i32;
 
                     if vm3 & x_next as u8 != 0 {
-                        loop_filter_edge(
+                        lfe(
                             plane,
                             ptr + stride * 4,
                             1,
@@ -932,7 +1056,7 @@ fn filter_plane_rows(
                         let h2 = l2 >> 4;
                         let e2 = mblim_lut[l2] as i32;
                         let i2 = lim_lut[l2] as i32;
-                        loop_filter_edge(
+                        lfe(
                             plane,
                             ptr + stride * 4 + 8,
                             1,
@@ -943,7 +1067,7 @@ fn filter_plane_rows(
                             4,
                         );
                     } else {
-                        loop_filter_edge(
+                        lfe(
                             plane,
                             ptr + stride * 4,
                             1,
@@ -959,7 +1083,7 @@ fn filter_plane_rows(
                     let h = l2 >> 4;
                     let e = mblim_lut[l2] as i32;
                     let ii = lim_lut[l2] as i32;
-                    loop_filter_edge(
+                    lfe(
                         plane,
                         ptr + stride * 4 + 8,
                         1,
@@ -999,18 +1123,26 @@ fn filter_plane_rows(
 /// Two-phase, per-superblock approach matching FFmpeg's architecture:
 /// 1. Build per-SB filter masks from block info
 /// 2. Apply column then row filters using the masks
-pub fn loop_filter_frame(fb: &mut FrameBuffer, blocks: &[BlockInfo], header: &FrameHeader) {
+fn loop_filter_frame_impl<P: LpfSample>(
+    y: &mut [P],
+    u: &mut [P],
+    v: &mut [P],
+    dims: &LpfFrameParams,
+    header: &FrameHeader,
+    blocks: &[BlockInfo],
+) {
     if header.filter_level == 0 {
         return;
     }
 
+    let bit_depth = dims.bit_depth;
     let ss_h = usize::from(header.subsampling_x);
     let ss_v = usize::from(header.subsampling_y);
 
-    let width = fb.width as usize;
-    let height = fb.height as usize;
-    let y_stride = fb.y_stride;
-    let uv_stride = fb.uv_stride;
+    let width = dims.width;
+    let height = dims.height;
+    let y_stride = dims.y_stride;
+    let uv_stride = dims.uv_stride;
 
     // FFmpeg: cols = (w + 7) >> 3, rows = (h + 7) >> 3 (in 8-pixel units)
     let cols8 = (width + 7) >> 3;
@@ -1130,7 +1262,7 @@ pub fn loop_filter_frame(fb: &mut FrameBuffer, blocks: &[BlockInfo], header: &Fr
 
             // Luma: col edges, then row edges.
             filter_plane_cols(
-                &mut fb.y,
+                y,
                 yoff,
                 y_stride,
                 sb_col,
@@ -1140,9 +1272,10 @@ pub fn loop_filter_frame(fb: &mut FrameBuffer, blocks: &[BlockInfo], header: &Fr
                 &lflvl.mask[0][0],
                 &lim_lut,
                 &mblim_lut,
+                bit_depth,
             );
             filter_plane_rows(
-                &mut fb.y,
+                y,
                 yoff,
                 y_stride,
                 sb_row,
@@ -1152,12 +1285,13 @@ pub fn loop_filter_frame(fb: &mut FrameBuffer, blocks: &[BlockInfo], header: &Fr
                 &lflvl.mask[0][1],
                 &lim_lut,
                 &mblim_lut,
+                bit_depth,
             );
 
             // Chroma.
             let uv_mask = &lflvl.mask[usize::from(ss_h != 0 || ss_v != 0)];
             filter_plane_cols(
-                &mut fb.u,
+                u,
                 uvoff,
                 uv_stride,
                 sb_col,
@@ -1167,9 +1301,10 @@ pub fn loop_filter_frame(fb: &mut FrameBuffer, blocks: &[BlockInfo], header: &Fr
                 &uv_mask[0],
                 &lim_lut,
                 &mblim_lut,
+                bit_depth,
             );
             filter_plane_rows(
-                &mut fb.u,
+                u,
                 uvoff,
                 uv_stride,
                 sb_row,
@@ -1179,9 +1314,10 @@ pub fn loop_filter_frame(fb: &mut FrameBuffer, blocks: &[BlockInfo], header: &Fr
                 &uv_mask[1],
                 &lim_lut,
                 &mblim_lut,
+                bit_depth,
             );
             filter_plane_cols(
-                &mut fb.v,
+                v,
                 uvoff,
                 uv_stride,
                 sb_col,
@@ -1191,9 +1327,10 @@ pub fn loop_filter_frame(fb: &mut FrameBuffer, blocks: &[BlockInfo], header: &Fr
                 &uv_mask[0],
                 &lim_lut,
                 &mblim_lut,
+                bit_depth,
             );
             filter_plane_rows(
-                &mut fb.v,
+                v,
                 uvoff,
                 uv_stride,
                 sb_row,
@@ -1203,7 +1340,243 @@ pub fn loop_filter_frame(fb: &mut FrameBuffer, blocks: &[BlockInfo], header: &Fr
                 &uv_mask[1],
                 &lim_lut,
                 &mblim_lut,
+                bit_depth,
             );
         }
+    }
+}
+
+/// Geometry and pixel width copied out of `FrameBuffer` so its three planes
+/// can be mutably borrowed at the same time.
+struct LpfFrameParams {
+    width: usize,
+    height: usize,
+    y_stride: usize,
+    uv_stride: usize,
+    bit_depth: u8,
+}
+
+/// Apply the VP9 loop filter to all block edges in `blocks`.
+///
+/// Two-phase, per-superblock approach matching FFmpeg's architecture:
+/// 1. Build per-SB filter masks from block info
+/// 2. Apply column then row filters using the masks
+///
+/// 8-bit frames use the original `u8` kernels. High-depth frames use the
+/// same kernels on `u16` planes with FFmpeg's bit-depth-scaled thresholds.
+pub fn loop_filter_frame(fb: &mut FrameBuffer, blocks: &[BlockInfo], header: &FrameHeader) {
+    if header.filter_level == 0 {
+        return;
+    }
+
+    let dims = LpfFrameParams {
+        width: fb.width as usize,
+        height: fb.height as usize,
+        y_stride: fb.y_stride,
+        uv_stride: fb.uv_stride,
+        bit_depth: fb.bit_depth,
+    };
+
+    if dims.bit_depth == 8 {
+        loop_filter_frame_impl(
+            fb.y.as_u8_mut(),
+            fb.u.as_u8_mut(),
+            fb.v.as_u8_mut(),
+            &dims,
+            header,
+            blocks,
+        );
+    } else {
+        loop_filter_frame_impl(
+            fb.y.as_u16_mut()
+                .expect("high-depth luma plane must be u16"),
+            fb.u.as_u16_mut()
+                .expect("high-depth chroma plane must be u16"),
+            fb.v.as_u16_mut()
+                .expect("high-depth chroma plane must be u16"),
+            &dims,
+            header,
+            blocks,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run one edge case through the same code path as a decoded frame.
+    /// `input` and `expected` are ordered p7..p0, q0..q7, as in FFmpeg's
+    /// `loop_filter()` harness. Sharpness is zero for every case.
+    fn check_u16_case(
+        name: &str,
+        bit_depth: u8,
+        level: u8,
+        wd: usize,
+        input: [u16; 16],
+        expected: [u16; 16],
+    ) {
+        let (lim_lut, mblim_lut) = build_filter_luts(0);
+        let l = level as usize;
+        let mut buf = vec![0u16; 16 * 8];
+        buf[..16].copy_from_slice(&input);
+        // stridea=16 keeps each of the eight edge iterations independent,
+        // matching the C reference harness that produced the golden values.
+        loop_filter_edge_impl(
+            &mut buf,
+            8,
+            16,
+            1,
+            mblim_lut[l] as i32,
+            lim_lut[l] as i32,
+            (level >> 4) as i32,
+            wd,
+            bit_depth,
+        );
+        assert_eq!(&buf[..16], &expected, "{name}");
+    }
+
+    /// Golden values: direct copy of FFmpeg `vp9dsp_template.c:1780-1888`
+    /// instantiated as `pixel = uint16_t` at BIT_DEPTH=10/12 (the same
+    /// instance FFmpeg uses for `vp9dsp_10bpp.c` / `vp9dsp_12bpp.c`).
+    /// Reference source and harness: `/tmp/ai-agent/vp9_lpf_ref.c`.
+
+    #[test]
+    fn filter4_hev_10bit_matches_ffmpeg() {
+        check_u16_case(
+            "filter4_hev_10",
+            10,
+            50,
+            4,
+            [
+                200, 300, 400, 500, 600, 700, 760, 780, 790, 600, 500, 480, 470, 460, 450, 440,
+            ],
+            [
+                200, 300, 400, 500, 600, 700, 760, 804, 766, 600, 500, 480, 470, 460, 450, 440,
+            ],
+        );
+    }
+
+    #[test]
+    fn filter4_nonhev_10bit_matches_ffmpeg() {
+        check_u16_case(
+            "filter4_nonhev_10",
+            10,
+            40,
+            4,
+            [
+                300, 400, 500, 590, 600, 605, 610, 615, 620, 625, 630, 635, 640, 645, 650, 655,
+            ],
+            [
+                300, 400, 500, 590, 600, 605, 611, 617, 618, 624, 630, 635, 640, 645, 650, 655,
+            ],
+        );
+    }
+
+    #[test]
+    fn filter8_flat_10bit_matches_ffmpeg() {
+        check_u16_case(
+            "filter8_flat_10",
+            10,
+            30,
+            8,
+            [
+                100, 200, 300, 400, 600, 601, 602, 603, 604, 603, 602, 601, 600, 500, 400, 300,
+            ],
+            [
+                100, 200, 300, 400, 600, 601, 602, 602, 603, 602, 602, 601, 600, 500, 400, 300,
+            ],
+        );
+    }
+
+    #[test]
+    fn edge_limits_are_scaled_at_10bit() {
+        // 2*|p0-q0| = 300: above the unscaled E=124 but below E<<2=496.
+        // FFmpeg filters this edge at 10-bit; an unscaled threshold skips it.
+        let input = [
+            100, 200, 300, 500, 595, 598, 601, 600, 750, 753, 756, 759, 762, 765, 768, 771,
+        ];
+        let expected = [
+            100, 200, 300, 500, 595, 598, 629, 656, 694, 725, 756, 759, 762, 765, 768, 771,
+        ];
+        check_u16_case("threshold_scaled_10", 10, 40, 4, input, expected);
+
+        let (lim_lut, mblim_lut) = build_filter_luts(0);
+        let mut buf = vec![0u16; 16 * 8];
+        buf[..16].copy_from_slice(&input);
+        loop_filter_edge_impl(
+            &mut buf,
+            8,
+            16,
+            1,
+            mblim_lut[40] as i32,
+            lim_lut[40] as i32,
+            2,
+            4,
+            8,
+        );
+        assert_eq!(&buf[..16], &input, "unscaled thresholds must not filter");
+    }
+
+    #[test]
+    fn filter8_flat_12bit_matches_ffmpeg() {
+        check_u16_case(
+            "filter8_flat_12",
+            12,
+            36,
+            8,
+            [
+                1000, 1010, 1020, 1030, 2000, 2004, 2008, 2012, 2016, 2012, 2008, 2004, 2000, 1990,
+                1980, 1970,
+            ],
+            [
+                1000, 1010, 1020, 1030, 2000, 2006, 2008, 2009, 2010, 2010, 2009, 2004, 2000, 1990,
+                1980, 1970,
+            ],
+        );
+    }
+
+    #[test]
+    fn filter16_flat_12bit_matches_ffmpeg() {
+        check_u16_case(
+            "filter16_flat_12",
+            12,
+            48,
+            16,
+            [
+                2037, 2038, 2039, 2040, 2037, 2038, 2039, 2040, 2041, 2042, 2043, 2044, 2045, 2046,
+                2047, 2048,
+            ],
+            [
+                2037, 2038, 2038, 2039, 2039, 2040, 2040, 2041, 2042, 2042, 2043, 2044, 2044, 2045,
+                2046, 2048,
+            ],
+        );
+    }
+
+    #[test]
+    fn clip_helpers_match_av_clip_pixel() {
+        assert_eq!(clip_u8(-1), 0);
+        assert_eq!(clip_u8(256), 255);
+        assert_eq!(clip_u16(-1, 10), 0);
+        assert_eq!(clip_u16(1023, 10), 1023);
+        assert_eq!(clip_u16(1024, 10), 1023);
+        assert_eq!(clip_u16(5000, 12), 4095);
+    }
+
+    #[test]
+    fn flat_limits_scale_with_bit_depth() {
+        // FFmpeg's F is 1 in 8-bit mode, 4 at 10-bit and 16 at 12-bit.
+        assert_eq!(1i32 << (10 - 8), 4);
+        assert_eq!(1i32 << (12 - 8), 16);
+        let p = [600, 601, 602, 603];
+        let q = [604, 603, 602, 601];
+        assert!(is_flat8in(
+            p[3], p[2], p[1], p[0], q[0], q[1], q[2], q[3], 4
+        ));
     }
 }
