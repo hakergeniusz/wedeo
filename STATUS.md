@@ -77,3 +77,27 @@ Three clusters:
 
 Report: `/tmp/ai-agent/H264_FREXT_CLASSIFICATION.md` (ephemeral; 25/25 vectors
 measured, caveat: used a prebuilt binary containing all current H.264 fixes).
+
+## HEVC failure map at 18/227 (2026-11-27)
+
+Classification of all 209 failing vectors (207 CRC diffs + 2 neither-decoder
+frame vectors). Measured: frame CRCs, YUV first-diff coordinates/values, and
+FFmpeg no-loop-filter comparisons. Stage attribution is inferred from
+signatures/names/published gdb values, not Wedeo internal stage dumps.
+
+1. **Inter prediction / MV / reference propagation (77 vectors).** 74 have an
+   exact frame 0 and first differences in frames 1-4. Strongest signal: seven
+   differently named vectors (`AMVP_A_MTK_4`, `SLPPLP_A/B`, `VPSID_A/B`, ...)
+   share the identical signature `f1 Y(102,0) Wedeo 132 / FFmpeg 133`, plus
+   groups of 5 and 4 repeated signatures - likely one shared root cause.
+   Representative: `AMVP_A_MTK_4.bit`. Caveat: an exact frame 0 could also be
+   a filter that rewrote reference frames after output; needs paired gdb.
+2. **Bitstream / DPB / output format (74 vectors).** 35 Wedeo-only errors
+   (18 `Invalid data found`, 17 `Not yet implemented`), 2 neither-decoder
+   frame vectors, 36 frame-count/geometry mismatches. Representative:
+   `12bit-444-qp74.hevc` hits the 10-bit+ output gate at `decoder.rs:2205`.
+3. **Filter stage, deblock + SAO (24 vectors).** Boundary signatures with
+   +/-1 to +/-4 pixel deltas. Representative `ipcm_D_NEC_2.bit`.
+
+Important: `-skip_loop_filter all` cannot separate deblock from SAO. Report:
+`/tmp/ai-agent/HEVC_CLASSIFICATION.md` (ephemeral).
