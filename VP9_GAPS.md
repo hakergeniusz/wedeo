@@ -438,3 +438,30 @@ Full design (182 lines) in `/tmp/ai-agent/VP9_RESIZE_SCALE.md`: add a
 and odd chroma-height edge handling, wire it into framecrc and CLI, restore
 scaled MC, and debug against `-noautoscale` raw CRCs. No patch; too large for
 one 20-minute round.
+
+---
+
+## CORRECTION: vp91-2-04-yuv422 divergence is compound inter prediction (2026-11-27)
+
+The earlier "chroma loop filter" diagnosis was wrong: the matched block with
+coefficients `{62,...,-73}` and mv=(90,-1) was a frame 0 8x8 block, not the
+divergent frame 1 16x8 block.
+
+Paired values at frame 1 SB0, chroma U row0[16..19]:
+
+- FFmpeg: 101/79/75/100 both before and after chroma LPF - the LPF does not
+  change these pixels, so it is not the cause.
+- FFmpeg gdb at `vp9recon.c:646 itxfm_add`: same coefficients and eob=3,
+  pre-ITXFM prediction `[109,84,76,98]`, post-ITXFM `[101,79,75,100]`.
+- Wedeo `INTER_POST` trace: bs=16x8, pred_u0=113, coefficients
+  `[-105,0,0,0,-128,...]`, eob=3, reconstructed `[105,83,79,104]`; disabling
+  `loop_filter_frame` changed nothing.
+- The residual side matches; prediction differs: 109 vs 113.
+- FFmpeg `mc_chroma_unscaled`: x=16,y=-1,mx=11,my=14,filter=regular(1),
+  refidx=0, bw=bh=8, first predictor `[117,85,75,92]`. The +4 difference
+  likely comes from the second predictor/compound averaging.
+- Frame 0 U/V match byte-for-byte for row0..9 col8..35, so reference-frame
+  LPF writes cannot explain it.
+
+Next step: pair Wedeo's second predictor MV/filter and compound averaging
+rounding at that 16x8 block. No patch.
