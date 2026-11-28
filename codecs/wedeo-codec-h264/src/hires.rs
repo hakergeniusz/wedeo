@@ -419,12 +419,26 @@ fn decode_intra8x8_hires(
         let top = gather_top::<u16>(&ctx.pic.y16, offset, stride);
         let left = gather_left8::<u16>(&ctx.pic.y16, offset, stride, bl);
         let top_left = gather_top_left::<u16>(&ctx.pic.y16, offset, stride, bt, bl);
-        // FFmpeg's `topright_samples_available` mask (0xEEEA) marks the
-        // top-right sample unavailable for the bottom-right 8x8 block: its
-        // top-right neighbor lies in the next MB, which is not decoded yet.
-        // `btr` is derived from the 4x4-block cache; refine it for the 8x8
-        // geometry used by `predict_8x8l`.
-        let btr8 = if blk_y == 0 {
+        // FFmpeg's `topright_samples_available` mask clears bit 10 (the
+        // upper-right 8x8 group's top-right samples) when the top-right MB is
+        // unavailable. In an MBAFF frame-mode pair that MB is decoded later,
+        // while in a progressive frame it is already decoded. `slice_table`
+        // is stamped by `apply_macroblock` only after an MB is decoded, so it
+        // is the same availability signal FFmpeg derives from `topright_type`.
+        let tr_top_y = if ctx.mb_field {
+            mb_y.saturating_sub(2)
+        } else {
+            mb_y.saturating_sub(1)
+        };
+        let tr_available = mb_x + 1 < ctx.mb_width
+            && (if ctx.mb_field { mb_y >= 2 } else { mb_y >= 1 })
+            && ctx.slice_table[(tr_top_y * ctx.mb_width + mb_x + 1) as usize] == ctx.current_slice;
+        // `btr` comes from the 4x4-block cache; refine it for the 8x8
+        // geometry used by `predict_8x8l`. `blk_x`/`blk_y` are pixel offsets,
+        // so the upper-right 8x8 group is at (8, 0).
+        let btr8 = if blk_x == 8 && blk_y == 0 && !tr_available {
+            false
+        } else if blk_y == 0 {
             btr && (blk_x == 0 || mb_x + 1 < ctx.mb_width)
         } else {
             btr && blk_x == 0
