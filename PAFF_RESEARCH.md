@@ -1955,3 +1955,29 @@ already fixed the analogous MBAFF case. A one-line gate was staged but never
 built or verified because the shared build slot was saturated; it was reverted
 as instructed. Next round: build and gate this exact change. Evidence:
 `/tmp/ai-agent/` PAFF fieldmc logs (ephemeral).
+
+## Appendix Z: HCAFF1_HHI_B top-field intra fallback (2026-11-28, no patch)
+
+At HEAD b632d28, with deblocking disabled on both decoders, frame 0 first
+differs at Y(0,27) (Wedo 87 vs FFmpeg 88). Even rows 0..30 are byte-identical;
+odd rows 1..25 match for their first 16 pixels; the difference is confined to
+bottom-field MB(0,0) partition 1 (field rows 13..15).
+
+Entropy and MV are aligned: mb_type 12432 (16x8|L0), mvd [38,3]/[1,0],
+final MV [38,3]/[39,3] match FFmpeg (Appendix X). Wedeo MC parameters
+(dst_y=8, ref_luma_stride=704, ref_luma_height=144, dx=0, dy=3) match FFmpeg
+mc_dir_part (mx=39, my=35, stride 704, pic_height 144), and the first 12 field
+rows of MC output are byte-identical.
+
+The real first error is in the TOP field: frame row 32 has 349/352 differing
+pixels (x=39..54: FFmpeg [92,96,94,...] vs Wedeo [46,52,54,...]). Bottom-field
+rows 13..15 use a 6-tap vertical filter that reads top-field rows 26..36, so
+the bottom-field difference is downstream propagation, not the root cause.
+
+Wedeo source-level trace shows the corresponding top-field intra 8x8 MB has a
+DC prediction sum of 8192 (= 64 x 128), i.e. a full-128 fallback, while FFmpeg
+reconstructs from real neighbour samples around 76..105. This is the only
+measured error location. An instrumented build to pair MC source rows was
+blocked by the shared build lock; no patch was committed.
+Next: pair FFmpeg hl_decode_mb and Wedeo decode_intra8x8 neighbour availability
+for that top-field MB. Evidence: /tmp/ai-agent/w10_frext_no_fix_evidence.md.
