@@ -1894,3 +1894,26 @@ Fix: when `ctx.is_mbaff && ctx.mb_field`, use `mb_y - 2` with availability
 FFmpeg exactly. With deblock off, frame 0 first diff moved (96,0) -> (288,128)
 and differing Y pixels fell 79944 -> 70275; with deblock on, (95,0) ->
 (36,30) and 80609 -> 71193. FRext stays 44/69 with no new timeouts.
+
+---
+
+## Appendix W: MBAFF CABAC measurement pitfall (2026-11-27)
+
+On `FREXT01_JVC_D.264` (MBAFF-only, 352x288, 16 frames) with deblocking off,
+frame 0 first differs at Y(32,0): Wedeo 128 vs FFmpeg 255, 150141 differing
+pixels. Comparing `cabac_state` via gdb: MB(0,0) and MB(1,0) entry differ only
+in ctx70 (an artifact of different `mb_field_decoding_flag` decode timing),
+while MB(1,1) has 33 differing states and MB(2,0) has 109. The true divergence
+is localized at MB(1,0).
+
+An attempted paired bin trace using an FFmpeg gdb breakpoint plus a Wedeo
+out-of-line `get_cabac` breakpoint reported the first difference as FFmpeg
+ctx96 vs Wedeo ctx134. That was a measurement artifact: Wedeo's `RUST_LOG`
+shows MB(0,0) did decode the cat=2 block_idx=0 cbf bin (ctx96), and MB0/MB1
+pixels are byte-identical. LLVM inlining made the Wedeo breakpoint miss bins.
+Do not treat breakpoint-only bin traces as ground truth; use source-level
+temporary `trace!()` probes in Wedeo to pair bins at MB(1,0).
+
+No patch, no commit; the 18-minute cold build did not finish under parallel
+load so the remaining gates were not run. Evidence:
+`/tmp/ai-agent/mbaffcab_no_fix_evidence.md` (ephemeral).
