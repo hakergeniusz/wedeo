@@ -506,3 +506,344 @@ Root cause: `recon.rs` and `mc::inter_pred` still pass `Plane`'s byte view to
 the u16 kernels, and the emulation edge buffers are still `u8`, so high-depth
 samples get truncated. Next step: wire the `Plane::U16` variant through
 reconstruction and MC before removing the gate.
+
+---
+
+## Verified u16 wiring plan (2026-11-28, no patch)
+
+# VP9 high-depth U16 wiring: verification and implementation design
+
+Scope: verification only. No source file was modified. Worktree
+`/home/hakergeniusz/.local/share/opencode/worktree/695063/vp9-highdepth-verify`,
+HEAD `f827688`, tree clean at the end of this review.
+
+## 1. Verified state
+
+### 1.1 Unit tests
+
+`cargo test -p wedeo-codec-vp9` (flock-serialised, low priority, dedicated
+`CARGO_TARGET_DIR=/var/cache/zstd5/wedeo-target-hdverify`) passes:
+
+    test result: ok. 72 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+Only pre-existing workspace manifest warnings (`minifb`, `wedeo-limits`,
+`workspace.package.description/readme`) appear; no VP9 warning or failure.
+
+The 10/12-bit tests are genuine reference comparisons, not self-consistency
+checks:
+
+* `idct.rs:2975-3355` hardcodes literal `expected` arrays for
+  `itxfm_add` / `itxfm_add_lossless` at 4x4/8x8/16x16/32x32, both depths,
+  doc-commented as `FFmpeg-derived reference values (ff_vp9dsp_init_10/12)`.
+  `check_u16_case` (2944-2972) feeds the same prediction ramp
+  `(i * 37 + 100) & mask` that the FFmpeg DSP harness used.
+* `mc.rs:1529-1702` hardcodes literal golden blocks for horizontal, vertical,
+  and 2D 8tap plus compound average and `mc_luma` edge emulation at both
+  depths. Comments (e.g. 1504-1506, 1531, 1558, 1585) identify the FFmpeg
+  `vp9dsp_template.c` reference program as the source. The harness itself is
+  still at `/tmp/ai-agent/vp9_lpf_ref.c` for the loop filter.
+* `loopfilter.rs:1443-1558` hardcodes literal input/expected arrays, commented
+  as a direct copy of `vp9dsp_template.c:1780-1888` instantiated with
+  `pixel = uint16_t`, produced by `/tmp/ai-agent/vp9_lpf_ref.c`.
+* `intra_pred.rs:802-905` uses hand-computed values from the FFmpeg formulas
+  (for example `(128 << (BIT_DEPTH - 8))` and the DC shift sum) rather than
+  saved reference arrays. These exercise u16 width and scaling but are
+  formula-derived, not captured FFmpeg output.
+* `recon.rs:1104-1168` only checks `FrameBuffer` layout and `Plane` variants.
+  There is no test that calls `reconstruct_intra_block`,
+  `reconstruct_inter_block`, or `mc::inter_pred` with a U16 `FrameBuffer`.
+
+### 1.2 Sweep
+
+A fresh 226-vector sweep was run with
+`/tmp/ai-agent/vp9_hdverify_sweep.py` using
+`/var/cache/zstd5/wedeo-target-jvthash/release/wedeo-framecrc`. That binary
+was built from worktree `h264-jvt-hash`, verified to be at exactly `f827688`,
+the same commit as this worktree. Reference was system
+`ffmpeg -v error -threads 1 -bitexact -i FILE -f framecrc -`.
+
+    TOTAL=226 EXACT=216 ZERO=8 DIFF=2 ERR=0
+    DIFF vp90-2-05-resize.ivf frame=3 got=10 ref=10
+    DIFF vp91-2-04-yuv422.webm frame=1 got=10 ref=10
+
+All eight high-depth vectors are `ZERO` (zero emitted frames) and match the
+documented list exactly:
+
+    vp92-2-20-10bit-yuv420.webm
+    vp92-2-20-12bit-yuv420.webm
+    vp93-2-20-10bit-yuv422.webm
+    vp93-2-20-10bit-yuv440.webm
+    vp93-2-20-10bit-yuv444.webm
+    vp93-2-20-12bit-yuv422.webm
+    vp93-2-20-12bit-yuv440.webm
+    vp93-2-20-12bit-yuv444.webm
+
+The only 8-bit mismatches are the two pre-existing known ones (`resize`,
+`yuv422`), so no 8-bit vector regressed. This matches `STATUS.md` and the
+earlier `vp9440c_sweep.log` (216/226, 2 fail, 8 zero, 0 error).
+
+## 2. Root blocker
+
+`decoder.rs:225-232` still returns early for `header.bit_depth != 8`, so all
+high-depth frames are discarded. A temporary experiment that removed the gate
+produced frames but 0/8 exact results (5 wrong first-frame CRC, 3 errors).
+`VP9_GAPS.md:494-508` records the cause: `recon.rs` and `mc::inter_pred`
+still pass `Plane`'s byte view into reconstruction and MC, and MC emulation
+scratch buffers are still `u8`, truncating 10/12-bit samples to their low
+byte.
+
+The low-level kernels are already depth-generic:
+
+* `intra_pred::intra_pred<P: Sample>` (`intra_pred.rs:91-119`)
+* `idct::itxfm_add<P: ItxfmSample>` / `itxfm_add_lossless<P>` (`idct.rs:2377`,
+  `2409`), with `ItxfmSample: Sample` (`2338`) implemented for `u8`/`u16`
+* `mc::McSample` (`mc.rs:38-91`) with `u8`/`u16` impls (`93`, `148`);
+  `emu_edge` (`412`), `mc_luma` (`447`), `mc_chroma` (`514`), `mc_apply`
+  (`612`), `filter_h/v/hv_8tap` (`323`, `340`, `359`), `copy_block` (`376`),
+  `avg_block` (`392`) are all generic
+* `loopfilter::loop_filter_frame` (`loopfilter.rs:1367-1402`) already dispatches
+  to `as_u8_mut()` for 8-bit and `as_u16_mut()` for high depth
+* Output framing (`decoder.rs:203-216`, `562-564`) intentionally uses
+  `as_u8()` with byte line strides (`y_byte_stride`, `uv_byte_stride`),
+  which is correct for 16-bit planar output and needs no change
+
+Therefore the fix is a thin typed-plumbing layer, not a math change.
+
+## 3. Exact functions that still take `&[u8]` on the high-depth path
+
+### recon.rs
+
+* `prepare_intra_edges` (`423-436`): `plane_buf: &[u8]`, `above_buf: &mut [u8]`,
+  `left_buf: &mut [u8]`. Hardcoded padding constants at `500` (`127`), `509`
+  (`127`), `534` (`129`), `536` (`127`), `559` (`129`), `576` (`129`),
+  `583` (`129`). It has no `bit_depth` parameter.
+* `reconstruct_intra_block` (`602-940`): luma reads `&fb.y` at `679` and writes
+  through `&mut fb.y[dst_offset..]` at `700`, `718`, `727`; U reads `&fb.u`
+  at `796` and writes at `815`, `831`, `838`; V reads `&fb.v` at `879` and
+  writes at `898`, `914`, `922`. Scratch `vec![128u8; ...]` / `vec![129u8; ...]`
+  at `641-642` and `762-763`. Boundary check at `788` and `871` uses
+  `fb.u.len()` / `fb.v.len()`, which via `Deref` returns byte length, not
+  sample length.
+* `reconstruct_inter_block` (`950-1098`): residual writes through byte views
+  at `999`, `1002` (Y), `1046`, `1049` (U), `1078`, `1081` (V). It calls
+  `mc::inter_pred` at `959`.
+
+All of these byte views come from `Plane`'s `Deref`/`DerefMut`/`Index`
+implementations (`recon.rs:115-141`), which return `&[u8]` even for `Plane::U16`
+via `as_u8()` (`78-85`). Any `dst_offset` computed in samples indexes the
+wrong element for U16.
+
+### mc.rs
+
+* `inter_pred` (`684-934`): allocates `emu_buf = vec![0u8; 160 * 80]` at `711`;
+  reads `&fb.y` / `&ref0.fb.y` at `721`/`723`, `&fb.u`, `&fb.v`, `&ref0.fb.u`,
+  `&ref0.fb.v` at `772-777`; allocates compound scratch `tmp_y/tmp_u/tmp_v`
+  as `vec![0u8; ...]` at `826-828`; averages through byte views at `864-870`,
+  `917-924`, `925-932`. Ref1 accesses at `847`, `899-901`, `914` are the same
+  problem. Sub-8x8 calls at `716`, `753`, `832`, `876` pass `&mut emu_buf`.
+* `sub8x8_luma_mc` (`1303-1390`): `emu_buf: &mut [u8]`; writes `&mut fb.y[...]`
+  at `1324`, `1347`, `1371`; reads `&ref_frame.fb.y` at `1326`, `1349`, `1373`.
+* `sub8x8_chroma_mc` (`1394-1494`): `emu_buf: &mut [u8]`; writes `fb.u`/`fb.v`
+  byte views at `1413-1414`, `1431-1432`, `1475-1476`; reads ref planes at
+  `1478-1479`.
+* `sub8x8_luma_mc_buf` (`944-1030`): `dst: &mut [u8]`, `emu_buf: &mut [u8]`,
+  ref plane byte views at `968`, `990`, `1013`.
+* `sub8x8_chroma_mc_444` (`1040-1142`): `dst_u/dst_v: &mut [u8]`,
+  `emu_buf: &mut [u8]`, ref planes bound at `1055-1057`.
+* `sub8x8_chroma_mc_440` (`1150-1229`): same shape, ref planes at `1165-1167`.
+* `sub8x8_chroma_mc_buf` (`1235-1300`): `dst_u/dst_v: &mut [u8]`,
+  `emu_buf: &mut [u8]`, ref planes at `1284-1285`.
+
+The `160` emu stride hardcoded at `486`, `494`, `558`, `561`, `566`, `569` is
+in samples, so it stays valid once the buffer element type is widened. The
+scratch capacity `160 * 80` samples also stays sufficient (max luma window
+71 rows).
+
+Not blockers: `refs.rs:50-69` stores the whole `FrameBuffer`, so `RefFrame.fb`
+already carries the `U16` variant; `FrameBuffer::new` (`recon.rs:166-196`)
+allocates `u16` planes at 10/12-bit; `output_pixel_format` is already mapped.
+
+## 4. Recommended line-level design
+
+### 4.1 Add one typed-plane dispatch trait
+
+In `recon.rs`, next to `Plane` (`after line 110`), add:
+
+    pub trait PlaneSample: crate::intra_pred::Sample {
+        fn plane_view(plane: &Plane) -> Option<&[Self]>;
+        fn plane_view_mut(plane: &mut Plane) -> Option<&mut [Self]>;
+    }
+    impl PlaneSample for u8 { ... plane.as_u8() ... plane.as_u8_mut() ... }
+    impl PlaneSample for u16 { ... plane.as_u16() ... plane.as_u16_mut() ... }
+
+This gives every generic helper a safe way to obtain typed slices from both
+the working `FrameBuffer` and each `Arc<RefFrame>` without exposing `Deref`.
+Keep `Deref`/`Index` for output framing only; reconstruction must stop using
+them.
+
+### 4.2 Make `prepare_intra_edges` generic (`recon.rs:423-588`)
+
+New signature:
+
+    fn prepare_intra_edges<P: PlaneSample>(
+        plane_buf: &[P],
+        stride: usize,
+        px: usize, py: usize,
+        frame_w: usize, frame_h: usize,
+        tile_col_start_px: usize,
+        tx_px: usize,
+        above_buf: &mut [P],
+        left_buf: &mut [P],
+        mode: IntraMode,
+        have_right: bool,
+        bit_depth: u8,
+    ) -> IntraMode
+
+Replace only the literal pad values, using FFmpeg `vp9recon.c:153`, `173`,
+`212` (`128 << (bit_depth - 8)`):
+
+    line 500, 509: P::from_i32((128 << (bit_depth - 8)) - 1)
+    line 534:      P::from_i32((128 << (bit_depth - 8)) + 1)   // have_top true
+    line 536:      P::from_i32((128 << (bit_depth - 8)) - 1)
+    line 559, 576, 583: P::from_i32((128 << (bit_depth - 8)) + 1)
+
+All other lines of the function are index arithmetic and stay unchanged.
+
+### 4.3 Split `reconstruct_intra_block` into wrapper + generic impl
+
+Keep the public signature at `602-607`. Replace the body with a match on the
+three `Plane` variants (a frame never mixes variants):
+
+    match (&mut fb.y, &mut fb.u, &mut fb.v) {
+        (Plane::U8(y), Plane::U8(u), Plane::U8(v)) =>
+            reconstruct_intra_impl(y, u, v, fb.y_stride, fb.uv_stride, block, header, tile_col_start),
+        (Plane::U16(y), Plane::U16(u), Plane::U16(v)) =>
+            reconstruct_intra_impl(y, u, v, fb.y_stride, fb.uv_stride, block, header, tile_col_start),
+        _ => return Err(Error::InvalidData), // mixed variants cannot occur
+    }
+
+Define
+
+    fn reconstruct_intra_impl<P: crate::idct::ItxfmSample>(
+        y: &mut [P], u: &mut [P], v: &mut [P],
+        y_stride: usize, uv_stride: usize,
+        block: &BlockInfo, header: &FrameHeader, tile_col_start: usize,
+    )
+
+which is the current body with these substitutions:
+
+* `641-642`, `762-763`: scratch typed `vec![P::from_i32(128 << (bit_depth-8)); ...]`
+  and `vec![P::from_i32((128 << (bit_depth-8)) + 1); ...]`. Same constants as
+  4.2, matching FFmpeg's `check_intra_mode` initial values.
+* `679`, `796`, `879`: pass `&y[...]` / `&u[...]` / `&v[...]` (whole typed
+  slice) to `prepare_intra_edges`, plus the new `bit_depth` argument.
+* `700`, `718`, `727`, `815`, `831`, `838`, `898`, `914`, `922`: pass
+  `&mut y[dst_offset..]`, `&mut u[dst_offset..]`, `&mut v[dst_offset..]`
+  where `dst_offset` stays in samples.
+* `788`, `871`: compare `dst_end` against `u.len()` and `v.len()` (samples),
+  not `fb.u.len()` / `fb.v.len()` (bytes).
+* Calls to `intra_pred` (`699`, `814`, `897`) and `itxfm_add` /
+  `itxfm_add_lossless` (`717`, `726`, `830`, `837`, `913`, `921`) need no
+  change other than the slice type, since both are already generic.
+
+### 4.4 Make `mc::inter_pred` generic (`mc.rs:684-934`)
+
+Change to:
+
+    pub fn inter_pred<P: McPlane>(
+        fb: &mut FrameBuffer,
+        block: &BlockInfo,
+        ref_slots: &[Option<Arc<RefFrame>>; 8],
+        ref_idx: &[u8; 3],
+        ss_h: bool, ss_v: bool,
+    )
+
+where `McPlane: McSample + PlaneSample` (defined in `mc.rs` or reuse
+`recon::PlaneSample` plus the existing `McSample` bound). Add a thin public
+wrapper that dispatches on `fb.y` and calls `inter_pred_impl::<u8>` or
+`inter_pred_impl::<u16>`. Inside the impl:
+
+* `711`: `let mut emu_buf = vec![P::default_or_zero(); 160 * 80]`; use
+  `P::from_i32(0)` from `Sample` (no `Default` bound needed), i.e.
+  `vec![P::from_i32(0); 160 * 80]`.
+* `721`, `772-773`, `864`, `918`, `926`: obtain dst slices with
+  `P::plane_view_mut(&mut fb.y)` etc. before taking the subslice at
+  `dst_off` / `u_off`. Use disjoint field borrows; never borrow all of `fb`
+  mutably and a ref frame through `fb`.
+* `723`, `775-777`, `847`, `899-901`, `914`, and every `&ref_frame.fb.y/u/v`
+  in the sub-8x8 helpers: replace with `P::plane_view(&ref.fb.y).unwrap()`.
+  Since all frames in a VP9 stream share bit depth, a mismatch is invalid;
+  return early (skip) rather than panic if the variant differs.
+* `826-828`: allocate scratch as `vec![P::from_i32(0); fb.y_stride * avg_bh]`
+  and the two UV buffers with `fb.uv_stride * avg_uv_bh`. Strides remain in
+  samples.
+* `716`, `753`, `832`, `876`: pass the widened `&mut emu_buf`.
+
+### 4.5 Generalise the seven sub-8x8 MC helpers
+
+For each of `sub8x8_luma_mc_buf` (`944`), `sub8x8_chroma_mc_444` (`1040`),
+`sub8x8_chroma_mc_440` (`1150`), `sub8x8_chroma_mc_buf` (`1235`),
+`sub8x8_luma_mc` (`1303`), `sub8x8_chroma_mc` (`1394`), and the
+`inter_pred_impl` call sites, change:
+
+    &mut [u8]  ->  &mut [P]
+    &[u8]      ->  &[P]
+    emu_buf: &mut [u8]  ->  emu_buf: &mut [P]
+
+with `P: McSample`. All index math and MV averaging (`rounded_div_mv_x2/x4`,
+`652-670`) are sample-count based and need no change. `mc_luma` / `mc_chroma`
+already accept `P`, so their call sites only need typed ref/dst slices.
+
+### 4.6 Make `reconstruct_inter_block` generic similarly
+
+Keep the public signature at `950-955`, dispatch on the `Plane` triple, and
+delegate to:
+
+    fn reconstruct_inter_impl<P: ItxfmSample + McSample>(
+        y: &mut [P], u: &mut [P], v: &mut [P],
+        fb: &FrameBuffer, block: &BlockInfo, header: &FrameHeader,
+        ref_slots: &[Option<Arc<RefFrame>>; 8],
+    )
+
+Pass the typed slices to `mc::inter_pred` (or its impl) and use
+`&mut y[dst_offset..]`, `&mut u[dst_offset..]`, `&mut v[dst_offset..]` for the
+residual `itxfm_add` calls at `999-1009`, `1046-1056`, `1078-1088`.
+
+### 4.7 Remove the gate last
+
+Only after 4.2-4.6 are unit-tested and the sweep shows high-depth vectors
+producing frames, delete `decoder.rs:225-232`. Then rerun:
+
+    cargo test -p wedeo-codec-vp9
+    cargo clippy -p wedeo-codec-vp9 --all-targets -- -D warnings
+    python3 /tmp/ai-agent/vp9_hdverify_sweep.py <newly built wedeo-framecrc>
+
+Acceptance: sweep stays at 216/226 for 8-bit with the same two known diffs,
+and high-depth vectors become EXACT or produce a small, measurable first
+difference. Expect frame byte counts to double (8-bit 21600 vs high-depth
+43200 for 4:2:0), which the existing `as_u8()` output path and byte line
+strides already handle.
+
+## 5. Known risks after wiring
+
+* `VP9_GAPS.md:503-504` gate-removal experiment still had 3 error cases after
+  the byte truncation was visible; after typed plumbing these need rechecking.
+* FFmpeg `vp9recon.c:105-117` uses pre-loopfilter `s->intra_pred_data[]` at
+  superblock row boundaries. Wedeo's `prepare_intra_edges` always reads
+  `plane_buf[(py-1)*stride + px]`. This is an existing 8-bit divergence
+  candidate that may also limit high-depth parity; it is outside this wiring.
+* `intra_pred::Sample::from_i32` does not clip. The scaled pad constants are
+  within range by construction, so no extra clipping is needed.
+* Mixed `Plane` variants in one frame or between current/reference frames
+  cannot occur in conformant streams; handle defensively with early return.
+
+## 6. Effort estimate for one 20-minute round
+
+The mechanical edits above are roughly 10 targeted functions and about
+150-220 changed lines, with no new algorithm. A competent implementer with
+this document can finish steps 4.1-4.6 in one 20-minute editing round, then
+compile and fix borrow/type errors in a second round. Step 4.7 (gate removal)
+plus a full sweep and parity triage will not fit in that same 20 minutes,
+because the gate experiment previously needed ground-truth extraction when
+0/8 vectors matched. Budget: one round for the typing refactor, one round for
+compilation/unit tests, one round for gate removal and sweep triage.
